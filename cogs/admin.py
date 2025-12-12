@@ -179,7 +179,7 @@ class Admin(commands.Cog):
     async def person_check_mc(self, ctx: commands.Context, username_or_uuid: str):
         """Check a Minecraft account's linked person and all associated accounts"""
         player = await MinecraftAccount.filter(
-            Q(uuid=username_or_uuid) | Q(username=username_or_uuid)
+            Q(uuid=username_or_uuid) | Q(username__iexact=username_or_uuid)
         ).prefetch_related('person').first()
         
         if player is None:

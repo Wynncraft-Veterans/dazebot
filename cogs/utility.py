@@ -91,6 +91,13 @@ class Utility(commands.Cog):
     @commands.hybrid_command(name='findprofer')
     async def findprofer(self, ctx: commands.Context):
         """Searches for guild members able to craft your item."""
+        # Use the old mess until a proper implementation is available.
+        cmd = self.bot.get_command('temporary_findprofer')
+        if cmd:
+            await ctx.invoke(cmd)
+            return
+
+        # Otherwise
         view = ProferView()
         await ctx.send("Please select what you need your profer to help you with:", view=view)
 

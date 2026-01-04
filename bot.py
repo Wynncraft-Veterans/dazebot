@@ -16,7 +16,22 @@ class Config:
     GUILD = 1313769181321236490
     GUILD_DEAD_ALERT_CHANNEL = 1401676479300898939
     GUILD_FULL_ALERT_CHANNEL = 1401676479300898939
-    GUILD_DEAD_ALERT_ROLE  = 1402295013169172500
+
+    @property
+    def GUILD_DEAD_ALERT_ROLE(self):
+        now_utc = datetime.now(timezone.utc)
+        hour = now_utc.hour
+
+        # Night (wraps midnight): 22..23 and 0..5
+        if hour > 21 or hour <= 5:
+            return 1402295013169172500  # Americas
+        # Afternoon: 14..21
+        elif 13 < hour <= 21:
+            return 1436108975132119221  # Europe
+        # Morning: 6..13
+        else:
+            return 1436109140195020892  # Asia
+
     GUILD_FULL_ALERT_ROLE = 1313778812361904188
     GUILD_DEAD_WHEN = 2
     GUILD_FULL_WHEN = 92 - 2
@@ -27,7 +42,7 @@ class Config:
 class DevConfig(Config):
     GUILD = 1407388408472666243
     GUILD_DEAD_ALERT_CHANNEL = GUILD_FULL_ALERT_CHANNEL= 1407388410393399494
-    GUILD_DEAD_ALERT_ROLE = GUILD_FULL_ALERT_ROLE = 1409300773439012874
+    GUILD_FULL_ALERT_ROLE = 1409300773439012874
     GUILD_DEAD_WHEN = 10
     GUILD_FULL_WHEN = 10
     
@@ -39,7 +54,7 @@ class NOSQL:
 
 
 class Bot(commands.Bot):
-    config: type[Config] = Config
+    config: Config = Config()
     nosql: NOSQL
 
     def __init__(self, *args, **kwargs):

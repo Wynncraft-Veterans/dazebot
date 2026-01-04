@@ -73,7 +73,7 @@ class Admin(commands.Cog):
     
     @commands.hybrid_command(name='say')
     @commands.has_permissions(administrator=True)
-    async def say(self, ctx: commands.Context, msg: str):
+    async def say(self, ctx: commands.Context, *, msg: str):
         if msg:
             await ctx.send(msg)
         else:

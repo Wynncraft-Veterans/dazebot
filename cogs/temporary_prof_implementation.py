@@ -188,14 +188,57 @@ class ProfSelectorView(discord.ui.View):
         self.add_item(ProfSelection())
 
 class TemporaryProfCog(commands.Cog):
+    # Ratelimit the shit out of this
+    MAX_USES = 2
+    WINDOW_SECONDS = 3600
+
     def __init__(self, bot: Bot):
         self.bot = bot
+        # Yuck. All this needs to go
+        self._findprofer_usage: dict[int, list[float]] = {}
+        self._findprofer_lock = asyncio.Lock()
 
     @commands.hybrid_command(name='temporary_findprofer')
     async def temporary_findprofer(self, ctx: commands.Context) -> None:
-        """Temporary implementation of the profer finder, based on the legacy implementation."""
+        """Temporary implementation of the profer finder, based on the legacy code."""
+        server_key = ctx.guild.id if ctx.guild else ctx.author.id
+        now = asyncio.get_event_loop().time()
+
+        async with self._findprofer_lock:
+            usages = self._findprofer_usage.get(server_key, [])
+            window_start = now - self.WINDOW_SECONDS
+            usages = [t for t in usages if t > window_start]
+
+            if len(usages) >= self.MAX_USES:
+                retry_after = int(usages[0] + self.WINDOW_SECONDS - now)
+                minutes = max(1, (retry_after + 59) // 60)
+                embed = discord.Embed(
+                    title="Temporary Profer Finder — Rate limited",
+                    description=(
+                        "Using a terrible temporary implementation of this system.\n"
+                        "This will probably be very slow.\n\n"
+                        f"⚠️ This command has been used {len(usages)} times in the last hour. "
+                        f"Please try again in about {minutes} minute(s)."
+                    ),
+                    color=discord.Color.red(),
+                )
+                await ctx.send(embed=embed)
+                return
+
+            usages.append(now)
+            self._findprofer_usage[server_key] = usages
+
+        warning_embed = discord.Embed(
+            title="Temporary Profer Finder — Warning",
+            description=(
+                "Using a terrible temporary implementation of this system.\n"
+                "This will probably be very slow."
+            ),
+            color=discord.Color.red(),
+        )
+
         view = ProfSelectorView()
-        await ctx.send("Please make your choice", view=view)
+        await ctx.send(embed=warning_embed, content="Please make your choice", view=view)
 
 async def setup(bot: Bot):
     await bot.add_cog(TemporaryProfCog(bot))

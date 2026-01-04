@@ -81,7 +81,7 @@ class Utility(commands.Cog):
 
     def __init__(self, bot: Bot):
         self.bot = bot
-        logger.info("Started Utility")
+        logger.info("Initialized Utility")
 
     @commands.hybrid_command(name='findprofer')
     async def findprofer(self, ctx: commands.Context):

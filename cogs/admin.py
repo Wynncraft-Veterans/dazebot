@@ -86,6 +86,7 @@ class Admin(commands.Cog):
             await ctx.send("Use subcommands: link, unlink, check")
 
     @person.command(name="link")
+    @commands.has_permissions(manage_messages=True)
     async def person_link(self, ctx: commands.Context, user: discord.Member, username_or_uuid: str):
         """Link a Discord user to a Minecraft account"""
         player = await MinecraftAccount.filter(
@@ -132,6 +133,7 @@ class Admin(commands.Cog):
             await ctx.send("Use: unlink mc <username> or unlink disc <user>")
 
     @person_unlink.command(name="mc")
+    @commands.has_permissions(manage_messages=True)
     async def person_unlink_mc(self, ctx: commands.Context, username_or_uuid: str):
         """Unlink a Minecraft account from its person"""
         player = await MinecraftAccount.filter(
@@ -151,6 +153,7 @@ class Admin(commands.Cog):
         await ctx.reply(f"Unlinked Minecraft account `{player.username}` from person.")
 
     @person_unlink.command(name="disc")
+    @commands.has_permissions(manage_messages=True)
     async def person_unlink_disc(self, ctx: commands.Context, user: discord.Member):
         """Unlink a Discord account from its person"""
         discord_acc = await DiscordAccount.filter(
@@ -176,6 +179,7 @@ class Admin(commands.Cog):
             await ctx.send("Use: check mc <username> or check disc <user>")
 
     @person_check.command(name="mc")
+    @commands.has_permissions(manage_messages=True)
     async def person_check_mc(self, ctx: commands.Context, username_or_uuid: str):
         """Check a Minecraft account's linked person and all associated accounts"""
         player = await MinecraftAccount.filter(
@@ -228,6 +232,7 @@ class Admin(commands.Cog):
         await ctx.reply(embed=embed)
 
     @person_check.command(name="disc")
+    @commands.has_permissions(manage_messages=True)
     async def person_check_disc(self, ctx: commands.Context, user: discord.Member):
         """Check a Discord account's linked person and all associated accounts"""
         discord_acc = await DiscordAccount.filter(

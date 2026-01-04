@@ -28,6 +28,7 @@ class WeeklyEvent(commands.Cog):
             await ctx.send("Use: add, set, or leaderboard")
     
     @score.command(name="set")
+    @commands.has_permissions(manage_messages=True)
     async def score_set(self, ctx: commands.Context, user: discord.Member, week: WeekRange, value: ValueRange):
         """Set user's points"""
         logger.debug(f"Setting {user.id=} score in {week=} to {value=}")
@@ -52,6 +53,7 @@ class WeeklyEvent(commands.Cog):
 
 
     @score.command(name="add")
+    @commands.has_permissions(manage_messages=True)
     async def score_add(self, ctx, user: discord.Member, week: WeekRange, value: ValueRange):
         """Add points to a user"""
         
@@ -118,6 +120,7 @@ class WeeklyEvent(commands.Cog):
             await ctx.send(f"No one has any points for week {week}")
     
     @commands.hybrid_command(name="count")
+    @commands.has_permissions(manage_messages=True)
     async def count_reactions(self, ctx: commands.Context, channel: discord.ForumChannel, override_emoji: str | None = None):
         
         emoji = next(e for e in (channel.default_reaction_emoji, override_emoji, '✅') if e is not None)

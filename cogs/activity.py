@@ -120,6 +120,7 @@ class Activity(commands.Cog):
         await self.check_guild()
     
     @commands.hybrid_command(name='purgelist')
+    @commands.has_permissions(manage_messages=True)
     async def purgelist(self, ctx: commands.Context):
         absent_guild_members = await MinecraftAccount.filter(
             guild="Returners",
@@ -140,6 +141,7 @@ class Activity(commands.Cog):
         await ctx.send(embed=embeds[0], view=Paginator(embeds))
 
     @commands.hybrid_command(name='emergencypurgelist')
+    @commands.has_permissions(administrator=True)
     async def emergencypurgelist(self, ctx: commands.Context, days: int):
         """List guild members who have not been seen for at least `days` days."""
         if days <= 0:
@@ -166,6 +168,10 @@ class Activity(commands.Cog):
         await ctx.send(embed=embeds[0], view=Paginator(embeds))
 
     @commands.hybrid_command(name='shout')
+    @commands.check_any(
+        commands.has_permissions(manage_messages=True),
+        commands.has_any_role('1402295013169172500', '1436108975132119221', '1436109140195020892')
+    )
     async def shout(self, ctx: commands.Context):
         discord_acc, _ = await DiscordAccount.get_or_create(
             disc_uuid = str(ctx.author.id)
@@ -176,6 +182,10 @@ class Activity(commands.Cog):
         await ctx.send(f"Thank you for helping the guild, {ctx.author.mention}!\nYour shout has been recorded.")
         
     @commands.hybrid_command(name='last_shout')
+    @commands.check_any(
+        commands.has_permissions(manage_messages=True),
+        commands.has_any_role('1402295013169172500', '1436108975132119221', '1436109140195020892')
+    )
     async def last_shout(self, ctx: commands.Context):
         shouts = await Shout.all().order_by('-created_at').limit(3).prefetch_related('shouter')
         lines = []
@@ -190,6 +200,10 @@ class Activity(commands.Cog):
             await ctx.send("There have been no recorded shouts.")
 
     @commands.hybrid_command(name='shouterboard')
+    @commands.check_any(
+        commands.has_permissions(manage_messages=True),
+        commands.has_any_role('1402295013169172500', '1436108975132119221', '1436109140195020892')
+    )
     async def shouterboard(self, ctx: commands.Context):
         from tortoise.functions import Count
         
@@ -217,6 +231,7 @@ class Activity(commands.Cog):
             await ctx.send("No shouts recorded yet.")
     
     @commands.hybrid_command(name='last_online')
+    @commands.has_permissions(manage_messages=True)
     async def last_online(self, ctx: commands.Context, username_or_uuid: str):
         try:
             player = await MinecraftAccount.get(

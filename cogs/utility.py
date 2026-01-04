@@ -48,6 +48,11 @@ class ProferSelect(discord.ui.Select):
             description = 'Not yet reimplemented!',
             color = discord.Color.yellow()
         )
+        await interaction.response.send_message(embed=embed)
+        try:
+            await interaction.message.edit(view=None)
+        except Exception:
+            pass
 #            if onlineVoidProfers or onlineDernicProfers:
 #                resultMessage += "```Online members:```\n"
 #                if onlineDernicProfers:

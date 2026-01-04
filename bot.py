@@ -19,7 +19,7 @@ class Config:
     GUILD_DEAD_ALERT_ROLE  = 1402295013169172500
     GUILD_FULL_ALERT_ROLE = 1313778812361904188
     GUILD_DEAD_WHEN = 2
-    GUILD_FULL_WHEN = 150 - 1
+    GUILD_FULL_WHEN = 92 - 2
     GUILD_DEAD_ALERT_DELTA = timedelta(hours=4)
     GUILD_FULL_ALERT_DELTA = timedelta(hours=8)
 
@@ -39,7 +39,7 @@ class NOSQL:
 
 
 class Bot(commands.Bot):
-    config: type[Config] = DevConfig
+    config: type[Config] = Config
     nosql: NOSQL
 
     def __init__(self, *args, **kwargs):

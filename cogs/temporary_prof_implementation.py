@@ -43,9 +43,12 @@ class ProfSelection(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         embed = discord.Embed(
-            title="Profer list",
-            description="Compiling a list of profers able to craft your item.",
-            color=discord.Color.blurple(),
+            title="Temporary Profer Finder — Warning",
+            description=(
+                "Using a terrible temporary implementation of this system.\n"
+                "This will probably be very slow."
+            ),
+            color=discord.Color.red(),
         )
         # remove view and edit original message
         await interaction.response.edit_message(embed=embed, content=None, view=None)

@@ -22,7 +22,87 @@ def slugify(text: str) -> str:
     return text
 
 
-class Documentation(commands.Cog, name="documentation"):
+def html_to_markdown(html: str) -> str:
+    """Convert a small subset of HTML to Markdown preserving formatting."""
+    # This was plucked from somewhere and is barely tested. Hopefully it works.
+    if not html:
+        return ""
+
+    s = html
+
+    # Normalize newlines
+    s = s.replace('\r\n', '\n').replace('\r', '\n')
+
+    # Pre/code blocks
+    def _repl_pre(m):
+        inner = m.group(1)
+        # Strip surrounding <code> if any
+        inner = re.sub(r"^\s*<code[^>]*>(.*)</code>\s*$", r"\1", inner, flags=re.I | re.S)
+        return "\n```\n" + inner.strip() + "\n```\n"
+
+    s = re.sub(r"<pre[^>]*>(.*?)</pre>", _repl_pre, s, flags=re.I | re.S)
+
+    # Inline code
+    s = re.sub(r"<code[^>]*>(.*?)</code>", lambda m: f"`{m.group(1).strip()}`", s, flags=re.I | re.S)
+
+    # Headings
+    for i in range(1, 7):
+        s = re.sub(rf"<h{i}[^>]*>(.*?)</h{i}>", lambda m, i=i: "\n" + ("#" * i) + " " + re.sub(r"<[^>]+>", "", m.group(1)).strip() + "\n\n", s, flags=re.I | re.S)
+
+    # Links
+    s = re.sub(r"<a[^>]*href=[\'\"](.*?)[\'\"][^>]*>(.*?)</a>", lambda m: f"[{re.sub(r'<[^>]+>', '', m.group(2)).strip()}]({m.group(1)})", s, flags=re.I | re.S)
+
+    # Images
+    s = re.sub(r"<img[^>]*src=[\'\"](.*?)[\'\"][^>]*alt=[\'\"](.*?)[\'\"][^>]*>", lambda m: f"![{m.group(2)}]({m.group(1)})", s, flags=re.I | re.S)
+    s = re.sub(r"<img[^>]*src=[\'\"](.*?)[\'\"][^>]*>", lambda m: f"![]({m.group(1)})", s, flags=re.I | re.S)
+
+    # Bold / strong
+    s = re.sub(r"<(b|strong)[^>]*>(.*?)</\1>", lambda m: f"**{re.sub(r'<[^>]+>', '', m.group(2)).strip()}**", s, flags=re.I | re.S)
+
+    # Italic / em
+    s = re.sub(r"<(i|em)[^>]*>(.*?)</\1>", lambda m: f"*{re.sub(r'<[^>]+>', '', m.group(2)).strip()}*", s, flags=re.I | re.S)
+
+    # Blockquotes
+    s = re.sub(r"<blockquote[^>]*>(.*?)</blockquote>", lambda m: "\n" + "\n".join(["> " + re.sub(r'<[^>]+>', '', line).strip() for line in m.group(1).strip().splitlines()]) + "\n\n", s, flags=re.I | re.S)
+
+    # Lists
+    def _li_to_dash(m):
+        items = re.findall(r"<li[^>]*>(.*?)</li>", m.group(1), flags=re.I | re.S)
+        out = []
+        for it in items:
+            it_text = re.sub(r"<[^>]+>", "", it).strip()
+            out.append("- " + it_text)
+        return "\n" + "\n".join(out) + "\n\n"
+
+    s = re.sub(r"<ul[^>]*>(.*?)</ul>", _li_to_dash, s, flags=re.I | re.S)
+
+    # Ordered lists (simple)
+    def _ol_to_num(m):
+        items = re.findall(r"<li[^>]*>(.*?)</li>", m.group(1), flags=re.I | re.S)
+        out = []
+        for idx, it in enumerate(items, 1):
+            it_text = re.sub(r"<[^>]+>", "", it).strip()
+            out.append(f"{idx}. " + it_text)
+        return "\n" + "\n".join(out) + "\n\n"
+
+    s = re.sub(r"<ol[^>]*>(.*?)</ol>", _ol_to_num, s, flags=re.I | re.S)
+
+    # Paragraphs -> double newline
+    s = re.sub(r"<p[^>]*>(.*?)</p>", lambda m: "\n" + re.sub(r"<[^>]+>", "", m.group(1)).strip() + "\n\n", s, flags=re.I | re.S)
+
+    # Remove remaining tags
+    s = re.sub(r"<[^>]+>", "", s)
+
+    # Unescape HTML entities
+    s = unescape(s)
+
+    # Normalize whitespace and trim
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
+class Documentation(commands.Cog, name="documentation"): 
     def __init__(self, bot) -> None:
         self.bot = bot
 
@@ -73,18 +153,18 @@ class Documentation(commands.Cog, name="documentation"):
                     if m:
                         heading_html = m.group(1)
                         content_html = m.group(2)
-                        # Strip tags and shit
+                        # Convert HTML to Markdown while preserving formatting
                         combined = heading_html + "\n" + content_html
                         # Trim everything above the "Published <date>" header if present
                         pub_m = re.search(r"Published\s*.*?\d{4}", combined, re.I | re.S)
                         if pub_m:
                             combined = combined[pub_m.start():]
-                        clean = unescape(re.sub(r"<[^>]+>", "", combined)).strip()
-                        if not clean:
-                            clean = "(No text found.)"
+                        md = html_to_markdown(combined).strip()
+                        if not md:
+                            md = "(No text found.)"
 
                         title = f"{section}/{topic}#{slug}"
-                        await self._send_content(ctx, title, clean)
+                        await self._send_content(ctx, title, md)
                         found = True
                         break
                     else:
@@ -111,10 +191,10 @@ class Documentation(commands.Cog, name="documentation"):
                     # Limit to paragraphs, assuming I didn't write spans on the article. I may have.
                     p_m = re.search(r"<p[^>]*>(.*?)</p>", body, re.I | re.S)
                     if p_m:
-                        excerpt = unescape(re.sub(r"<[^>]+>", "", p_m.group(1))).strip()
+                        excerpt = html_to_markdown(p_m.group(1)).strip()
                     else:
                         # Fallback: if I did, this might work
-                        cleaned_body = unescape(re.sub(r"<[^>]+>", "", body)).strip()
+                        cleaned_body = html_to_markdown(body).strip()
                         excerpt = cleaned_body[:800]
 
                     if not excerpt:
@@ -141,8 +221,9 @@ class Documentation(commands.Cog, name="documentation"):
         file_bytes = content.encode("utf-8")
         file_obj = io.BytesIO(file_bytes)
         file_obj.seek(0)
-        discord_file = discord.File(fp=file_obj, filename=f"{title.replace('/', '_')}.txt")
-        await ctx.send(content=f"Output too long; attached as a file: {title}", file=discord_file)
+        filename = f"{title.replace('/', '_')}.md"
+        discord_file = discord.File(fp=file_obj, filename=filename)
+        await ctx.send(content=f"Output too long; attached as a markdown file: {filename}", file=discord_file)
 
 
 async def setup(bot) -> None:

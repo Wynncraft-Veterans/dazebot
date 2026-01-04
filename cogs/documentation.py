@@ -1,0 +1,141 @@
+"""
+Documentation lookup commands.
+"""
+import re
+import io
+import aiohttp
+import discord
+from html import unescape
+from discord.ext import commands
+from discord.ext.commands import Context
+
+ALLOWED_CHANNEL = 1313786489112494080
+SECTIONS = ["guides", "guild", "major-changes"]
+
+
+def slugify(text: str) -> str:
+    """Mimic astro formatting."""
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = text.strip("-")
+    text = re.sub(r"-+", "-", text)
+    return text
+
+
+class Documentation(commands.Cog, name="documentation"):
+    def __init__(self, bot) -> None:
+        self.bot = bot
+
+    @commands.hybrid_command(name="docs", description="Fetch docs from wynnvets.org")
+    async def docs(self, ctx: Context, topic: str, *, subject: str = None) -> None:
+        """
+        Fetch documentation for a given topic and an optional heading.
+
+        Usage: docs <topic> [heading]
+        The command will try all doc sections; at the time of implementation these are `guides`, `guild`, then `major-changes`.
+        """
+        # Allow this to be used in the bot commands channel, or by staff
+        has_delete_perm = getattr(ctx.author, "guild_permissions", None)
+        if not (ctx.channel.id == ALLOWED_CHANNEL or (has_delete_perm and has_delete_perm.manage_messages)):
+            await ctx.send("You don't have permission to use this command here.")
+            return
+
+        # Prepare subject slug
+        slug = slugify(subject) if subject else None
+
+        # This is probably a terrible implementation.
+        async with aiohttp.ClientSession() as session:
+            found = False
+            for section in SECTIONS:
+                url = f"https://wynnvets.org/docs/{section}/{topic}/"
+                try:
+                    async with session.get(url) as resp:
+                        if resp.status == 404:
+                            # Try next section
+                            continue
+                        if resp.status != 200:
+                            await ctx.send(f"Error fetching a doc (HTTP {resp.status}) for {section}/{topic}.")
+                            return
+                        text = await resp.text()
+                except Exception as exc:
+                    await ctx.send(f"Error: {exc}")
+                    return
+
+                # If a subject slug is given, try to extract that anchored section
+                if slug:
+                    # Why did I decide to do this...
+                    # Shit regex to match <h1..h6 ... id="slug" ...>Heading</hX> followed by content until next <h[1-6]
+                    pattern = re.compile(
+                        rf"(<h[1-6][^>]*id=['\"]{re.escape(slug)}['\"][^>]*>.*?</h[1-6]>)(.*?)(?=<h[1-6]|$)",
+                        re.I | re.S,
+                    )
+                    m = pattern.search(text)
+                    if m:
+                        heading_html = m.group(1)
+                        content_html = m.group(2)
+                        # Strip tags and shit
+                        combined = heading_html + "\n" + content_html
+                        clean = unescape(re.sub(r"<[^>]+>", "", combined)).strip()
+                        if not clean:
+                            clean = "(No text found.)"
+
+                        title = f"{section}/{topic}#{slug}"
+                        await self._send_content(ctx, title, clean)
+                        found = True
+                        break
+                    else:
+                        continue
+                else:
+                    # No title = use top
+                    title_m = re.search(r"<title>(.*?)</title>", text, re.I | re.S)
+                    if title_m:
+                        page_title = unescape(re.sub(r"<[^>]+>", "", title_m.group(1))).strip()
+                    else:
+                        h1_m = re.search(r"<h1[^>]*>(.*?)</h1>", text, re.I | re.S)
+                        page_title = unescape(re.sub(r"<[^>]+>", "", h1_m.group(1))).strip() if h1_m else f"{section}/{topic}"
+
+                    # Get first 800 characters (discord limit)
+                    body_m = re.search(r"<body[^>]*>(.*?)</body>", text, re.I | re.S)
+                    body = body_m.group(1) if body_m else text
+                    # So much shit to get rid of.
+                    body = re.sub(r"<script.*?>.*?</script>", "", body, flags=re.I | re.S)
+                    body = re.sub(r"<style.*?>.*?</style>", "", body, flags=re.I | re.S)
+                    # Limit to paragraphs, assuming I didn't write spans on the article. I may have.
+                    p_m = re.search(r"<p[^>]*>(.*?)</p>", body, re.I | re.S)
+                    if p_m:
+                        excerpt = unescape(re.sub(r"<[^>]+>", "", p_m.group(1))).strip()
+                    else:
+                        # Fallback: if I did, this might work
+                        cleaned_body = unescape(re.sub(r"<[^>]+>", "", body)).strip()
+                        excerpt = cleaned_body[:800]
+
+                    if not excerpt:
+                        excerpt = "(???)"
+
+                    title = f"{section}/{topic}"
+                    await self._send_content(ctx, title, excerpt)
+                    found = True
+                    break
+
+            if not found:
+                await ctx.send("You probably typo'd the slug.")
+
+    async def _send_content(self, ctx: Context, title: str, content: str) -> None:
+        """If short enough, embed, otherwise put this as a file."""
+        # Normal
+        max_embed = 4000
+        if len(content) <= max_embed:
+            embed = discord.Embed(title=title, description=content, color=discord.Color.blurple())
+            await ctx.send(embed=embed)
+            return
+
+        # This is stupid
+        file_bytes = content.encode("utf-8")
+        file_obj = io.BytesIO(file_bytes)
+        file_obj.seek(0)
+        discord_file = discord.File(fp=file_obj, filename=f"{title.replace('/', '_')}.txt")
+        await ctx.send(content=f"Output too long; attached as a file: {title}", file=discord_file)
+
+
+async def setup(bot) -> None:
+    await bot.add_cog(Documentation(bot))

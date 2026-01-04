@@ -139,6 +139,32 @@ class Activity(commands.Cog):
         embeds = from_lines('Purgelist', lines, 10, logger)
         await ctx.send(embed=embeds[0], view=Paginator(embeds))
 
+    @commands.hybrid_command(name='emergencypurgelist')
+    async def emergencypurgelist(self, ctx: commands.Context, days: int):
+        """List guild members who have not been seen for at least `days` days."""
+        if days <= 0:
+            await ctx.send("Please provide a positive number of days.")
+            return
+
+        cutoff = datetime.now() - timedelta(days=days)
+        absent_guild_members = await MinecraftAccount.filter(
+            guild="Returners",
+            last_online__lt=cutoff
+        ).order_by('-last_online')
+
+        if not absent_guild_members:
+            await ctx.send(f"No members have been away for more than {days} days.")
+            return
+
+        logger.info([m.last_online.tzinfo for m in absent_guild_members])
+        logger.info(datetime.now().tzinfo)
+
+        lines = [f"- `{m.username}` has been away for {(datetime.now(timezone.utc) - m.last_online).days} days."
+            for m in reversed(absent_guild_members)]
+        
+        embeds = from_lines(f'Emergency Purgelist ({days} days)', lines, 10, logger)
+        await ctx.send(embed=embeds[0], view=Paginator(embeds))
+
     @commands.hybrid_command(name='shout')
     async def shout(self, ctx: commands.Context):
         discord_acc, _ = await DiscordAccount.get_or_create(

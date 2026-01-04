@@ -79,6 +79,17 @@ class Admin(commands.Cog):
         else:
             await ctx.send("I cant repeat an empty message you dummy 😡😡😡")
     
+    @commands.hybrid_command(name='set_shout_count')
+    @commands.has_permissions(administrator=True)
+    async def set_shout_count(self, ctx: commands.Context, user: discord.Member, count: int):
+        """Forcefully set a user's shout_count (replaces the existing value)."""
+        discord_acc, _ = await DiscordAccount.get_or_create(
+            disc_uuid=str(user.id),
+        )
+        discord_acc.shout_count = count
+        await discord_acc.save()
+        await ctx.reply(f"Set shout_count for {user.mention} to {count}")
+    
     @commands.hybrid_group(name="person")
     async def person(self, ctx: commands.Context):
         """Manage person accounts linking Minecraft and Discord"""

@@ -36,6 +36,7 @@ class DiscordAccount(Model):
         on_delete=fields.SET_NULL
     )
     disc_uuid = fields.CharField(max_length=255, unique=True)
+    shout_count = fields.IntField(default=0)
     
     class Meta:
         table = "discord_accounts"

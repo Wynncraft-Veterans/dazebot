@@ -112,7 +112,7 @@ class Activity(commands.Cog):
             description = '__**The guild is full!**__\nA chief needs to kick some people!',
             color = discord.Color.blurple()
         )
-        await channel.send(content=f"<@&{self.bot.config.GUILD_FULL_ALERT_ROLE}>", embed=embed, allowed_mentions=discord.AllowedMentions(roles=True))
+        await channel.send(embed=embed)
 
     @commands.hybrid_command(name='force_check')
     @commands.has_permissions(administrator=True)

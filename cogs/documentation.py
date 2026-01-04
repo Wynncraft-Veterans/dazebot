@@ -75,6 +75,10 @@ class Documentation(commands.Cog, name="documentation"):
                         content_html = m.group(2)
                         # Strip tags and shit
                         combined = heading_html + "\n" + content_html
+                        # Trim everything above the "Published <date>" header if present
+                        pub_m = re.search(r"Published\s*.*?\d{4}", combined, re.I | re.S)
+                        if pub_m:
+                            combined = combined[pub_m.start():]
                         clean = unescape(re.sub(r"<[^>]+>", "", combined)).strip()
                         if not clean:
                             clean = "(No text found.)"
@@ -100,6 +104,10 @@ class Documentation(commands.Cog, name="documentation"):
                     # So much shit to get rid of.
                     body = re.sub(r"<script.*?>.*?</script>", "", body, flags=re.I | re.S)
                     body = re.sub(r"<style.*?>.*?</style>", "", body, flags=re.I | re.S)
+                    # Trim everything above the "Published <date>" header.
+                    pub_m = re.search(r"Published\s*.*?\d{4}", body, re.I | re.S)
+                    if pub_m:
+                        body = body[pub_m.start():]
                     # Limit to paragraphs, assuming I didn't write spans on the article. I may have.
                     p_m = re.search(r"<p[^>]*>(.*?)</p>", body, re.I | re.S)
                     if p_m:

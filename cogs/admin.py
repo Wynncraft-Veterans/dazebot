@@ -4,7 +4,7 @@ from discord.ext import commands
 logger = logging.getLogger('discord.cogs.admin')
 from bot import Bot
 from tortoise.expressions import Q
-from orm import DiscordAccount, MinecraftAccount, Person
+from orm import DiscordAccount, MinecraftAccount, Person, Shout
 
 class Admin(commands.Cog):
     bot: Bot
@@ -181,12 +181,26 @@ class Admin(commands.Cog):
     @commands.hybrid_command(name='set_shout_count')
     @commands.has_permissions(administrator=True)
     async def set_shout_count(self, ctx: commands.Context, user: discord.Member, count: int):
-        """Forcefully set a user's shout_count (replaces the existing value)."""
+        """Forcefully set a user's shout_count (replaces the existing value).
+        This will also create or delete `Shout` rows so `shouterboard` (which aggregates Shout rows)
+        reflects the new value.
+        """
         discord_acc, _ = await DiscordAccount.get_or_create(
             disc_uuid=str(user.id),
         )
+        # Ensure the Shout rows match the requested count
+        existing = await Shout.filter(shouter=discord_acc).count()
+        if existing < count:
+            to_create = count - existing
+            for _ in range(to_create):
+                await Shout.create(shouter=discord_acc)
+        elif existing > count:
+            to_delete = existing - count
+            shouts_to_delete = await Shout.filter(shouter=discord_acc).order_by('-created_at').limit(to_delete).all()
+            for s in shouts_to_delete:
+                await s.delete()
         discord_acc.shout_count = count
-        await discord_acc.save()
+        await discord_acc.save(update_fields=['shout_count'])
         await ctx.reply(f"Set shout_count for {user.mention} to {count}")
     
     @commands.hybrid_group(name="person")

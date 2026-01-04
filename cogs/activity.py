@@ -179,6 +179,9 @@ class Activity(commands.Cog):
         await Shout.create(
             shouter=discord_acc
         )
+        # Keep the cached shout_count in sync with the Shout rows
+        discord_acc.shout_count = (await Shout.filter(shouter=discord_acc).count())
+        await discord_acc.save(update_fields=['shout_count'])
         await ctx.send(f"Thank you for helping the guild, {ctx.author.mention}!\nYour shout has been recorded.")
         
     @commands.hybrid_command(name='last_shout')

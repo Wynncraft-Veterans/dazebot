@@ -4,7 +4,7 @@ import aiohttp
 from discord.ext import commands
 from bot import Bot
 
-# This is disguisting. This entire thing needs to be ripped out and replaced.
+# TODO: This is disguisting. This entire thing needs to be ripped out and replaced.
 
 class ProfSelection(discord.ui.Select):
     def __init__(self) -> None:

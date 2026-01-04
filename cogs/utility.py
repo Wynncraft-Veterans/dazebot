@@ -81,15 +81,15 @@ class Utility(commands.Cog):
 
     def __init__(self, bot: Bot):
         self.bot = bot
-        logger.info("Utility cog initialized")
+        logger.info("Started Utility")
 
     @commands.hybrid_command(name='findprofer')
     async def findprofer(self, ctx: commands.Context):
-        """Bring up a select to choose which profession you need a profer for."""
+        """Searches for guild members able to craft your item."""
         view = ProferView()
-        await ctx.send("Select the profession you need:", view=view)
+        await ctx.send("Please select what you need your profer to help you with:", view=view)
 
 
 async def setup(bot: Bot):
     await bot.add_cog(Utility(bot))
-    logger.info("Utility cog loaded successfully")
+    logger.info("Loaded Utility")

@@ -79,6 +79,105 @@ class Admin(commands.Cog):
         else:
             await ctx.send("I cant repeat an empty message you dummy 😡😡😡")
     
+    # TODO: Snagged from the internet. May not be the most optimal.
+    @commands.hybrid_command(name='embed')
+    @commands.has_permissions(administrator=True)
+    async def embed(self, ctx: commands.Context, color: str = None, title: str = None, *, description: str = None):
+        """Create a simple embed.
+
+        Usage (prefix): embed [colour] [title] [description]
+        - If the first token looks like a color (hex like #ff0000 or a named color like 'blue'), it will be used as the embed colour.
+        - For titles with spaces when using the prefix form, wrap the title in quotes: embed #ff0000 "My Title" My description here
+        - Slash command usage will populate `color`, `title`, and `description` automatically.
+        """
+        # If the command was invoked via slash or explicit args, prefer provided params
+        if title is not None:
+            if description is None:
+                await ctx.send("You must provide a description for the embed.")
+                return
+            color_token = color
+        else:
+            # Fallback: parse raw message content for prefix-style invocation
+            if not getattr(ctx, 'message', None) or not getattr(ctx.message, 'content', None):
+                await ctx.send("Usage: embed [colour] [title] [description]. For titles with spaces, quote the title.")
+                return
+            parts = ctx.message.content.split(None, 1)
+            if len(parts) < 2:
+                await ctx.send("Usage: embed [colour] [title] [description].")
+                return
+            args_str = parts[1]
+
+            def _looks_like_color(tok: str) -> bool:
+                t = tok.strip()
+                if t.startswith('#'):
+                    t = t[1:]
+                if t.startswith('0x'):
+                    t = t[2:]
+                return len(t) == 6 and all(c in '0123456789abcdefABCDEF' for c in t)
+
+            # Check whether first token is a color name/hex; if so, consume it
+            first = args_str.split(None, 1)[0]
+            color_token = None
+            remaining = args_str
+            named_tokens = ('default','blue','red','green','gold','orange','purple','teal','magenta','dark_blue','dark_red','dark_green','blurple')
+            if _looks_like_color(first) or first.lower() in named_tokens:
+                color_token = first
+                remaining = args_str[len(first):].lstrip()
+
+            if not remaining:
+                await ctx.send("You must provide a title and description for the embed.")
+                return
+
+            # Title parsing: support quoted titles for spaces
+            if remaining[0] in ('"', "'"):
+                q = remaining[0]
+                idx = remaining.find(q, 1)
+                if idx == -1:
+                    await ctx.send("Unterminated quote in title.")
+                    return
+                title_parsed = remaining[1:idx]
+                description_parsed = remaining[idx+1:].lstrip()
+            else:
+                parts2 = remaining.split(None, 1)
+                title_parsed = parts2[0]
+                description_parsed = parts2[1] if len(parts2) > 1 else ''
+
+            title = title_parsed
+            description = description_parsed
+            color = color_token
+
+            if not description:
+                await ctx.send("You must provide a description for the embed.")
+                return
+
+        # Parse the colour token into a discord.Color
+        col = discord.Color.default()
+        if color:
+            col_str = color.strip()
+            if col_str.startswith('#'):
+                col_str = col_str[1:]
+            if col_str.startswith('0x'):
+                col_str = col_str[2:]
+            if len(col_str) == 6 and all(c in '0123456789abcdefABCDEF' for c in col_str):
+                try:
+                    col = discord.Color(int(col_str, 16))
+                except Exception:
+                    pass
+            else:
+                # Try named color helpers on discord.Color (e.g. blue(), red(), etc.)
+                try:
+                    color_func = getattr(discord.Color, col_str.lower())
+                    if callable(color_func):
+                        col = color_func()
+                    else:
+                        raise AttributeError()
+                except Exception:
+                    await ctx.send("Invalid color. Use hex (e.g., #ff0000) or a named color like 'blue'.")
+                    return
+
+        embed = discord.Embed(title=title, description=description, color=col)
+        await ctx.send(embed=embed)
+    
     @commands.hybrid_command(name='set_shout_count')
     @commands.has_permissions(administrator=True)
     async def set_shout_count(self, ctx: commands.Context, user: discord.Member, count: int):

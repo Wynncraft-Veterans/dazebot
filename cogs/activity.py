@@ -96,7 +96,12 @@ class Activity(commands.Cog):
         logger.warning("Low player count!")
         channel = self.bot.get_channel(self.bot.config.GUILD_DEAD_ALERT_CHANNEL)
         assert isinstance(channel, discord.TextChannel)
-        await channel.send(f"<@&{self.bot.config.GUILD_DEAD_ALERT_ROLE}> ur wynn guild is ded")
+        embed = discord.Embed(
+            title = "Activity Alert",
+            description = '__**The guild is dead!**__\nWe are within the allowable shout period!\n\n> Who wants to claim this shout? :D\n> (Wen will pay, plus there are prizes!)',
+            color = discord.Color.red()
+        )
+        await channel.send(content=f"<@&{self.bot.config.GUILD_DEAD_ALERT_ROLE}>", embed=embed, allowed_mentions=discord.AllowedMentions(roles=True))
 
     async def _guild_full_alert(self):
         logger.warning("Guild is full!")

@@ -107,7 +107,12 @@ class Activity(commands.Cog):
         logger.warning("Guild is full!")
         channel = self.bot.get_channel(self.bot.config.GUILD_FULL_ALERT_CHANNEL)
         assert isinstance(channel, discord.TextChannel)
-        await channel.send(f"<@&{self.bot.config.GUILD_FULL_ALERT_ROLE}> ur wynn guild is full")
+        embed = discord.Embed(
+            title = "Capacity Alert",
+            description = '__**The guild is full!**__\nA chief needs to kick some people!',
+            color = discord.Color.blurple()
+        )
+        await channel.send(content=f"<@&{self.bot.config.GUILD_FULL_ALERT_ROLE}>", embed=embed, allowed_mentions=discord.AllowedMentions(roles=True))
 
     @commands.hybrid_command(name='force_check')
     @commands.has_permissions(administrator=True)

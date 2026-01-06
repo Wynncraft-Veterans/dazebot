@@ -29,12 +29,27 @@ class WeeklyEvent(commands.Cog):
     
     @score.command(name="set")
     @commands.has_permissions(manage_messages=True)
-    async def score_set(self, ctx: commands.Context, user: discord.Member, week: WeekRange, value: ValueRange):
+    async def score_set(self, ctx: commands.Context, user: str, week: WeekRange, value: ValueRange):
         """Set user's points"""
-        logger.debug(f"Setting {user.id=} score in {week=} to {value=}")
+        # Try to find member by name case-insensitively
+        member = None
+        for m in ctx.guild.members:
+            if m.name.lower() == user.lower() or m.display_name.lower() == user.lower():
+                member = m
+                break
+        
+        if not member:
+            # Try to convert as mention or ID
+            try:
+                member = await commands.MemberConverter().convert(ctx, user)
+            except commands.MemberNotFound:
+                await ctx.send(f"Could not find member: {user}")
+                return
+        
+        logger.debug(f"Setting {member.id=} score in {week=} to {value=}")
         
         disc_account, _ = await DiscordAccount.get_or_create(
-            disc_uuid=str(user.id)
+            disc_uuid=str(member.id)
         )
         
         event, _ = await WeeklyEventTable.get_or_create(
@@ -49,7 +64,7 @@ class WeeklyEvent(commands.Cog):
             }
         )
         
-        await ctx.send(f"Set {user.mention}'s score to {value} for week {week}")
+        await ctx.send(f"Set {member.mention}'s score to {value} for week {week}")
 
 
     @score.command(name="add")

@@ -115,7 +115,7 @@ class WeeklyEvent(commands.Cog):
                 f"<@{score.discord_account.disc_uuid}> {score.score}"
                 for score in scores
             )
-            await ctx.send(text)
+            await ctx.send(text, allowed_mentions=discord.AllowedMentions.none())
         else:
             await ctx.send(f"No one has any points for week {week}")
     

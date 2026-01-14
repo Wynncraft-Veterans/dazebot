@@ -34,7 +34,10 @@ class Anni(commands.Cog):
         # Look for string
         if TRIGGER in (message.content or ''):
             try:
-                await message.channel.send(f'<@&{ROLE_ID}>')
+                await message.channel.send(
+                    f'<@&{ROLE_ID}>',
+                    allowed_mentions=discord.AllowedMentions(roles=True)
+                )
             except Exception:
                 logger.exception('Something unusual happened.')
 

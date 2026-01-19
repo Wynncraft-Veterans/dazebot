@@ -12,6 +12,9 @@ logger = logging.getLogger("discord.cogs.activity")
 from bot import Bot
 from tortoise.expressions import Q
 
+# TODO: Put into config rather than define here
+ROLES_ALLOWED_TO_SHOUT = [1402295013169172500, 1436108975132119221, 1436109140195020892]
+
 
 class Activity(commands.Cog):
     bot: Bot
@@ -153,9 +156,7 @@ class Activity(commands.Cog):
     @commands.hybrid_command(name="shout")
     @commands.check_any(
         commands.has_permissions(manage_messages=True),
-        commands.has_any_role(
-            "1402295013169172500", "1436108975132119221", "1436109140195020892"
-        ),  # type: ignore[arg-type]
+        commands.has_any_role(ROLES_ALLOWED_TO_SHOUT),  # type: ignore[arg-type]
     )
     async def shout(self, ctx: commands.Context):
         discord_acc, _ = await DiscordAccount.get_or_create(

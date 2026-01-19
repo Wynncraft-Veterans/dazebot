@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = [
-    "pre-commit>=4.5.1",
-    "ruff>=0.14.13",
-]
+dev = ["pre-commit>=4.5.1", "ruff>=0.14.13"]
+
+[tool.ruff]
+line-length = 120

@@ -98,9 +98,7 @@ class Activity(commands.Cog):
 
     async def _low_count_alert(self):
         logger.warning("Low player count!")
-        channel = self.bot.get_channel(
-            self.bot.config.GUILD_DEAD_ALERT_CHANNEL
-        )
+        channel = self.bot.get_channel(self.bot.config.GUILD_DEAD_ALERT_CHANNEL)
         assert isinstance(channel, discord.TextChannel)
         embed = discord.Embed(
             title="Activity Alert",
@@ -115,9 +113,7 @@ class Activity(commands.Cog):
 
     async def _guild_full_alert(self):
         logger.warning("Guild is full!")
-        channel = self.bot.get_channel(
-            self.bot.config.GUILD_FULL_ALERT_CHANNEL
-        )
+        channel = self.bot.get_channel(self.bot.config.GUILD_FULL_ALERT_CHANNEL)
         assert isinstance(channel, discord.TextChannel)
         embed = discord.Embed(
             title="Capacity Alert",
@@ -140,9 +136,7 @@ class Activity(commands.Cog):
         ).order_by("-last_online")
 
         if not absent_guild_members:
-            await ctx.send(
-                f"No members have been away for more than {days} days."
-            )
+            await ctx.send(f"No members have been away for more than {days} days.")
             return
 
         logger.info([m.last_online.tzinfo for m in absent_guild_members])
@@ -161,7 +155,7 @@ class Activity(commands.Cog):
         commands.has_permissions(manage_messages=True),
         commands.has_any_role(
             "1402295013169172500", "1436108975132119221", "1436109140195020892"
-        ),
+        ),  # type: ignore[arg-type]
     )
     async def shout(self, ctx: commands.Context):
         discord_acc, _ = await DiscordAccount.get_or_create(
@@ -169,9 +163,7 @@ class Activity(commands.Cog):
         )
         await Shout.create(shouter=discord_acc)
         # Keep the cached shout_count in sync with the Shout rows
-        discord_acc.shout_count = await Shout.filter(
-            shouter=discord_acc
-        ).count()
+        discord_acc.shout_count = await Shout.filter(shouter=discord_acc).count()
         await discord_acc.save(update_fields=["shout_count"])
         await ctx.send(
             f"Thank you for helping the guild, {ctx.author.mention}!\nYour shout has been recorded."
@@ -182,7 +174,7 @@ class Activity(commands.Cog):
         commands.has_permissions(manage_messages=True),
         commands.has_any_role(
             "1402295013169172500", "1436108975132119221", "1436109140195020892"
-        ),
+        ),  # type: ignore[arg-type]
     )
     async def last_shout(self, ctx: commands.Context):
         shouts = (
@@ -196,7 +188,7 @@ class Activity(commands.Cog):
             delta = datetime.now(timezone.utc) - shout.created_at
             user = await self.bot.fetch_user(int(shout.shouter.disc_uuid))
             lines.append(
-                f"{user.mention} - {delta.seconds//3600} hours and {(delta.seconds//60)%60} minutes ago"
+                f"{user.mention} - {delta.seconds // 3600} hours and {(delta.seconds // 60) % 60} minutes ago"
             )
 
         if lines:
@@ -209,7 +201,7 @@ class Activity(commands.Cog):
         commands.has_permissions(manage_messages=True),
         commands.has_any_role(
             "1402295013169172500", "1436108975132119221", "1436109140195020892"
-        ),
+        ),  # type: ignore[arg-type]
     )
     async def shouterboard(self, ctx: commands.Context):
         from tortoise.functions import Count

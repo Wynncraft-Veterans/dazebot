@@ -158,7 +158,6 @@ class Activity(commands.Cog):
     async def shout(self, ctx: commands.Context):
         discord_acc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
         await Shout.create(shouter=discord_acc)
-        # Keep the cached shout_count in sync with the Shout rows
         discord_acc.shout_count = await Shout.filter(shouter=discord_acc).count()
         await discord_acc.save(update_fields=["shout_count"])
         await ctx.send(f"Thank you for helping the guild, {ctx.author.mention}!\nYour shout has been recorded.")

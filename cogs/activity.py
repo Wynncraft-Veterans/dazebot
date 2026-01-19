@@ -170,12 +170,6 @@ class Activity(commands.Cog):
         )
 
     @commands.hybrid_command(name="last_shout")
-    @commands.check_any(
-        commands.has_permissions(manage_messages=True),
-        commands.has_any_role(
-            "1402295013169172500", "1436108975132119221", "1436109140195020892"
-        ),  # type: ignore[arg-type]
-    )
     async def last_shout(self, ctx: commands.Context):
         shouts = (
             await Shout.all()
@@ -197,12 +191,6 @@ class Activity(commands.Cog):
             await ctx.send("There have been no recorded shouts.")
 
     @commands.hybrid_command(name="shouterboard")
-    @commands.check_any(
-        commands.has_permissions(manage_messages=True),
-        commands.has_any_role(
-            "1402295013169172500", "1436108975132119221", "1436109140195020892"
-        ),  # type: ignore[arg-type]
-    )
     async def shouterboard(self, ctx: commands.Context):
         from tortoise.functions import Count
 

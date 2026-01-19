@@ -20,20 +20,26 @@ class Config:
     GUILD_DEAD_ALERT_CHANNEL = 1401676479300898939
     GUILD_FULL_ALERT_CHANNEL = 1401676479300898939
 
+    GUILD_DEAD_ALERT_ROLE_USA = 1402295013169172500
+    GUILD_DEAD_ALERT_ROLE_EUROPE = 1436108975132119221
+    GUILD_DEAD_ALERT_ROLE_ASIA = 1436109140195020892
+
     @property
     def GUILD_DEAD_ALERT_ROLE(self):
         now_utc = datetime.now(timezone.utc)
         hour = now_utc.hour
 
+        # TODO, are you sure you want to hardcode this?
+
         # Night (wraps midnight): 22..23 and 0..5
         if hour > 21 or hour <= 5:
-            return 1402295013169172500  # Americas
+            return self.GUILD_DEAD_ALERT_ROLE_USA
         # Afternoon: 14..21
         elif 13 < hour <= 21:
-            return 1436108975132119221  # Europe
+            return self.GUILD_DEAD_ALERT_ROLE_EUROPE
         # Morning: 6..13
         else:
-            return 1436109140195020892  # Asia
+            return self.GUILD_DEAD_ALERT_ROLE_ASIA
 
     GUILD_FULL_ALERT_ROLE = 1313778812361904188
     GUILD_DEAD_WHEN = 2

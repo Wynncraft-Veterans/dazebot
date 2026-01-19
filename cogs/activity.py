@@ -204,7 +204,6 @@ class Activity(commands.Cog):
             await ctx.send("No shouts recorded yet.")
 
     @commands.hybrid_command(name="last_online")
-    @commands.has_permissions(manage_messages=True)
     async def last_online(self, ctx: commands.Context, username_or_uuid: str):
         try:
             player = await MinecraftAccount.get(Q(uuid=username_or_uuid) | Q(username=username_or_uuid))

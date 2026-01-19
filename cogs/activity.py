@@ -129,7 +129,6 @@ class Activity(commands.Cog):
         await self.check_guild()
 
     @commands.hybrid_command(name="purgelist")
-    @commands.has_permissions(manage_messages=True)
     async def purgelist(self, ctx: commands.Context, days: int = 14):
         cutoff = datetime.now() - timedelta(days=14)
         absent_guild_members = await MinecraftAccount.filter(guild="Returners", last_online__lt=cutoff).order_by(

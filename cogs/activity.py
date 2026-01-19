@@ -81,16 +81,14 @@ class Activity(commands.Cog):
         now = datetime.now(timezone.utc)
         if (
             len(online) <= self.bot.config.GUILD_DEAD_WHEN
-            and now - self.bot.nosql.LAST_DEAD_ALERT
-            >= self.bot.config.GUILD_DEAD_ALERT_DELTA
+            and now - self.bot.nosql.LAST_DEAD_ALERT >= self.bot.config.GUILD_DEAD_ALERT_DELTA
         ):
             self.bot.nosql.LAST_DEAD_ALERT = now
             alerts.append(self._low_count_alert())
 
         if (
             guild.members.total >= self.bot.config.GUILD_FULL_WHEN
-            and now - self.bot.nosql.LAST_CAP_ALERT
-            >= self.bot.config.GUILD_FULL_ALERT_DELTA
+            and now - self.bot.nosql.LAST_CAP_ALERT >= self.bot.config.GUILD_FULL_ALERT_DELTA
         ):
             self.bot.nosql.LAST_CAP_ALERT = now
             alerts.append(self._guild_full_alert())
@@ -134,9 +132,9 @@ class Activity(commands.Cog):
     @commands.has_permissions(manage_messages=True)
     async def purgelist(self, ctx: commands.Context, days: int = 14):
         cutoff = datetime.now() - timedelta(days=14)
-        absent_guild_members = await MinecraftAccount.filter(
-            guild="Returners", last_online__lt=cutoff
-        ).order_by("-last_online")
+        absent_guild_members = await MinecraftAccount.filter(guild="Returners", last_online__lt=cutoff).order_by(
+            "-last_online"
+        )
 
         if not absent_guild_members:
             await ctx.send(f"No members have been away for more than {days} days.")
@@ -159,32 +157,21 @@ class Activity(commands.Cog):
         commands.has_any_role(ROLES_ALLOWED_TO_SHOUT),  # type: ignore[arg-type]
     )
     async def shout(self, ctx: commands.Context):
-        discord_acc, _ = await DiscordAccount.get_or_create(
-            disc_uuid=str(ctx.author.id)
-        )
+        discord_acc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
         await Shout.create(shouter=discord_acc)
         # Keep the cached shout_count in sync with the Shout rows
         discord_acc.shout_count = await Shout.filter(shouter=discord_acc).count()
         await discord_acc.save(update_fields=["shout_count"])
-        await ctx.send(
-            f"Thank you for helping the guild, {ctx.author.mention}!\nYour shout has been recorded."
-        )
+        await ctx.send(f"Thank you for helping the guild, {ctx.author.mention}!\nYour shout has been recorded.")
 
     @commands.hybrid_command(name="last_shout")
     async def last_shout(self, ctx: commands.Context):
-        shouts = (
-            await Shout.all()
-            .order_by("-created_at")
-            .limit(3)
-            .prefetch_related("shouter")
-        )
+        shouts = await Shout.all().order_by("-created_at").limit(3).prefetch_related("shouter")
         lines = []
         for shout in shouts:
             delta = datetime.now(timezone.utc) - shout.created_at
             user = await self.bot.fetch_user(int(shout.shouter.disc_uuid))
-            lines.append(
-                f"{user.mention} - {delta.seconds // 3600} hours and {(delta.seconds // 60) % 60} minutes ago"
-            )
+            lines.append(f"{user.mention} - {delta.seconds // 3600} hours and {(delta.seconds // 60) % 60} minutes ago")
 
         if lines:
             await ctx.send("\n".join(lines), silent=True)
@@ -197,14 +184,10 @@ class Activity(commands.Cog):
 
         # Get counts with discord account info
         shout_counter = (
-            await Shout.annotate(shout_count=Count("id"))
-            .group_by("shouter_id")
-            .values("shouter_id", "shout_count")
+            await Shout.annotate(shout_count=Count("id")).group_by("shouter_id").values("shouter_id", "shout_count")
         )
 
-        sorted_counts = sorted(
-            shout_counter, key=lambda x: x["shout_count"], reverse=True
-        )
+        sorted_counts = sorted(shout_counter, key=lambda x: x["shout_count"], reverse=True)
 
         shouter_ids = [item["shouter_id"] for item in sorted_counts]
         shouters = await DiscordAccount.filter(id__in=shouter_ids)
@@ -226,18 +209,12 @@ class Activity(commands.Cog):
     @commands.has_permissions(manage_messages=True)
     async def last_online(self, ctx: commands.Context, username_or_uuid: str):
         try:
-            player = await MinecraftAccount.get(
-                Q(uuid=username_or_uuid) | Q(username=username_or_uuid)
-            )
+            player = await MinecraftAccount.get(Q(uuid=username_or_uuid) | Q(username=username_or_uuid))
             ts = int(player.last_online.timestamp())
-            await ctx.send(
-                f"{player.username} was last online on <t:{ts}:F>, which was <t:{ts}:R>"
-            )
+            await ctx.send(f"{player.username} was last online on <t:{ts}:F>, which was <t:{ts}:R>")
         except Exception as e:
             logger.error(f"[/last_online] {e}")
-            await ctx.send(
-                "That user probably does not exist, is too new or is not in the guild."
-            )
+            await ctx.send("That user probably does not exist, is too new or is not in the guild.")
             raise e
 
 

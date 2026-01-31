@@ -1,19 +1,21 @@
 import logging
 import discord
 from discord.ext import commands
-logger = logging.getLogger('discord.cogs.admin')
+
+logger = logging.getLogger("discord.cogs.admin")
 from bot import Bot
 from tortoise.expressions import Q
-from orm import DiscordAccount, MinecraftAccount, Person, Shout
+from orm import DiscordAccount, MinecraftAccount, Person
+
 
 class Admin(commands.Cog):
     bot: Bot
-    
+
     def __init__(self, bot: Bot):
         self.bot = bot
         logger.info("Admin cog initialized")
-    
-    @commands.hybrid_command(name='sync', description='Sync slash commands')
+
+    @commands.hybrid_command(name="sync", description="Sync slash commands")
     @commands.has_permissions(administrator=True)
     async def sync_commands(self, ctx: commands.Context):
         """Manually sync slash commands"""
@@ -21,66 +23,66 @@ class Admin(commands.Cog):
         try:
             synced = await self.bot.tree.sync()
             logger.info(f"Successfully synced {len(synced)} slash commands")
-            await ctx.send(f'Successfully synced {len(synced)} command(s)')
+            await ctx.send(f"Successfully synced {len(synced)} command(s)")
         except Exception as e:
             logger.error(f"Failed to sync commands: {e}")
-            await ctx.send(f'Failed to sync commands: {e}')
-    
-    @commands.hybrid_command(name='reload', description='Reload a specific cog')
+            await ctx.send(f"Failed to sync commands: {e}")
+
+    @commands.hybrid_command(name="reload", description="Reload a specific cog")
     @commands.has_permissions(administrator=True)
     async def reload_cog(self, ctx: commands.Context, cog_name: str):
         """Reload a specific cog"""
         logger.info(f"Reload command initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
         try:
-            await self.bot.reload_extension(f'cogs.{cog_name}')
+            await self.bot.reload_extension(f"cogs.{cog_name}")
             logger.info(f"Successfully reloaded cog '{cog_name}'")
-            await ctx.send(f'Successfully reloaded {cog_name}')
+            await ctx.send(f"Successfully reloaded {cog_name}")
             await self.bot.tree.sync()
             logger.debug(f"Synced slash commands after reloading '{cog_name}'")
         except Exception as e:
             logger.error(f"Failed to reload cog '{cog_name}': {e}")
-            await ctx.send(f'Failed to reload {cog_name}: {e}')
-    
-    @commands.hybrid_command(name='load', description='Load a specific cog')
+            await ctx.send(f"Failed to reload {cog_name}: {e}")
+
+    @commands.hybrid_command(name="load", description="Load a specific cog")
     @commands.has_permissions(administrator=True)
     async def load_cog(self, ctx: commands.Context, cog_name: str):
         """Load a specific cog"""
         logger.info(f"Load command initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
         try:
-            await self.bot.load_extension(f'cogs.{cog_name}')
+            await self.bot.load_extension(f"cogs.{cog_name}")
             logger.info(f"Successfully loaded cog '{cog_name}'")
-            await ctx.send(f'Successfully loaded {cog_name}')
+            await ctx.send(f"Successfully loaded {cog_name}")
             await self.bot.tree.sync()
             logger.debug(f"Synced slash commands after loading '{cog_name}'")
         except Exception as e:
             logger.error(f"Failed to load cog '{cog_name}': {e}")
-            await ctx.send(f'Failed to load {cog_name}: {e}')
-    
-    @commands.hybrid_command(name='unload', description='Unload a specific cog')
+            await ctx.send(f"Failed to load {cog_name}: {e}")
+
+    @commands.hybrid_command(name="unload", description="Unload a specific cog")
     @commands.has_permissions(administrator=True)
     async def unload_cog(self, ctx: commands.Context, cog_name: str):
         """Unload a specific cog"""
         logger.info(f"Unload command initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
         try:
-            await self.bot.unload_extension(f'cogs.{cog_name}')
+            await self.bot.unload_extension(f"cogs.{cog_name}")
             logger.info(f"Successfully unloaded cog '{cog_name}'")
-            await ctx.send(f'Successfully unloaded {cog_name}')
+            await ctx.send(f"Successfully unloaded {cog_name}")
             await self.bot.tree.sync()
             logger.debug(f"Synced slash commands after unloading '{cog_name}'")
         except Exception as e:
             logger.error(f"Failed to unload cog '{cog_name}': {e}")
-            await ctx.send(f'Failed to unload {cog_name}: {e}')
-    
-    @commands.hybrid_command(name='say')
+            await ctx.send(f"Failed to unload {cog_name}: {e}")
+
+    @commands.hybrid_command(name="say")
     @commands.has_permissions(administrator=True)
     async def say(self, ctx: commands.Context, *, msg: str):
         if msg:
             await ctx.send(msg)
         else:
             await ctx.send("I cant repeat an empty message you dummy 😡😡😡")
-    
+
     # TODO: Snagged from the internet. May not be the most optimal.
-    @commands.hybrid_command(name='embed')
+    @commands.hybrid_command(name="embed")
     @commands.has_permissions(administrator=True)
     async def embed(self, ctx: commands.Context, color: str = None, title: str = None, *, description: str = None):
         """Create a simple embed.
@@ -98,7 +100,7 @@ class Admin(commands.Cog):
             color_token = color
         else:
             # Fallback: parse raw message content for prefix-style invocation
-            if not getattr(ctx, 'message', None) or not getattr(ctx.message, 'content', None):
+            if not getattr(ctx, "message", None) or not getattr(ctx.message, "content", None):
                 await ctx.send("Usage: embed [colour] [title] [description]. For titles with spaces, quote the title.")
                 return
             parts = ctx.message.content.split(None, 1)
@@ -109,20 +111,34 @@ class Admin(commands.Cog):
 
             def _looks_like_color(tok: str) -> bool:
                 t = tok.strip()
-                if t.startswith('#'):
+                if t.startswith("#"):
                     t = t[1:]
-                if t.startswith('0x'):
+                if t.startswith("0x"):
                     t = t[2:]
-                return len(t) == 6 and all(c in '0123456789abcdefABCDEF' for c in t)
+                return len(t) == 6 and all(c in "0123456789abcdefABCDEF" for c in t)
 
             # Check whether first token is a color name/hex; if so, consume it
             first = args_str.split(None, 1)[0]
             color_token = None
             remaining = args_str
-            named_tokens = ('default','blue','red','green','gold','orange','purple','teal','magenta','dark_blue','dark_red','dark_green','blurple')
+            named_tokens = (
+                "default",
+                "blue",
+                "red",
+                "green",
+                "gold",
+                "orange",
+                "purple",
+                "teal",
+                "magenta",
+                "dark_blue",
+                "dark_red",
+                "dark_green",
+                "blurple",
+            )
             if _looks_like_color(first) or first.lower() in named_tokens:
                 color_token = first
-                remaining = args_str[len(first):].lstrip()
+                remaining = args_str[len(first) :].lstrip()
 
             if not remaining:
                 await ctx.send("You must provide a title and description for the embed.")
@@ -136,11 +152,11 @@ class Admin(commands.Cog):
                     await ctx.send("Unterminated quote in title.")
                     return
                 title_parsed = remaining[1:idx]
-                description_parsed = remaining[idx+1:].lstrip()
+                description_parsed = remaining[idx + 1 :].lstrip()
             else:
                 parts2 = remaining.split(None, 1)
                 title_parsed = parts2[0]
-                description_parsed = parts2[1] if len(parts2) > 1 else ''
+                description_parsed = parts2[1] if len(parts2) > 1 else ""
 
             title = title_parsed
             description = description_parsed
@@ -154,11 +170,11 @@ class Admin(commands.Cog):
         col = discord.Color.default()
         if color:
             col_str = color.strip()
-            if col_str.startswith('#'):
+            if col_str.startswith("#"):
                 col_str = col_str[1:]
-            if col_str.startswith('0x'):
+            if col_str.startswith("0x"):
                 col_str = col_str[2:]
-            if len(col_str) == 6 and all(c in '0123456789abcdefABCDEF' for c in col_str):
+            if len(col_str) == 6 and all(c in "0123456789abcdefABCDEF" for c in col_str):
                 try:
                     col = discord.Color(int(col_str, 16))
                 except Exception:
@@ -177,8 +193,8 @@ class Admin(commands.Cog):
 
         embed = discord.Embed(title=title, description=description, color=col)
         await ctx.send(embed=embed)
-    
-    @commands.hybrid_command(name='set_shout_count')
+
+    @commands.hybrid_command(name="set_shout_count")
     @commands.has_permissions(administrator=True)
     async def set_shout_count(self, ctx: commands.Context, user: discord.Member, count: int):
         """Forcefully set a user's shout_count (replaces the existing value).
@@ -188,21 +204,11 @@ class Admin(commands.Cog):
         discord_acc, _ = await DiscordAccount.get_or_create(
             disc_uuid=str(user.id),
         )
-        # Ensure the Shout rows match the requested count
-        existing = await Shout.filter(shouter=discord_acc).count()
-        if existing < count:
-            to_create = count - existing
-            for _ in range(to_create):
-                await Shout.create(shouter=discord_acc)
-        elif existing > count:
-            to_delete = existing - count
-            shouts_to_delete = await Shout.filter(shouter=discord_acc).order_by('-created_at').limit(to_delete).all()
-            for s in shouts_to_delete:
-                await s.delete()
+
         discord_acc.shout_count = count
-        await discord_acc.save(update_fields=['shout_count'])
+        await discord_acc.save(update_fields=["shout_count"])
         await ctx.reply(f"Set shout_count for {user.mention} to {count}")
-    
+
     @commands.hybrid_group(name="person")
     async def person(self, ctx: commands.Context):
         """Manage person accounts linking Minecraft and Discord"""
@@ -213,35 +219,37 @@ class Admin(commands.Cog):
     @commands.has_permissions(manage_messages=True)
     async def person_link(self, ctx: commands.Context, user: discord.Member, username_or_uuid: str):
         """Link a Discord user to a Minecraft account"""
-        player = await MinecraftAccount.filter(
-            Q(uuid=username_or_uuid) | Q(username=username_or_uuid)
-        ).prefetch_related('person').first()
-        
+        player = (
+            await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(username=username_or_uuid))
+            .prefetch_related("person")
+            .first()
+        )
+
         if player is None:
             await ctx.reply("That minecraft user is not available. Try forcing a check on the guild.")
             return
-    
+
         discord_acc, _ = await DiscordAccount.get_or_create(
             disc_uuid=str(user.id),
         )
-        await discord_acc.fetch_related('person')
-        
+        await discord_acc.fetch_related("person")
+
         if player.person and discord_acc.person:
             if player.person.id == discord_acc.person.id:
                 await ctx.reply(f"{user.mention} is already linked to Minecraft account `{player.username}`")
             else:
-                await ctx.reply(f"Both accounts are already linked to different persons. Please unlink first.")
-    
+                await ctx.reply("Both accounts are already linked to different persons. Please unlink first.")
+
         elif player.person:
             discord_acc.person = player.person
             await discord_acc.save()
             await ctx.reply(f"Linked {user.mention} to existing person with Minecraft account `{player.username}`")
-    
+
         elif discord_acc.person:
             player.person = discord_acc.person
             await player.save()
             await ctx.reply(f"Linked Minecraft account `{player.username}` to {user.mention}'s existing person")
-    
+
         else:
             person_obj = await Person.create(name=user.display_name)
             player.person = person_obj
@@ -260,18 +268,20 @@ class Admin(commands.Cog):
     @commands.has_permissions(manage_messages=True)
     async def person_unlink_mc(self, ctx: commands.Context, username_or_uuid: str):
         """Unlink a Minecraft account from its person"""
-        player = await MinecraftAccount.filter(
-            Q(uuid=username_or_uuid) | Q(username=username_or_uuid)
-        ).prefetch_related('person').first()
-        
+        player = (
+            await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(username=username_or_uuid))
+            .prefetch_related("person")
+            .first()
+        )
+
         if player is None:
             await ctx.reply("That minecraft user was not found.")
             return
-        
+
         if player.person is None:
             await ctx.reply(f"Minecraft account `{player.username}` is not linked to any person.")
             return
-        
+
         player.person = None
         await player.save()
         await ctx.reply(f"Unlinked Minecraft account `{player.username}` from person.")
@@ -280,18 +290,16 @@ class Admin(commands.Cog):
     @commands.has_permissions(manage_messages=True)
     async def person_unlink_disc(self, ctx: commands.Context, user: discord.Member):
         """Unlink a Discord account from its person"""
-        discord_acc = await DiscordAccount.filter(
-            disc_uuid=str(user.id)
-        ).prefetch_related('person').first()
-        
+        discord_acc = await DiscordAccount.filter(disc_uuid=str(user.id)).prefetch_related("person").first()
+
         if discord_acc is None:
             await ctx.reply(f"{user.mention} does not have a Discord account registered.")
             return
-        
+
         if discord_acc.person is None:
             await ctx.reply(f"{user.mention} is not linked to any person.")
             return
-        
+
         discord_acc.person = None
         await discord_acc.save()
         await ctx.reply(f"Unlinked {user.mention} from person.")
@@ -306,37 +314,30 @@ class Admin(commands.Cog):
     @commands.has_permissions(manage_messages=True)
     async def person_check_mc(self, ctx: commands.Context, username_or_uuid: str):
         """Check a Minecraft account's linked person and all associated accounts"""
-        player = await MinecraftAccount.filter(
-            Q(uuid=username_or_uuid) | Q(username__iexact=username_or_uuid)
-        ).prefetch_related('person').first()
-        
+        player = (
+            await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(username__iexact=username_or_uuid))
+            .prefetch_related("person")
+            .first()
+        )
+
         if player is None:
             await ctx.reply("That minecraft user was not found.")
             return
-        
+
         if player.person is None:
             await ctx.reply(f"Minecraft account `{player.username}` is not linked to any person.")
             return
-        
+
         # Fetch all linked accounts for this person
-        person_obj = await Person.get(id=player.person.id).prefetch_related(
-            'minecraft_accounts', 'discord_accounts'
-        )
-        
-        embed = discord.Embed(
-            title=f"Person: {person_obj.name or 'Unnamed'}",
-            color=discord.Color.blue()
-        )
-        
+        person_obj = await Person.get(id=player.person.id).prefetch_related("minecraft_accounts", "discord_accounts")
+
+        embed = discord.Embed(title=f"Person: {person_obj.name or 'Unnamed'}", color=discord.Color.blue())
+
         # Minecraft accounts
         mc_accounts = [f"• `{acc.username}` ({acc.uuid})" for acc in person_obj.minecraft_accounts]
         if mc_accounts:
-            embed.add_field(
-                name="Minecraft Accounts",
-                value="\n".join(mc_accounts),
-                inline=False
-            )
-        
+            embed.add_field(name="Minecraft Accounts", value="\n".join(mc_accounts), inline=False)
+
         # Discord accounts
         discord_accounts = []
         for acc in person_obj.discord_accounts:
@@ -345,51 +346,38 @@ class Admin(commands.Cog):
                 discord_accounts.append(f"• {user_obj.mention} ({user_obj.name})")
             except:
                 discord_accounts.append(f"• <@{acc.disc_uuid}>")
-        
+
         if discord_accounts:
-            embed.add_field(
-                name="Discord Accounts",
-                value="\n".join(discord_accounts),
-                inline=False
-            )
-        
+            embed.add_field(name="Discord Accounts", value="\n".join(discord_accounts), inline=False)
+
         await ctx.reply(embed=embed)
 
     @person_check.command(name="disc")
     @commands.has_permissions(manage_messages=True)
     async def person_check_disc(self, ctx: commands.Context, user: discord.Member):
         """Check a Discord account's linked person and all associated accounts"""
-        discord_acc = await DiscordAccount.filter(
-            disc_uuid=str(user.id)
-        ).prefetch_related('person').first()
-        
+        discord_acc = await DiscordAccount.filter(disc_uuid=str(user.id)).prefetch_related("person").first()
+
         if discord_acc is None:
             await ctx.reply(f"{user.mention} does not have a Discord account registered.")
             return
-        
+
         if discord_acc.person is None:
             await ctx.reply(f"{user.mention} is not linked to any person.")
             return
-        
+
         # Fetch all linked accounts for this person
         person_obj = await Person.get(id=discord_acc.person.id).prefetch_related(
-            'minecraft_accounts', 'discord_accounts'
+            "minecraft_accounts", "discord_accounts"
         )
-        
-        embed = discord.Embed(
-            title=f"Person: {person_obj.name or 'Unnamed'}",
-            color=discord.Color.blue()
-        )
-        
+
+        embed = discord.Embed(title=f"Person: {person_obj.name or 'Unnamed'}", color=discord.Color.blue())
+
         # Minecraft accounts
         mc_accounts = [f"• `{acc.username}` ({acc.uuid})" for acc in person_obj.minecraft_accounts]
         if mc_accounts:
-            embed.add_field(
-                name="Minecraft Accounts",
-                value="\n".join(mc_accounts),
-                inline=False
-            )
-        
+            embed.add_field(name="Minecraft Accounts", value="\n".join(mc_accounts), inline=False)
+
         # Discord accounts
         discord_accounts = []
         for acc in person_obj.discord_accounts:
@@ -398,14 +386,10 @@ class Admin(commands.Cog):
                 discord_accounts.append(f"• {user_obj.mention} ({user_obj.name})")
             except:
                 discord_accounts.append(f"• <@{acc.disc_uuid}>")
-        
+
         if discord_accounts:
-            embed.add_field(
-                name="Discord Accounts",
-                value="\n".join(discord_accounts),
-                inline=False
-            )
-        
+            embed.add_field(name="Discord Accounts", value="\n".join(discord_accounts), inline=False)
+
         await ctx.reply(embed=embed)
 
 

@@ -44,6 +44,12 @@ class Config:
         0,  # Replace with actual mod
     }
 
+    class AnniConfig:
+        ROLE_ID = 1457366058951249970
+        CHANNEL_ID = 1339393368672702567
+        WEBHOOK_ID = 1396669909077070007
+        TRIGGER = "@Prelude to Annihilation"
+
 
 class DevConfig(Config):
     GUILD = 1407388408472666243
@@ -61,6 +67,8 @@ class DevConfig(Config):
             0,
         }
     )
+
+    class AnniConfig(Config.AnniConfig): ...
 
 
 if os.environ.get("DAZEBOT_DEPLOYMENT") == "production":

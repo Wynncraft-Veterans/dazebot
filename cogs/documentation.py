@@ -1,6 +1,7 @@
 """
 Documentation lookup commands.
 """
+
 import re
 import io
 import aiohttp
@@ -9,8 +10,9 @@ from html import unescape
 from discord.ext import commands
 from discord.ext.commands import Context
 
-ALLOWED_CHANNEL = 1313786489112494080
-SECTIONS = ["guides", "guild", "major-changes"]
+from config import CurrConfig
+
+# TODO please just make an API available for wynnvet, this is high-key trash
 
 
 def slugify(text: str) -> str:
@@ -31,7 +33,7 @@ def html_to_markdown(html: str) -> str:
     s = html
 
     # Normalize newlines
-    s = s.replace('\r\n', '\n').replace('\r', '\n')
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
 
     # Pre/code blocks
     def _repl_pre(m):
@@ -47,23 +49,52 @@ def html_to_markdown(html: str) -> str:
 
     # Headings
     for i in range(1, 7):
-        s = re.sub(rf"<h{i}[^>]*>(.*?)</h{i}>", lambda m, i=i: "\n" + ("#" * i) + " " + re.sub(r"<[^>]+>", "", m.group(1)).strip() + "\n\n", s, flags=re.I | re.S)
+        s = re.sub(
+            rf"<h{i}[^>]*>(.*?)</h{i}>",
+            lambda m, i=i: "\n" + ("#" * i) + " " + re.sub(r"<[^>]+>", "", m.group(1)).strip() + "\n\n",
+            s,
+            flags=re.I | re.S,
+        )
 
     # Links
-    s = re.sub(r"<a[^>]*href=[\'\"](.*?)[\'\"][^>]*>(.*?)</a>", lambda m: f"[{re.sub(r'<[^>]+>', '', m.group(2)).strip()}]({m.group(1)})", s, flags=re.I | re.S)
+    s = re.sub(
+        r"<a[^>]*href=[\'\"](.*?)[\'\"][^>]*>(.*?)</a>",
+        lambda m: f"[{re.sub(r'<[^>]+>', '', m.group(2)).strip()}]({m.group(1)})",
+        s,
+        flags=re.I | re.S,
+    )
 
     # Images
-    s = re.sub(r"<img[^>]*src=[\'\"](.*?)[\'\"][^>]*alt=[\'\"](.*?)[\'\"][^>]*>", lambda m: f"![{m.group(2)}]({m.group(1)})", s, flags=re.I | re.S)
+    s = re.sub(
+        r"<img[^>]*src=[\'\"](.*?)[\'\"][^>]*alt=[\'\"](.*?)[\'\"][^>]*>",
+        lambda m: f"![{m.group(2)}]({m.group(1)})",
+        s,
+        flags=re.I | re.S,
+    )
     s = re.sub(r"<img[^>]*src=[\'\"](.*?)[\'\"][^>]*>", lambda m: f"![]({m.group(1)})", s, flags=re.I | re.S)
 
     # Bold / strong
-    s = re.sub(r"<(b|strong)[^>]*>(.*?)</\1>", lambda m: f"**{re.sub(r'<[^>]+>', '', m.group(2)).strip()}**", s, flags=re.I | re.S)
+    s = re.sub(
+        r"<(b|strong)[^>]*>(.*?)</\1>",
+        lambda m: f"**{re.sub(r'<[^>]+>', '', m.group(2)).strip()}**",
+        s,
+        flags=re.I | re.S,
+    )
 
     # Italic / em
-    s = re.sub(r"<(i|em)[^>]*>(.*?)</\1>", lambda m: f"*{re.sub(r'<[^>]+>', '', m.group(2)).strip()}*", s, flags=re.I | re.S)
+    s = re.sub(
+        r"<(i|em)[^>]*>(.*?)</\1>", lambda m: f"*{re.sub(r'<[^>]+>', '', m.group(2)).strip()}*", s, flags=re.I | re.S
+    )
 
     # Blockquotes
-    s = re.sub(r"<blockquote[^>]*>(.*?)</blockquote>", lambda m: "\n" + "\n".join(["> " + re.sub(r'<[^>]+>', '', line).strip() for line in m.group(1).strip().splitlines()]) + "\n\n", s, flags=re.I | re.S)
+    s = re.sub(
+        r"<blockquote[^>]*>(.*?)</blockquote>",
+        lambda m: "\n"
+        + "\n".join(["> " + re.sub(r"<[^>]+>", "", line).strip() for line in m.group(1).strip().splitlines()])
+        + "\n\n",
+        s,
+        flags=re.I | re.S,
+    )
 
     # Lists
     def _li_to_dash(m):
@@ -88,7 +119,9 @@ def html_to_markdown(html: str) -> str:
     s = re.sub(r"<ol[^>]*>(.*?)</ol>", _ol_to_num, s, flags=re.I | re.S)
 
     # Paragraphs -> double newline
-    s = re.sub(r"<p[^>]*>(.*?)</p>", lambda m: "\n" + re.sub(r"<[^>]+>", "", m.group(1)).strip() + "\n\n", s, flags=re.I | re.S)
+    s = re.sub(
+        r"<p[^>]*>(.*?)</p>", lambda m: "\n" + re.sub(r"<[^>]+>", "", m.group(1)).strip() + "\n\n", s, flags=re.I | re.S
+    )
 
     # Remove remaining tags
     s = re.sub(r"<[^>]+>", "", s)
@@ -102,7 +135,7 @@ def html_to_markdown(html: str) -> str:
     return s.strip()
 
 
-class Documentation(commands.Cog, name="documentation"): 
+class Documentation(commands.Cog, name="documentation"):
     def __init__(self, bot) -> None:
         self.bot = bot
 
@@ -116,7 +149,10 @@ class Documentation(commands.Cog, name="documentation"):
         """
         # Allow this to be used in the bot commands channel, or by staff
         has_delete_perm = getattr(ctx.author, "guild_permissions", None)
-        if not (ctx.channel.id == ALLOWED_CHANNEL or (has_delete_perm and has_delete_perm.manage_messages)):
+        if not (
+            ctx.channel.id in CurrConfig.DocumentationConfig.ALLOWED_CHANNELS
+            or (has_delete_perm and has_delete_perm.manage_messages)
+        ):
             await ctx.send("You don't have permission to use this command here.")
             return
 
@@ -126,7 +162,7 @@ class Documentation(commands.Cog, name="documentation"):
         # This is probably a terrible implementation.
         async with aiohttp.ClientSession() as session:
             found = False
-            for section in SECTIONS:
+            for section in CurrConfig.DocumentationConfig.SECTIONS:
                 url = f"https://wynnvets.org/docs/{section}/{topic}/"
                 try:
                     async with session.get(url) as resp:
@@ -158,7 +194,7 @@ class Documentation(commands.Cog, name="documentation"):
                         # Trim everything above the "Published <date>" header if present
                         pub_m = re.search(r"Published\s*.*?\d{4}", combined, re.I | re.S)
                         if pub_m:
-                            combined = combined[pub_m.start():]
+                            combined = combined[pub_m.start() :]
                         md = html_to_markdown(combined).strip()
                         if not md:
                             md = "(No text found.)"
@@ -176,7 +212,9 @@ class Documentation(commands.Cog, name="documentation"):
                         page_title = unescape(re.sub(r"<[^>]+>", "", title_m.group(1))).strip()
                     else:
                         h1_m = re.search(r"<h1[^>]*>(.*?)</h1>", text, re.I | re.S)
-                        page_title = unescape(re.sub(r"<[^>]+>", "", h1_m.group(1))).strip() if h1_m else f"{section}/{topic}"
+                        page_title = (
+                            unescape(re.sub(r"<[^>]+>", "", h1_m.group(1))).strip() if h1_m else f"{section}/{topic}"
+                        )
 
                     # Get first 800 characters (discord limit)
                     body_m = re.search(r"<body[^>]*>(.*?)</body>", text, re.I | re.S)
@@ -187,7 +225,7 @@ class Documentation(commands.Cog, name="documentation"):
                     # Trim everything above the "Published <date>" header.
                     pub_m = re.search(r"Published\s*.*?\d{4}", body, re.I | re.S)
                     if pub_m:
-                        body = body[pub_m.start():]
+                        body = body[pub_m.start() :]
                     # Limit to paragraphs, assuming I didn't write spans on the article. I may have.
                     p_m = re.search(r"<p[^>]*>(.*?)</p>", body, re.I | re.S)
                     if p_m:

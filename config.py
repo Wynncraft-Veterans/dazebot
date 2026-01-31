@@ -50,11 +50,16 @@ class Config:
         WEBHOOK_ID = 1396669909077070007
         TRIGGER = "@Prelude to Annihilation"
 
+    class DocumentationConfig:
+        ALLOWED_CHANNELS = {1313786489112494080}
+
+        SECTIONS = ["guides", "guild", "major-changes"]
+
 
 class DevConfig(Config):
     GUILD = 1407388408472666243
-    GUILD_DEAD_ALERT_CHANNEL = GUILD_FULL_ALERT_CHANNEL = 1407388410393399494
-    GUILD_FULL_ALERT_ROLE = 1409300773439012874
+    GUILD_DEAD_ALERT_CHANNEL = GUILD_FULL_ALERT_CHANNEL = 1407388410393399494  # general
+    GUILD_FULL_ALERT_ROLE = 1409300773439012874  # @aaaaa
     GUILD_DEAD_WHEN = 10
     GUILD_FULL_WHEN = 10
     ADMINS = {
@@ -69,6 +74,8 @@ class DevConfig(Config):
     )
 
     class AnniConfig(Config.AnniConfig): ...
+
+    class DocumentationConfig(Config.DocumentationConfig): ...
 
 
 if os.environ.get("DAZEBOT_DEPLOYMENT") == "production":

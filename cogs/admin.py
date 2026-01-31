@@ -2,6 +2,8 @@ import logging
 import discord
 from discord.ext import commands
 
+from lib.auth import is_admin
+
 logger = logging.getLogger("discord.cogs.admin")
 from bot import Bot
 from tortoise.expressions import Q
@@ -16,7 +18,7 @@ class Admin(commands.Cog):
         logger.info("Admin cog initialized")
 
     @commands.hybrid_command(name="sync", description="Sync slash commands")
-    @commands.has_permissions(administrator=True)
+    @is_admin()
     async def sync_commands(self, ctx: commands.Context):
         """Manually sync slash commands"""
         logger.info(f"Sync command initiated by {ctx.author} ({ctx.author.id}) in {ctx.guild}")
@@ -29,7 +31,7 @@ class Admin(commands.Cog):
             await ctx.send(f"Failed to sync commands: {e}")
 
     @commands.hybrid_command(name="reload", description="Reload a specific cog")
-    @commands.has_permissions(administrator=True)
+    @is_admin()
     async def reload_cog(self, ctx: commands.Context, cog_name: str):
         """Reload a specific cog"""
         logger.info(f"Reload command initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
@@ -44,7 +46,7 @@ class Admin(commands.Cog):
             await ctx.send(f"Failed to reload {cog_name}: {e}")
 
     @commands.hybrid_command(name="load", description="Load a specific cog")
-    @commands.has_permissions(administrator=True)
+    @is_admin()
     async def load_cog(self, ctx: commands.Context, cog_name: str):
         """Load a specific cog"""
         logger.info(f"Load command initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
@@ -59,7 +61,7 @@ class Admin(commands.Cog):
             await ctx.send(f"Failed to load {cog_name}: {e}")
 
     @commands.hybrid_command(name="unload", description="Unload a specific cog")
-    @commands.has_permissions(administrator=True)
+    @is_admin()
     async def unload_cog(self, ctx: commands.Context, cog_name: str):
         """Unload a specific cog"""
         logger.info(f"Unload command initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
@@ -74,7 +76,7 @@ class Admin(commands.Cog):
             await ctx.send(f"Failed to unload {cog_name}: {e}")
 
     @commands.hybrid_command(name="say")
-    @commands.has_permissions(administrator=True)
+    @is_admin()
     async def say(self, ctx: commands.Context, *, msg: str):
         if msg:
             await ctx.send(msg)
@@ -83,7 +85,7 @@ class Admin(commands.Cog):
 
     # TODO: Snagged from the internet. May not be the most optimal.
     @commands.hybrid_command(name="embed")
-    @commands.has_permissions(administrator=True)
+    @is_admin()
     async def embed(self, ctx: commands.Context, color: str = None, title: str = None, *, description: str = None):
         """Create a simple embed.
 
@@ -195,7 +197,7 @@ class Admin(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="set_shout_count")
-    @commands.has_permissions(administrator=True)
+    @is_admin()
     async def set_shout_count(self, ctx: commands.Context, user: discord.Member, count: int):
         """Forcefully set a user's shout_count (replaces the existing value).
         This will also create or delete `Shout` rows so `shouterboard` (which aggregates Shout rows)
@@ -210,13 +212,13 @@ class Admin(commands.Cog):
         await ctx.reply(f"Set shout_count for {user.mention} to {count}")
 
     @commands.hybrid_group(name="person")
+    @is_admin()
     async def person(self, ctx: commands.Context):
         """Manage person accounts linking Minecraft and Discord"""
         if ctx.invoked_subcommand is None:
             await ctx.send("Use subcommands: link, unlink, check")
 
     @person.command(name="link")
-    @commands.has_permissions(manage_messages=True)
     async def person_link(self, ctx: commands.Context, user: discord.Member, username_or_uuid: str):
         """Link a Discord user to a Minecraft account"""
         player = (
@@ -265,7 +267,6 @@ class Admin(commands.Cog):
             await ctx.send("Use: unlink mc <username> or unlink disc <user>")
 
     @person_unlink.command(name="mc")
-    @commands.has_permissions(manage_messages=True)
     async def person_unlink_mc(self, ctx: commands.Context, username_or_uuid: str):
         """Unlink a Minecraft account from its person"""
         player = (
@@ -287,7 +288,7 @@ class Admin(commands.Cog):
         await ctx.reply(f"Unlinked Minecraft account `{player.username}` from person.")
 
     @person_unlink.command(name="disc")
-    @commands.has_permissions(manage_messages=True)
+    @is_admin()
     async def person_unlink_disc(self, ctx: commands.Context, user: discord.Member):
         """Unlink a Discord account from its person"""
         discord_acc = await DiscordAccount.filter(disc_uuid=str(user.id)).prefetch_related("person").first()
@@ -311,7 +312,6 @@ class Admin(commands.Cog):
             await ctx.send("Use: check mc <username> or check disc <user>")
 
     @person_check.command(name="mc")
-    @commands.has_permissions(manage_messages=True)
     async def person_check_mc(self, ctx: commands.Context, username_or_uuid: str):
         """Check a Minecraft account's linked person and all associated accounts"""
         player = (
@@ -353,7 +353,6 @@ class Admin(commands.Cog):
         await ctx.reply(embed=embed)
 
     @person_check.command(name="disc")
-    @commands.has_permissions(manage_messages=True)
     async def person_check_disc(self, ctx: commands.Context, user: discord.Member):
         """Check a Discord account's linked person and all associated accounts"""
         discord_acc = await DiscordAccount.filter(disc_uuid=str(user.id)).prefetch_related("person").first()

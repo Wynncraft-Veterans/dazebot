@@ -33,12 +33,18 @@ class Admin(commands.Cog):
     @commands.hybrid_command(name="reload", description="Reload a specific cog")
     @is_admin()
     async def reload_cog(self, ctx: commands.Context, cog_name: str):
-        """Reload a specific cog"""
+        """Reload a cog or all cogs"""
         logger.info(f"Reload command initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
         try:
-            await self.bot.reload_extension(f"cogs.{cog_name}")
-            logger.info(f"Successfully reloaded cog '{cog_name}'")
-            await ctx.send(f"Successfully reloaded {cog_name}")
+            if cog_name == "ALL":
+                for ext in self.bot.extensions:
+                    await self.bot.reload_extension(ext)
+                logger.info("Successfully reloaded all cogs")
+                await ctx.send("Successfully reloaded all cogs")
+            else:
+                await self.bot.reload_extension(f"cogs.{cog_name}")
+                logger.info(f"Successfully reloaded cog '{cog_name}'")
+                await ctx.send(f"Successfully reloaded {cog_name}")
             await self.bot.tree.sync()
             logger.debug(f"Synced slash commands after reloading '{cog_name}'")
         except Exception as e:

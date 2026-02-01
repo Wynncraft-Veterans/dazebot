@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import os
 
 
+# TODO: annotate roles/channel IDs with their names (and color if applicable) for easier reference
 class Config:
     GUILD = 1313769181321236490
     GUILD_DEAD_ALERT_CHANNEL = 1401676479300898939
@@ -55,6 +56,23 @@ class Config:
 
         SECTIONS = ["guides", "guild", "major-changes"]
 
+    class VanityRolesConfig:
+        CUTOFFS = [
+            (
+                datetime(2013, 5, 7),
+                "1318063966420729866",
+            ),  # annotate the roles by their role names and/or color preferably
+            (datetime(2013, 6, 29), "1318064262681464882"),
+            (datetime(2013, 10, 30), "1318072464982675456"),
+            (datetime(2014, 8, 1), "1318072904474165298"),
+            (datetime(2014, 12, 22), "1318073239683207219"),
+            (datetime(2015, 12, 20), "1318073513453682698"),
+            (datetime(2017, 4, 7), "1318073571477815357"),
+            (datetime(2017, 12, 15), "1318073572031205376"),
+            (datetime(2019, 1, 18), "1318073572777918554"),
+            (datetime(2019, 12, 8), "1318073573667246151"),
+        ]
+
 
 class DevConfig(Config):
     GUILD = 1407388408472666243
@@ -76,6 +94,8 @@ class DevConfig(Config):
     class AnniConfig(Config.AnniConfig): ...
 
     class DocumentationConfig(Config.DocumentationConfig): ...
+
+    class VanityRolesConfig(Config.VanityRolesConfig): ...
 
 
 if os.environ.get("DAZEBOT_DEPLOYMENT") == "production":

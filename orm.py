@@ -99,6 +99,18 @@ class Shout(Model):
         table = "shouts"
 
 
+class WaitlistEntry(Model):
+    id = fields.UUIDField(pk=True)
+    uuid = fields.CharField(max_length=36, unique=True)
+    username = fields.CharField(max_length=255)
+    position = fields.IntField(default=0)
+    added_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "waitlist"
+        ordering = ["position"]
+
+
 # Database initialization helper
 async def init_db():
     from tortoise import Tortoise

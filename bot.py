@@ -51,6 +51,8 @@ class NOSQL:
     LAST_DEAD_ALERT = datetime.fromtimestamp(0, tz=timezone.utc)
     LAST_CAP_ALERT = datetime.fromtimestamp(0, tz=timezone.utc)
     LAST_CHECK_GUILD = datetime.fromtimestamp(0, tz=timezone.utc) # tasks might keep repeating even on cog reload? if yes, implement this variable where needed
+    ACTIVITY_ALERTS_ENABLED = True
+    CAPACITY_ALERTS_ENABLED = True
 
 
 class Bot(commands.Bot):

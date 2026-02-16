@@ -79,11 +79,11 @@ class Activity(commands.Cog):
 
         alerts = []
         now = datetime.now(timezone.utc)
-        if len(online) <= self.bot.config.GUILD_DEAD_WHEN and now - self.bot.nosql.LAST_DEAD_ALERT >= self.bot.config.GUILD_DEAD_ALERT_DELTA:
+        if self.bot.nosql.ACTIVITY_ALERTS_ENABLED and len(online) <= self.bot.config.GUILD_DEAD_WHEN and now - self.bot.nosql.LAST_DEAD_ALERT >= self.bot.config.GUILD_DEAD_ALERT_DELTA:
             self.bot.nosql.LAST_DEAD_ALERT = now
             alerts.append(self._low_count_alert())
         
-        if guild.members.total >= self.bot.config.GUILD_FULL_WHEN and now - self.bot.nosql.LAST_CAP_ALERT >= self.bot.config.GUILD_FULL_ALERT_DELTA:
+        if self.bot.nosql.CAPACITY_ALERTS_ENABLED and guild.members.total >= self.bot.config.GUILD_FULL_WHEN and now - self.bot.nosql.LAST_CAP_ALERT >= self.bot.config.GUILD_FULL_ALERT_DELTA:
             self.bot.nosql.LAST_CAP_ALERT = now
             alerts.append(self._guild_full_alert())
 
@@ -118,6 +118,22 @@ class Activity(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def force_check(self, _ctx: commands.Context):
         await self.check_guild()
+
+    @commands.hybrid_command(name='activity_stfu')
+    @commands.has_permissions(administrator=True)
+    async def toggle_activity_alerts(self, ctx: commands.Context):
+        """Toggle activity (dead guild) alerts on or off."""
+        self.bot.nosql.ACTIVITY_ALERTS_ENABLED = not self.bot.nosql.ACTIVITY_ALERTS_ENABLED
+        state = "enabled" if self.bot.nosql.ACTIVITY_ALERTS_ENABLED else "disabled"
+        await ctx.send(f"Activity alerts are now **{state}**.")
+
+    @commands.hybrid_command(name='capacity_stfu')
+    @commands.has_permissions(administrator=True)
+    async def toggle_capacity_alerts(self, ctx: commands.Context):
+        """Toggle capacity (guild full) alerts on or off."""
+        self.bot.nosql.CAPACITY_ALERTS_ENABLED = not self.bot.nosql.CAPACITY_ALERTS_ENABLED
+        state = "enabled" if self.bot.nosql.CAPACITY_ALERTS_ENABLED else "disabled"
+        await ctx.send(f"Capacity alerts are now **{state}**.")
     
     @commands.hybrid_command(name='purgelist')
     @commands.has_permissions(manage_messages=True)

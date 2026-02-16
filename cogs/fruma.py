@@ -58,6 +58,7 @@ class Fruma(commands.Cog):
         entries = await WaitlistEntry.all()
         now = datetime.now(timezone.utc)
 
+        removed = False
         for entry in entries:
             try:
                 player = await check_wynncraft_player(entry.uuid)
@@ -68,6 +69,7 @@ class Fruma(commands.Cog):
                 if player.get("guild") is not None:
                     logger.info(f"Removing {entry.username} from waitlist — joined guild")
                     await entry.delete()
+                    removed = True
                     continue
 
                 # Remove if not seen in STALE_DAYS
@@ -79,9 +81,18 @@ class Fruma(commands.Cog):
                     if now - last_join > timedelta(days=STALE_DAYS):
                         logger.info(f"Removing {entry.username} from waitlist — stale ({last_join})")
                         await entry.delete()
+                        removed = True
                         continue
             except Exception:
                 logger.exception(f"Error checking waitlist entry {entry.username}")
+
+        # Re-normalize positions to close any gaps
+        if removed:
+            remaining = await WaitlistEntry.all().order_by("position")
+            for i, entry in enumerate(remaining, 1):
+                if entry.position != i:
+                    entry.position = i
+                    await entry.save()
 
     @check_waitlist.before_loop
     async def before_check_waitlist(self):
@@ -171,6 +182,13 @@ class Fruma(commands.Cog):
         entry.position = spot
         await entry.save()
         await ctx.send(f"✅ Moved **{entry.username}** to position **{spot}**.")
+
+    @waitlist_group.command(name="clear", description="Delete the entire waitlist (admin)")
+    @commands.has_permissions(administrator=True)
+    async def waitlist_clear(self, ctx: commands.Context):
+        """Permanently delete all waitlist entries (admin only)."""
+        deleted = await WaitlistEntry.all().delete()
+        await ctx.send(f"🗑️ Cleared the waitlist ({deleted} entries removed).")
 
 
 async def setup(bot: Bot):

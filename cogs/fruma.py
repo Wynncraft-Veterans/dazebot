@@ -12,7 +12,7 @@ logger = logging.getLogger('discord.cogs.fruma')
 
 PLAYERDB_URL = "https://playerdb.co/api/player/minecraft/{}"
 WYNNCRAFT_PLAYER_URL = "https://api.wynncraft.com/v3/player/{}"
-STALE_DAYS = 4
+STALE_DAYS = 9
 
 
 async def resolve_uuid(username: str) -> tuple[str, str] | None:

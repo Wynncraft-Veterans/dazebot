@@ -34,7 +34,7 @@ class Config:
 
     GUILD_FULL_ALERT_ROLE = 1313778812361904188
     GUILD_DEAD_WHEN = 2
-    GUILD_FULL_WHEN = 92 - 1
+    GUILD_FULL_WHEN = 98 - 1
     GUILD_DEAD_ALERT_DELTA = timedelta(hours=4)
     GUILD_FULL_ALERT_DELTA = timedelta(hours=8)
 

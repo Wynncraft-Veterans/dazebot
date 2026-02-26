@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from pydantic import BaseModel, Field, field_validator, validator
 from typing import Optional, Dict
 
@@ -55,8 +55,8 @@ class WynncraftPlayer(BaseModel):
     shortenedRank: Optional[str] = None
     supportRank: Optional[str]
     veteran: Optional[bool] = None
-    firstJoin: datetime = Field(default_factory=lambda: datetime.fromtimestamp(0))
-    lastJoin: datetime = Field(default_factory=lambda: datetime.fromtimestamp(0))
+    firstJoin: datetime = Field(default_factory=lambda: datetime.fromtimestamp(0, tz=timezone.utc))
+    lastJoin: datetime = Field(default_factory=lambda: datetime.fromtimestamp(0, tz=timezone.utc))
     playtime: float = Field(default_factory=float)
     guild: Optional[Guild]
     globalData: Optional[GlobalData] = None
@@ -70,5 +70,5 @@ class WynncraftPlayer(BaseModel):
     def handle_none_datetime(cls, v):
         """Convert None to epoch datetime, let Pydantic handle everything else"""
         if v is None:
-            return datetime.fromtimestamp(0)
+            return datetime.fromtimestamp(0, tz=timezone.utc)
         return v

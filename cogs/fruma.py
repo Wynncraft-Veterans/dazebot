@@ -75,7 +75,10 @@ class Fruma(commands.Cog):
                 # Remove if not seen in STALE_DAYS
                 last_join_str = player.get("lastJoin")
                 if last_join_str:
-                    last_join = datetime.fromisoformat(last_join_str)
+                    # Player API returns ISO timestamps with a trailing 'Z' (UTC).
+                    # Python's datetime.fromisoformat doesn't accept 'Z', so convert
+                    # it to an explicit offset before parsing.
+                    last_join = datetime.fromisoformat(last_join_str.replace("Z", "+00:00"))
                     if last_join.tzinfo is None:
                         last_join = last_join.replace(tzinfo=timezone.utc)
                     if now - last_join > timedelta(days=STALE_DAYS):

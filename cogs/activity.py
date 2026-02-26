@@ -37,7 +37,7 @@ class Activity(commands.Cog):
                 defaults={
                     "guild": guild.name,
                     "username": member.username,
-                    "last_online": datetime.now()
+                    "last_online": datetime.now(timezone.utc)
                 }
             )
         for member in offline:
@@ -46,7 +46,7 @@ class Activity(commands.Cog):
                 defaults={
                     "guild": guild.name,
                     "username": member.username,
-                    "last_online": datetime.fromtimestamp(0)
+                    "last_online": datetime.fromtimestamp(0, timezone.utc)
                     }
             )
             
@@ -57,7 +57,7 @@ class Activity(commands.Cog):
         logger.info("members to check")
         members_to_check = await MinecraftAccount.filter(
             Q(
-                last_online__lt=datetime.now() - timedelta(weeks=2),
+                last_online__lt=datetime.now(timezone.utc) - timedelta(weeks=2),
                 uuid__in=[m.uuid for m in offline]
             ) | Q(
                 uuid__not_in=[m.uuid for m in members]
@@ -140,7 +140,7 @@ class Activity(commands.Cog):
     async def purgelist(self, ctx: commands.Context):
         absent_guild_members = await MinecraftAccount.filter(
             guild="Returners",
-            last_online__lt=datetime.now() - timedelta(weeks=2)
+            last_online__lt=datetime.now(timezone.utc) - timedelta(weeks=2)
         ).order_by('-last_online')
         
         if not absent_guild_members:
@@ -148,7 +148,7 @@ class Activity(commands.Cog):
             return
         
         logger.info([m.last_online.tzinfo for m in absent_guild_members])
-        logger.info(datetime.now().tzinfo)
+        logger.info(datetime.now(timezone.utc).tzinfo)
 
         lines = [f"- `{m.username}` has been away for {(datetime.now(timezone.utc) - m.last_online).days} days."
             for m in reversed(absent_guild_members)]
@@ -164,7 +164,7 @@ class Activity(commands.Cog):
             await ctx.send("Please provide a positive number of days.")
             return
 
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         absent_guild_members = await MinecraftAccount.filter(
             guild="Returners",
             last_online__lt=cutoff
@@ -175,7 +175,7 @@ class Activity(commands.Cog):
             return
 
         logger.info([m.last_online.tzinfo for m in absent_guild_members])
-        logger.info(datetime.now().tzinfo)
+        logger.info(datetime.now(timezone.utc).tzinfo)
 
         lines = [f"- `{m.username}` has been away for {(datetime.now(timezone.utc) - m.last_online).days} days."
             for m in reversed(absent_guild_members)]

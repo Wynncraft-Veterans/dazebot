@@ -108,9 +108,22 @@ class Bot(commands.Bot):
             await ctx.send(f"❌ Missing argument: {error.param.name}")
         elif isinstance(error, commands.CommandNotFound):
             pass
+        elif isinstance(error, commands.MissingPermissions):
+            missing = getattr(error, 'missing_permissions', None)
+            if missing:
+                missing_text = ', '.join(missing)
+                await ctx.reply(f"You are missing the following permission(s): {missing_text}", mention_author=False)
+            else:
+                await ctx.reply("You don't have the required permissions to run this command.", mention_author=False)
+        elif isinstance(error, commands.CheckFailure):
+            await ctx.reply("You don't have permission to use that command.", mention_author=False)
         else:
-            print(f"Unhandled error: {error}")
-            raise error
+            logger.error(f"Unhandled error in command {ctx.command}: {error}")
+            try:
+                await ctx.send("An unexpected error occurred. The incident has been logged.")
+            except Exception:
+                # If sending fails, just log and continue
+                logger.exception("Failed to send error message to context")
 
 
 if __name__ == '__main__':

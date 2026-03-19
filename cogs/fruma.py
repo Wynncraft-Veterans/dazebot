@@ -6,6 +6,7 @@ from discord.ext import commands, tasks
 from tortoise.expressions import F
 
 from bot import Bot
+from lib.wynn_api.guild import get_guild
 from orm import WaitlistEntry
 
 logger = logging.getLogger('discord.cogs.fruma')
@@ -13,6 +14,7 @@ logger = logging.getLogger('discord.cogs.fruma')
 PLAYERDB_URL = "https://playerdb.co/api/player/minecraft/{}"
 WYNNCRAFT_PLAYER_URL = "https://api.wynncraft.com/v3/player/{}"
 STALE_DAYS = 9
+VETS_GUILD_NAME = "Returners"
 
 
 async def resolve_uuid(username: str) -> tuple[str, str] | None:
@@ -66,7 +68,21 @@ class Fruma(commands.Cog):
                     continue
 
                 # Remove if they joined a guild
-                if player.get("guild") is not None:
+                guild_info = player.get("guild")
+                if guild_info is not None:
+                    guild_name = guild_info.get("name", "")
+                    # The player endpoint sometimes falsely reports membership
+                    # in the vets guild — cross-check with the guild endpoint.
+                    if guild_name == VETS_GUILD_NAME:
+                        try:
+                            guild_data = await get_guild(VETS_GUILD_NAME)
+                            in_guild = any(m.uuid == entry.uuid for m in guild_data.members.all_members())
+                        except Exception:
+                            logger.warning(f"Could not verify {entry.username} against guild endpoint, skipping removal")
+                            in_guild = False
+                        if not in_guild:
+                            logger.info(f"Skipping {entry.username} — player API says {VETS_GUILD_NAME} but guild endpoint disagrees")
+                            continue
                     logger.info(f"Removing {entry.username} from waitlist — joined guild")
                     await entry.delete()
                     removed = True

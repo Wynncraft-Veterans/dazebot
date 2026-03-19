@@ -8,7 +8,7 @@ from lib.discord_paginated_embed import Paginator, from_lines
 from lib.lib import unwrap
 from lib.wynn_api.guild import get_guild
 from lib.wynn_api.player import get_player_main_stats
-from orm import DiscordAccount, MinecraftAccount, Shout
+from orm import BotSetting, DiscordAccount, MinecraftAccount, Shout
 logger = logging.getLogger('discord.cogs.activity')
 from bot import Bot
 import dateparser
@@ -124,6 +124,7 @@ class Activity(commands.Cog):
     async def toggle_activity_alerts(self, ctx: commands.Context):
         """Toggle activity (dead guild) alerts on or off."""
         self.bot.nosql.ACTIVITY_ALERTS_ENABLED = not self.bot.nosql.ACTIVITY_ALERTS_ENABLED
+        await BotSetting.update_or_create(key="activity_alerts_enabled", defaults={"value": "1" if self.bot.nosql.ACTIVITY_ALERTS_ENABLED else "0"})
         state = "enabled" if self.bot.nosql.ACTIVITY_ALERTS_ENABLED else "disabled"
         await ctx.send(f"Activity alerts are now **{state}**.")
 
@@ -132,6 +133,7 @@ class Activity(commands.Cog):
     async def toggle_capacity_alerts(self, ctx: commands.Context):
         """Toggle capacity (guild full) alerts on or off."""
         self.bot.nosql.CAPACITY_ALERTS_ENABLED = not self.bot.nosql.CAPACITY_ALERTS_ENABLED
+        await BotSetting.update_or_create(key="capacity_alerts_enabled", defaults={"value": "1" if self.bot.nosql.CAPACITY_ALERTS_ENABLED else "0"})
         state = "enabled" if self.bot.nosql.CAPACITY_ALERTS_ENABLED else "disabled"
         await ctx.send(f"Capacity alerts are now **{state}**.")
     

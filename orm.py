@@ -120,6 +120,14 @@ class LegacyWarning(Model):
         table = "legacy_warnings"
 
 
+class BotSetting(Model):
+    key = fields.CharField(max_length=255, pk=True)
+    value = fields.CharField(max_length=255)
+
+    class Meta:
+        table = "bot_settings"
+
+
 # Database initialization helper
 async def init_db():
     from tortoise import Tortoise

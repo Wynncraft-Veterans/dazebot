@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands
 import os
 
-from orm import close_db, init_db
+from orm import BotSetting, close_db, init_db
 logger = logging.getLogger('discord.bot')
 from dotenv import load_dotenv
 load_dotenv()
@@ -54,6 +54,12 @@ class NOSQL:
     ACTIVITY_ALERTS_ENABLED = True
     CAPACITY_ALERTS_ENABLED = True
 
+    async def load_from_db(self):
+        for key, attr in [("activity_alerts_enabled", "ACTIVITY_ALERTS_ENABLED"), ("capacity_alerts_enabled", "CAPACITY_ALERTS_ENABLED")]:
+            setting = await BotSetting.filter(key=key).first()
+            if setting is not None:
+                setattr(self, attr, setting.value == "1")
+
 
 class Bot(commands.Bot):
     config: Config = Config()
@@ -67,6 +73,7 @@ class Bot(commands.Bot):
         try:
             await init_db()
             logger.info('Connected to database')
+            await self.nosql.load_from_db()
         except Exception as e:
             logger.error(f'Failed to connect to database: {e}')
         await self._load_cogs()

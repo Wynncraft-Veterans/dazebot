@@ -1,10 +1,10 @@
 import logging
-from datetime import datetime, timedelta, timezone
 
 import discord
 from discord.ext import commands
 
 from bot import Bot
+from orm import LegacyWarning
 
 # TODO: THIS ENTIRE IMPLEMENTATION IS AWFUL!
 # THIS WHOLE COG SHOULD BE REWRITTEN LATER!
@@ -13,8 +13,6 @@ logger = logging.getLogger('discord.cogs.legacy_items')
 
 # Channel where legacy items are posted
 CHANNEL_ID = 1316957148332298260
-# Don't warn again for the same user within this delta
-WARN_DELTA = timedelta(days=60)
 
 # The warning text (kept verbatim from the request)
 WARNING_TEXT = '''
@@ -44,8 +42,6 @@ class LegacyItems(commands.Cog):
 
     def __init__(self, bot: Bot):
         self.bot = bot
-        if not hasattr(self.bot.nosql, 'LEGACY_LAST_POSTS'):
-            self.bot.nosql.LEGACY_LAST_POSTS = {}
         logger.info('Initialized LegacyItems Cog')
 
     @commands.Cog.listener()
@@ -57,16 +53,17 @@ class LegacyItems(commands.Cog):
         if message.author.bot:
             return
 
-        user_id = message.author.id
-        now = datetime.now(timezone.utc)
+        user_id = str(message.author.id)
 
-        last = self.bot.nosql.LEGACY_LAST_POSTS.get(user_id)
-        if last is None or (now - last) >= WARN_DELTA:
+        already_warned = await LegacyWarning.exists(disc_id=user_id)
+        if not already_warned:
             try:
-                await message.reply(WARNING_TEXT, mention_author=False)
+                await message.author.send(WARNING_TEXT)
+            except discord.Forbidden:
+                logger.warning('Could not DM user %s (DMs disabled)', user_id)
             except Exception:
-                logger.exception('Failed to send legacy items warning')
-            self.bot.nosql.LEGACY_LAST_POSTS[user_id] = now
+                logger.exception('Failed to DM legacy items warning')
+            await LegacyWarning.create(disc_id=user_id)
 
 
 async def setup(bot: Bot):

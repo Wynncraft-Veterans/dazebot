@@ -1,12 +1,17 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
+import aiohttp
 import discord
 from discord.ext import commands, tasks
 from lib.discord_paginated_embed import Paginator, from_lines
+from lib.lib import ProfCategory
 from lib.wynn_api.guild import get_guild
-from lib.wynn_api.player import get_player_main_stats
-from orm import DiscordAccount, MinecraftAccount, Shout
+from lib.wynn_api.guild_models import BaseMember, Guild
+from lib.wynn_api.player import get_player_full_stats
+from lib.wynn_api.player_models import WynncraftPlayer
+from lib.wynn_api.requestor import Requestor
+from orm import DiscordAccount, MinecraftAccount, ProfessionCategories, Shout
 
 logger = logging.getLogger("discord.cogs.activity")
 from bot import Bot
@@ -16,66 +21,170 @@ from tortoise.expressions import Q
 ROLES_ALLOWED_TO_SHOUT = [1402295013169172500, 1436108975132119221, 1436109140195020892]
 
 
+_session: aiohttp.ClientSession | None = None
+
+
+async def get_session():
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession()
+    return _session
+
+
+async def get_mc_username(uuid: str) -> str:
+    session = await get_session()
+    async with session.get(f"https://api.ashcon.app/mojang/v2/user/{uuid}") as res:
+        data = await res.json()
+        return data["username"]
+
+
+# honestly, such a small impl it doesnt need to be in wynn_api folder
+# also because it doesnt have any pydantic classes wrapped around the result
+async def get_server_players(server: str):
+    requestor = Requestor()
+    res = await requestor.get(f"https://api.wynncraft.com/v3/player?identifier=uuid&server={server}")
+    data = await res.json()
+    return [*data["players"].keys()]
+
+
 class Activity(commands.Cog):
     bot: Bot
+    queue: set[str]
 
     def __init__(self, bot: Bot):
         self.bot = bot
         self.check_guild.start()
+        self.queue = set()
         logger.info("Activity cog initialized")
+
+    async def _check_player_full(self, uuid: str) -> tuple[str, WynncraftPlayer, MinecraftAccount]:
+        mc_username = await get_mc_username(uuid)
+        player = await get_player_full_stats(uuid)
+        account = await MinecraftAccount.get(uuid=player.uuid)
+        # if player.guild is None:
+        #     account.guild = None
+        if account.last_online < player.lastJoin:
+            account.last_online = player.lastJoin
+        account.wynn_username = player.username
+        account.mc_username = mc_username
+        account.last_manual_check = datetime.now(timezone.utc)
+        await account.save()
+        # if guild_name is not None:
+        #     await self._check_guild(guild_name)
+
+        profs = {}
+        if player.characters:
+            for char in player.characters.values():
+                for prof_type, prof in char.professions.items():
+                    profs[prof_type] = max(profs.setdefault(prof_type, 0), prof.level)
+
+        for prof_type, level in profs.items():
+            _prof, _created = await ProfessionCategories.update_or_create(
+                minecraft_account=account,
+                prof_type=prof_type,
+                defaults={
+                    "category": ProfCategory(["pleb", "void", "dernic"][(level >= 100) + (level >= 103)]),
+                },
+            )
+
+        return mc_username, player, account
+
+    @tasks.loop(minutes=1)
+    async def eat_queue(self): ...
+
+    async def _apply_guild(self, guild: Guild, member: BaseMember):
+        mc_username = await get_mc_username(member.uuid)
+        account, created = await MinecraftAccount.get_or_create(
+            uuid=member.uuid,
+            defaults={
+                "guild": guild.name,
+                "wynn_username": member.username,
+                "mc_username": mc_username,
+                "last_online": datetime.now(timezone.utc)
+                if member.online
+                else datetime.fromtimestamp(0, tz=timezone.utc),
+                "last_manual_check": datetime.fromtimestamp(0, tz=timezone.utc),
+            },
+        )
+
+        if not created:
+            account.guild = guild.name
+            account.wynn_username = member.username
+            account.mc_username = mc_username
+            now = datetime.now(timezone.utc)
+            if member.online and account.last_online <= now:
+                account.last_online = now
+            await account.save()
+
+    async def _check_guild(self, guild_name_full: str) -> Guild:
+        guild = await get_guild(guild_name_full)
+        members = [*guild.members.all_members()]
+        logger.info(f"checking online members {[m.username for m in members if m.online]}")
+
+        tasks = []
+
+        for member in members:
+            tasks.append(self._apply_guild(guild, member))
+
+        accounts = await MinecraftAccount.filter(Q(guild=guild_name_full) & ~Q(uuid__in=[m.uuid for m in members]))
+        for account in accounts:
+            account.guild = None
+            await account.save()
+
+        await asyncio.gather(*tasks)
+
+        return guild
 
     @tasks.loop(minutes=11)
     async def check_guild(self):
         logger.info("Doing check_guild task")
-        guild = await get_guild("Returners")
-        members = [*guild.members.all_members()]
-        online = [m for m in members if m.online]
-        offline = [m for m in members if not m.online]
-        logger.info("checking online members")
-        for member in online:
-            await MinecraftAccount.update_or_create(
-                uuid=member.uuid,
-                defaults={
-                    "guild": guild.name,
-                    "username": member.username,
-                    "last_online": datetime.now(),
-                },
-            )
-        for member in offline:
-            account, created = await MinecraftAccount.get_or_create(
-                uuid=member.uuid,
-                defaults={
-                    "guild": guild.name,
-                    "username": member.username,
-                    "last_online": datetime.fromtimestamp(0),
-                },
-            )
+        guild = await self._check_guild("Returners")
+        online = [m for m in guild.members.all_members() if m.online]
 
-            if not created:
-                account.guild = guild.name
-                account.username = member.username
-                await account.save(update_fields=["guild", "username"])
-        logger.info("members to check")
+        logger.info(f"members to check right now {[m.username for m in online]}")
         members_to_check = await MinecraftAccount.filter(
-            Q(
-                last_online__lt=datetime.now() - timedelta(weeks=2),
-                uuid__in=[m.uuid for m in offline],
+            Q(guild="Returners")
+            & (
+                Q(
+                    last_online__lt=datetime.now(timezone.utc) - timedelta(days=9),  # TODO make configurable
+                )
+                | Q(last_manual_check__lt=datetime.now(timezone.utc) - timedelta(weeks=1))  # TODO make configurable
             )
-            | Q(uuid__not_in=[m.uuid for m in members])
         )
+
+        guilds_to_check = set()
+
         logger.info(f"checking members {len(members_to_check)=}")
-        for member in members_to_check:
-            logger.info(f"{member.username=} {member.uuid=}")
-            player = await get_player_main_stats(member.uuid)
+
+        async def _check_member_helper(member: MinecraftAccount):
+            logger.info(f"{member.wynn_username=} {member.uuid=}")
+            _, player, _ = await self._check_player_full(member.uuid)
+
+            if player.server:
+                logger.info(f"checking {player.server}")
+                if member.uuid in await get_server_players(player.server):
+                    account = await MinecraftAccount.get(uuid=player.uuid)
+                    account.last_online = datetime.now(timezone.utc)
+                    await account.save()
+
             guild_name = player.guild.name if player.guild else None
-            await MinecraftAccount.update_or_create(
-                uuid=player.uuid,
-                defaults={
-                    "guild": guild_name,
-                    "last_online": player.lastJoin,
-                    "username": player.username,
-                },
-            )
+            guilds_to_check.add(guild_name)
+
+        # check_members_task = []
+        for member in members_to_check:
+            # check_members_task.append(_check_member_helper(member))
+            await _check_member_helper(member)
+
+        # await asyncio.gather(*check_members_task)
+
+        guilds_to_check.discard("Returners")
+
+        tasks = []
+
+        for guild in guilds_to_check:
+            tasks.append(self._check_guild(guild))
+
+        await asyncio.gather(*tasks)
 
         alerts = []
         now = datetime.now(timezone.utc)
@@ -129,8 +238,8 @@ class Activity(commands.Cog):
         await self.check_guild()
 
     @commands.hybrid_command(name="purgelist")
-    async def purgelist(self, ctx: commands.Context, days: int = 14):
-        cutoff = datetime.now() - timedelta(days=14)
+    async def purgelist(self, ctx: commands.Context, days: int = 9):
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         absent_guild_members = await MinecraftAccount.filter(guild="Returners", last_online__lt=cutoff).order_by(
             "-last_online"
         )
@@ -143,7 +252,7 @@ class Activity(commands.Cog):
         logger.info(datetime.now().tzinfo)
 
         lines = [
-            f"- `{m.username}` has been away for {(datetime.now(timezone.utc) - m.last_online).days} days."
+            f"- `{m.wynn_username if m.wynn_username == m.mc_username else m.wynn_username + '|' + m.mc_username}` has been away for {(datetime.now(timezone.utc) - m.last_online).days} days."
             for m in reversed(absent_guild_members)
         ]
 
@@ -206,9 +315,9 @@ class Activity(commands.Cog):
     @commands.hybrid_command(name="last_online")
     async def last_online(self, ctx: commands.Context, username_or_uuid: str):
         try:
-            player = await MinecraftAccount.get(Q(uuid=username_or_uuid) | Q(username=username_or_uuid))
+            player = await MinecraftAccount.get(Q(uuid=username_or_uuid) | Q(wynn_username=username_or_uuid))
             ts = int(player.last_online.timestamp())
-            await ctx.send(f"{player.username} was last online on <t:{ts}:F>, which was <t:{ts}:R>")
+            await ctx.send(f"{player.wynn_username} was last online on <t:{ts}:F>, which was <t:{ts}:R>")
         except Exception as e:
             logger.error(f"[/last_online] {e}")
             await ctx.send("That user probably does not exist, is too new or is not in the guild.")

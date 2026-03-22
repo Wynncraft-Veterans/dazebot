@@ -228,7 +228,7 @@ class Admin(commands.Cog):
     async def person_link(self, ctx: commands.Context, user: discord.Member, username_or_uuid: str):
         """Link a Discord user to a Minecraft account"""
         player = (
-            await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(username=username_or_uuid))
+            await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(wynn_username=username_or_uuid))
             .prefetch_related("person")
             .first()
         )
@@ -244,19 +244,19 @@ class Admin(commands.Cog):
 
         if player.person and discord_acc.person:
             if player.person.id == discord_acc.person.id:
-                await ctx.reply(f"{user.mention} is already linked to Minecraft account `{player.username}`")
+                await ctx.reply(f"{user.mention} is already linked to Minecraft account `{player.wynn_username}`")
             else:
                 await ctx.reply("Both accounts are already linked to different persons. Please unlink first.")
 
         elif player.person:
             discord_acc.person = player.person
             await discord_acc.save()
-            await ctx.reply(f"Linked {user.mention} to existing person with Minecraft account `{player.username}`")
+            await ctx.reply(f"Linked {user.mention} to existing person with Minecraft account `{player.wynn_username}`")
 
         elif discord_acc.person:
             player.person = discord_acc.person
             await player.save()
-            await ctx.reply(f"Linked Minecraft account `{player.username}` to {user.mention}'s existing person")
+            await ctx.reply(f"Linked Minecraft account `{player.wynn_username}` to {user.mention}'s existing person")
 
         else:
             person_obj = await Person.create(name=user.display_name)
@@ -264,7 +264,9 @@ class Admin(commands.Cog):
             discord_acc.person = person_obj
             await player.save()
             await discord_acc.save()
-            await ctx.reply(f"Created new person and linked {user.mention} to Minecraft account `{player.username}`")
+            await ctx.reply(
+                f"Created new person and linked {user.mention} to Minecraft account `{player.wynn_username}`"
+            )
 
     @person.group(name="unlink")
     async def person_unlink(self, ctx: commands.Context):
@@ -276,7 +278,7 @@ class Admin(commands.Cog):
     async def person_unlink_mc(self, ctx: commands.Context, username_or_uuid: str):
         """Unlink a Minecraft account from its person"""
         player = (
-            await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(username=username_or_uuid))
+            await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(wynn_username=username_or_uuid))
             .prefetch_related("person")
             .first()
         )
@@ -286,12 +288,12 @@ class Admin(commands.Cog):
             return
 
         if player.person is None:
-            await ctx.reply(f"Minecraft account `{player.username}` is not linked to any person.")
+            await ctx.reply(f"Minecraft account `{player.wynn_username}` is not linked to any person.")
             return
 
         player.person = None
         await player.save()
-        await ctx.reply(f"Unlinked Minecraft account `{player.username}` from person.")
+        await ctx.reply(f"Unlinked Minecraft account `{player.wynn_username}` from person.")
 
     @person_unlink.command(name="disc")
     @is_admin()
@@ -321,7 +323,7 @@ class Admin(commands.Cog):
     async def person_check_mc(self, ctx: commands.Context, username_or_uuid: str):
         """Check a Minecraft account's linked person and all associated accounts"""
         player = (
-            await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(username__iexact=username_or_uuid))
+            await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(wynn_username__iexact=username_or_uuid))
             .prefetch_related("person")
             .first()
         )
@@ -331,7 +333,7 @@ class Admin(commands.Cog):
             return
 
         if player.person is None:
-            await ctx.reply(f"Minecraft account `{player.username}` is not linked to any person.")
+            await ctx.reply(f"Minecraft account `{player.wynn_username}` is not linked to any person.")
             return
 
         # Fetch all linked accounts for this person
@@ -340,7 +342,7 @@ class Admin(commands.Cog):
         embed = discord.Embed(title=f"Person: {person_obj.name or 'Unnamed'}", color=discord.Color.blue())
 
         # Minecraft accounts
-        mc_accounts = [f"• `{acc.username}` ({acc.uuid})" for acc in person_obj.minecraft_accounts]
+        mc_accounts = [f"• `{acc.wynn_username}` ({acc.uuid})" for acc in person_obj.minecraft_accounts]
         if mc_accounts:
             embed.add_field(name="Minecraft Accounts", value="\n".join(mc_accounts), inline=False)
 
@@ -379,7 +381,7 @@ class Admin(commands.Cog):
         embed = discord.Embed(title=f"Person: {person_obj.name or 'Unnamed'}", color=discord.Color.blue())
 
         # Minecraft accounts
-        mc_accounts = [f"• `{acc.username}` ({acc.uuid})" for acc in person_obj.minecraft_accounts]
+        mc_accounts = [f"• `{acc.wynn_username}` ({acc.uuid})" for acc in person_obj.minecraft_accounts]
         if mc_accounts:
             embed.add_field(name="Minecraft Accounts", value="\n".join(mc_accounts), inline=False)
 

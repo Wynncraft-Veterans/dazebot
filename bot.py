@@ -83,6 +83,22 @@ class Bot(commands.Bot):
             raise error
 
 
+# if __name__ == "__main__":
+#     bot = Bot(command_prefix=os.environ["PREFIX"], intents=intents)
+#     bot.run(os.environ["TOKEN"])
+
+from discord.utils import _ColourFormatter  # private but stable enough
+
+
+class LineColourFormatter(_ColourFormatter):
+    def format(self, record: logging.LogRecord) -> str:
+        location = f"{record.filename}:{record.lineno}"
+        funcname = f"({record.funcName})"
+        record.name = f"{location:<20} {funcname:<15}"
+        return super().format(record)
+
+
 if __name__ == "__main__":
+    discord.utils.setup_logging(level=logging.INFO, formatter=LineColourFormatter())
     bot = Bot(command_prefix=os.environ["PREFIX"], intents=intents)
-    bot.run(os.environ["TOKEN"])
+    bot.run(os.environ["TOKEN"], log_handler=None)

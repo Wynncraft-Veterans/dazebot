@@ -287,24 +287,12 @@ class Activity(commands.Cog):
 
     @commands.hybrid_command(name="shouterboard")
     async def shouterboard(self, ctx: commands.Context):
-        from tortoise.functions import Count
-
-        # Get counts with discord account info
-        shout_counter = (
-            await Shout.annotate(shout_count=Count("id")).group_by("shouter_id").values("shouter_id", "shout_count")
-        )
-
-        sorted_counts = sorted(shout_counter, key=lambda x: x["shout_count"], reverse=True)
-
-        shouter_ids = [item["shouter_id"] for item in sorted_counts]
-        shouters = await DiscordAccount.filter(id__in=shouter_ids)
-        shouter_dict = {s.id: s for s in shouters}
+        shouters = await DiscordAccount.filter(shout_count__gt=0).order_by("-shout_count")
 
         lines = []
-        for item in sorted_counts:
-            shouter = shouter_dict[item["shouter_id"]]
+        for shouter in shouters:
             user = await self.bot.fetch_user(int(shouter.disc_uuid))
-            lines.append(f"{user.mention}: {item['shout_count']} shouts")
+            lines.append(f"{user.mention}: {shouter.shout_count} shouts")
 
         if lines:
             embeds = from_lines("Shouterboard", lines, 10, logger)

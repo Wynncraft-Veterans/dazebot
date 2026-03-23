@@ -205,10 +205,7 @@ class Admin(commands.Cog):
     @commands.hybrid_command(name="set_shout_count")
     @is_admin()
     async def set_shout_count(self, ctx: commands.Context, user: discord.Member, count: int):
-        """Forcefully set a user's shout_count (replaces the existing value).
-        This will also create or delete `Shout` rows so `shouterboard` (which aggregates Shout rows)
-        reflects the new value.
-        """
+        """Forcefully set a user's shout_count (replaces the existing value)."""
         discord_acc, _ = await DiscordAccount.get_or_create(
             disc_uuid=str(user.id),
         )

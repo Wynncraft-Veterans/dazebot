@@ -65,6 +65,8 @@ class Activity(commands.Cog):
         #     account.guild = None
         if account.last_online < player.lastJoin:
             account.last_online = player.lastJoin
+        if player.firstJoin:
+            account.first_join = player.firstJoin
         account.wynn_username = player.username
         account.mc_username = mc_username
         account.last_manual_check = datetime.now(timezone.utc)
@@ -160,7 +162,9 @@ class Activity(commands.Cog):
             logger.info(f"{member.wynn_username=} {member.uuid=}")
             _, player, _ = await self._check_player_full(member.uuid)
 
-            if player.server:
+            if player.server and (
+                player.lastJoin <= datetime.now(timezone.utc) - timedelta(days=9)
+            ):  # TODO configurable
                 logger.info(f"checking {player.server}")
                 if member.uuid in await get_server_players(player.server):
                     account = await MinecraftAccount.get(uuid=player.uuid)

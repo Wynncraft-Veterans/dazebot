@@ -39,7 +39,7 @@ class Requestor(metaclass=SingletonMeta):
 
         now = time.time()
 
-        if len(self.deque) >= 50:
+        if len(self.deque) >= 120:
             logger.info("Throttling requests")
             sleep_time = 60 - (now - self.deque[0])
             if sleep_time > 0:
@@ -53,8 +53,11 @@ class Requestor(metaclass=SingletonMeta):
         session = await self._get_session()
         res = await session.get(url, **kwargs)
         if res.status == 429:
-            logger.warning("Oops, exceded rate limit")
-            await asyncio.sleep(1)
+            # await asyncio.sleep(1)
+            r = res.headers.get("RateLimit-Reset")
+            s = int(r) if r else 1
+            logger.warning(f"Oops, exceded rate limit. Waiting for {s} seconds")
+            await asyncio.sleep(s)
             res = await self.get(url, **kwargs)
         if res.status != 200:
             logger.error("Unhandled WAPI return")

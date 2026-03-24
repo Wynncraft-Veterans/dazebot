@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from datetime import datetime
 from typing import Optional
 
 from tortoise import fields
@@ -6,10 +9,14 @@ from tortoise.models import Model
 from lib.lib import ProfCategory
 from lib.wynn_api.player_models import CharacterProfessionsType
 
+import uuid
+
 
 class Person(Model):
     id = fields.UUIDField(pk=True)
     name = fields.CharField(max_length=255, null=True)
+
+    discord_accounts: fields.ReverseRelation[DiscordAccount]
 
     class Meta:
         table = "person"
@@ -20,12 +27,15 @@ class MinecraftAccount(Model):
     person = fields.ForeignKeyField(
         "models.Person", related_name="minecraft_accounts", null=True, on_delete=fields.SET_NULL
     )
+    person_id: uuid.UUID
+
     uuid = fields.CharField(max_length=36, unique=True)
     guild: Optional[str] = fields.CharField(max_length=255, null=True, blank=True)  # type: ignore
     wynn_username = fields.CharField(max_length=255)
     mc_username = fields.CharField(max_length=255)
     last_online = fields.DatetimeField(use_tz=True)
     last_manual_check = fields.DatetimeField(use_tz=True)
+    first_join: datetime | None = fields.DatetimeField(use_tz=True, null=True)  # type: ignore
 
     class Meta:
         table = "minecraft_accounts"
@@ -50,6 +60,8 @@ class DiscordAccount(Model):
     person = fields.ForeignKeyField(
         "models.Person", related_name="discord_accounts", null=True, on_delete=fields.SET_NULL
     )
+    person_id: uuid.UUID
+
     disc_uuid = fields.CharField(max_length=255, unique=True)
     shout_count = fields.IntField(default=0)
 

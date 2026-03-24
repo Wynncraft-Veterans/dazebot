@@ -47,7 +47,9 @@ class WeeklyEvent(commands.Cog):
 
         await Score.update_or_create(event=event, discord_account=disc_account, defaults={"score": value})
 
-        await ctx.send(f"Set {user.mention}'s score to {value} for week {week}")
+        await ctx.send(
+            f"Set {user.mention}'s score to {value} for week {week}", allowed_mentions=discord.AllowedMentions.none()
+        )
 
     @score.command(name="add")
     @is_admin()
@@ -68,7 +70,9 @@ class WeeklyEvent(commands.Cog):
             score_obj.score += value
             await score_obj.save(update_fields=["score"])
 
-        await ctx.send(f"Added {value} points to {user.mention} for week {week}")
+        await ctx.send(
+            f"Added {value} points to {user.mention} for week {week}", allowed_mentions=discord.AllowedMentions.none()
+        )
 
     @score.command(name="print")
     async def score_print(self, ctx, user: Annotated[discord.Member, CaseInsensitiveMember], week: WeekRange):
@@ -79,9 +83,15 @@ class WeeklyEvent(commands.Cog):
         score = await Score.filter(event=event, discord_account=disc_account).first()
 
         if score:
-            await ctx.send(f"{user.mention} has {score.score} points for week {week}")
+            await ctx.send(
+                f"{user.mention} has {score.score} points for week {week}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         else:
-            await ctx.send(f"{user.mention} does not have any points registered for week {week}")
+            await ctx.send(
+                f"{user.mention} does not have any points registered for week {week}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     @score.command(name="leaderboard")
     async def score_leaderboard(self, ctx: commands.Context, week: WeekRange, amount: commands.Range[int, 10, 20] = 10):

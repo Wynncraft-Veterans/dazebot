@@ -212,7 +212,9 @@ class Admin(commands.Cog):
 
         discord_acc.shout_count = count
         await discord_acc.save(update_fields=["shout_count"])
-        await ctx.reply(f"Set shout_count for {user.mention} to {count}")
+        await ctx.reply(
+            f"Set shout_count for {user.mention} to {count}", allowed_mentions=discord.AllowedMentions.none()
+        )
 
     @commands.hybrid_group(name="person")
     @is_admin()
@@ -241,19 +243,28 @@ class Admin(commands.Cog):
 
         if player.person and discord_acc.person:
             if player.person.id == discord_acc.person.id:
-                await ctx.reply(f"{user.mention} is already linked to Minecraft account `{player.wynn_username}`")
+                await ctx.reply(
+                    f"{user.mention} is already linked to Minecraft account `{player.wynn_username}`",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
             else:
                 await ctx.reply("Both accounts are already linked to different persons. Please unlink first.")
 
         elif player.person:
             discord_acc.person = player.person
             await discord_acc.save()
-            await ctx.reply(f"Linked {user.mention} to existing person with Minecraft account `{player.wynn_username}`")
+            await ctx.reply(
+                f"Linked {user.mention} to existing person with Minecraft account `{player.wynn_username}`",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
         elif discord_acc.person:
             player.person = discord_acc.person
             await player.save()
-            await ctx.reply(f"Linked Minecraft account `{player.wynn_username}` to {user.mention}'s existing person")
+            await ctx.reply(
+                f"Linked Minecraft account `{player.wynn_username}` to {user.mention}'s existing person",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
         else:
             person_obj = await Person.create(name=user.display_name)
@@ -262,7 +273,8 @@ class Admin(commands.Cog):
             await player.save()
             await discord_acc.save()
             await ctx.reply(
-                f"Created new person and linked {user.mention} to Minecraft account `{player.wynn_username}`"
+                f"Created new person and linked {user.mention} to Minecraft account `{player.wynn_username}`",
+                allowed_mentions=discord.AllowedMentions.none(),
             )
 
     @person.group(name="unlink")
@@ -299,16 +311,21 @@ class Admin(commands.Cog):
         discord_acc = await DiscordAccount.filter(disc_uuid=str(user.id)).prefetch_related("person").first()
 
         if discord_acc is None:
-            await ctx.reply(f"{user.mention} does not have a Discord account registered.")
+            await ctx.reply(
+                f"{user.mention} does not have a Discord account registered.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
 
         if discord_acc.person is None:
-            await ctx.reply(f"{user.mention} is not linked to any person.")
+            await ctx.reply(
+                f"{user.mention} is not linked to any person.", allowed_mentions=discord.AllowedMentions.none()
+            )
             return
 
         discord_acc.person = None
         await discord_acc.save()
-        await ctx.reply(f"Unlinked {user.mention} from person.")
+        await ctx.reply(f"Unlinked {user.mention} from person.", allowed_mentions=discord.AllowedMentions.none())
 
     @person.group(name="check")
     async def person_check(self, ctx: commands.Context):
@@ -363,11 +380,16 @@ class Admin(commands.Cog):
         discord_acc = await DiscordAccount.filter(disc_uuid=str(user.id)).prefetch_related("person").first()
 
         if discord_acc is None:
-            await ctx.reply(f"{user.mention} does not have a Discord account registered.")
+            await ctx.reply(
+                f"{user.mention} does not have a Discord account registered.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
 
         if discord_acc.person is None:
-            await ctx.reply(f"{user.mention} is not linked to any person.")
+            await ctx.reply(
+                f"{user.mention} is not linked to any person.", allowed_mentions=discord.AllowedMentions.none()
+            )
             return
 
         # Fetch all linked accounts for this person

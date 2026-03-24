@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, date, timezone
 
+
 from config import Config
 
 
@@ -16,10 +17,10 @@ def _normalize_to_naive_utc(dt: datetime | date) -> datetime:
 
 
 def get_vanity_role_id(ts: datetime | date, config: Config) -> str | None:
-    dt = _normalize_to_naive_utc(ts)
+    # dt = _normalize_to_naive_utc(ts) # shouldnt be needed, just always make sure everything is timezone aware!
 
     for cutoff, role_id in config.VanityRolesConfig.CUTOFFS:
-        if dt < cutoff:
+        if ts < cutoff:
             return role_id
 
     return None

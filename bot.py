@@ -5,6 +5,7 @@ from discord.ext import commands
 import os
 
 from config import Config, CurrConfig
+from lib.wynn_api.requestor import Requestor
 from orm import close_db, init_db
 
 logger = logging.getLogger("discord.bot")
@@ -64,6 +65,7 @@ class Bot(commands.Bot):
     async def close(self):
         logger.info("Shutting down bot...")
         await close_db()
+        await Requestor().close()
         await super().close()
 
     async def on_command_error(self, ctx: commands.Context, error):

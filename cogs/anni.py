@@ -4,7 +4,7 @@ from discord.ext import commands
 from bot import Bot
 
 
-logger = logging.getLogger("discord.cogs.anni")
+logger = logging.getLogger("dazebot.cogs.anni")
 
 from config import CurrConfig
 

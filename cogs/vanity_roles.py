@@ -10,7 +10,7 @@ from config import CurrConfig
 from lib.vanity_roles import get_vanity_role_id
 from orm import MinecraftAccount, DiscordAccount
 
-logger = logging.getLogger("discord.cogs.vanity_roles")
+logger = logging.getLogger("dazebot.cogs.vanity_roles")
 
 VANITY_ROLE_IDS = set(int(role_id) for _, role_id in CurrConfig.VanityRolesConfig.CUTOFFS)
 

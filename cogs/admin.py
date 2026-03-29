@@ -4,7 +4,7 @@ from discord.ext import commands
 
 from lib.auth import is_admin
 
-logger = logging.getLogger("discord.cogs.admin")
+logger = logging.getLogger("dazebot.cogs.admin")
 from bot import Bot
 from tortoise.expressions import Q
 from orm import DiscordAccount, MinecraftAccount, Person

@@ -13,7 +13,7 @@ from lib.wynn_api.player_models import WynncraftPlayer
 from lib.wynn_api.requestor import Requestor
 from orm import DiscordAccount, MinecraftAccount, ProfessionCategories, Shout
 
-logger = logging.getLogger("discord.cogs.activity")
+logger = logging.getLogger("dazebot.cogs.activity")
 from bot import Bot
 from tortoise.expressions import Q
 
@@ -35,6 +35,10 @@ async def get_mc_username(uuid: str) -> str:
     session = await get_session()
     async with session.get(f"https://api.ashcon.app/mojang/v2/user/{uuid}") as res:
         data = await res.json()
+        if "username" not in data:
+            logger.error(f"For some reason `username` was not in data: {data=}")
+            await asyncio.sleep(1)
+            return await get_mc_username((uuid))
         return data["username"]
 
 
@@ -56,6 +60,11 @@ class Activity(commands.Cog):
         self.check_guild.start()
         self.queue = set()
         logger.info("Activity cog initialized")
+
+    async def cog_unload(self):
+        global _session
+        if _session and not _session.closed:
+            await _session.close()
 
     async def _check_player_full(self, uuid: str) -> tuple[str, WynncraftPlayer, MinecraftAccount]:
         mc_username = await get_mc_username(uuid)
@@ -156,16 +165,16 @@ class Activity(commands.Cog):
 
         guilds_to_check = set()
 
-        logger.info(f"checking members {len(members_to_check)=}")
+        logger.debug(f"checking members {len(members_to_check)=}")
 
         async def _check_member_helper(member: MinecraftAccount):
-            logger.info(f"{member.wynn_username=} {member.uuid=}")
+            logger.debug(f"STARTED _check_member_helper {member.wynn_username=} {member.uuid=}")
             _, player, _ = await self._check_player_full(member.uuid)
 
             if player.server and (
                 player.lastJoin <= datetime.now(timezone.utc) - timedelta(days=9)
             ):  # TODO configurable
-                logger.info(f"checking {player.server}")
+                logger.debug(f"checking {player.server}")
                 if member.uuid in await get_server_players(player.server):
                     account = await MinecraftAccount.get(uuid=player.uuid)
                     account.last_online = datetime.now(timezone.utc)
@@ -173,13 +182,14 @@ class Activity(commands.Cog):
 
             guild_name = player.guild.name if player.guild else None
             guilds_to_check.add(guild_name)
+            logger.debug(f"FINSHED _check_member_helper {member.wynn_username=} {member.uuid=}")
 
-        # check_members_task = []
+        check_members_task = []
         for member in members_to_check:
-            # check_members_task.append(_check_member_helper(member))
-            await _check_member_helper(member)
+            check_members_task.append(_check_member_helper(member))
+            # await _check_member_helper(member)
 
-        # await asyncio.gather(*check_members_task)
+        await asyncio.gather(*check_members_task)
 
         guilds_to_check.discard("Returners")
 

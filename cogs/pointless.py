@@ -4,7 +4,7 @@ from discord.ext import commands
 import requests
 from bot import Bot
 
-logger = logging.getLogger("discord.cogs.pointless")
+logger = logging.getLogger("dazebot.cogs.pointless")
 
 
 class Pointless(commands.Cog):

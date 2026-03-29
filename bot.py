@@ -8,7 +8,7 @@ from config import Config, CurrConfig
 from lib.wynn_api.requestor import Requestor
 from orm import close_db, init_db
 
-logger = logging.getLogger("discord.bot")
+logger = logging.getLogger("dazebot.bot")
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -96,11 +96,24 @@ class LineColourFormatter(_ColourFormatter):
     def format(self, record: logging.LogRecord) -> str:
         location = f"{record.filename}:{record.lineno}"
         funcname = f"({record.funcName})"
-        record.name = f"{location:<20} {funcname:<15}"
+        record.name = f"{f'[{record.name}]':<30} {location:<20} {funcname:<15}"
         return super().format(record)
 
 
 if __name__ == "__main__":
-    discord.utils.setup_logging(level=logging.INFO, formatter=LineColourFormatter())
+    is_debug = os.environ.get("DEBUG") == "true"
+    level = logging.DEBUG if is_debug else logging.INFO
+
+    discord.utils.setup_logging(level=level, formatter=LineColourFormatter())
+
+    logging.getLogger().setLevel(logging.WARNING)
+
+    logging.getLogger("discord").setLevel(logging.INFO)
+    logging.getLogger("dazebot").setLevel(logging.DEBUG if is_debug else logging.INFO)
+
+    logger.info(
+        f"Log level is set to {level}. (If not already the case) It can be set to debug mode by setting the environment variable `DEBUG` to `true`, see `.env.example`"
+    )
+
     bot = Bot(command_prefix=os.environ["PREFIX"], intents=intents)
     bot.run(os.environ["TOKEN"], log_handler=None)

@@ -1,19 +1,12 @@
 import itertools
 from pydantic import BaseModel, Field
 from typing import Dict, Generator, List, Optional
-from datetime import datetime
 
 import requests
 
 
-from pydantic import BaseModel, Field
-from typing import Dict, List, Optional
-from datetime import datetime
-
-
-from pydantic import BaseModel, Field, field_validator
-from typing import Dict, List, Optional, Any
-from datetime import datetime
+from pydantic import field_validator
+from typing import Any
 
 
 class BannerLayer(BaseModel):
@@ -51,8 +44,8 @@ class Members(BaseModel):
     captain: List[BaseMember] = Field(default_factory=list)
     recruiter: List[BaseMember] = Field(default_factory=list)
     recruit: List[BaseMember] = Field(default_factory=list)
-    
-    @field_validator('owner', 'chief', 'strategist', 'captain', 'recruiter', 'recruit', mode='before')
+
+    @field_validator("owner", "chief", "strategist", "captain", "recruiter", "recruit", mode="before")
     @classmethod
     def transform_members_dict(cls, v: Any) -> List[Dict[str, Any]]:
         if isinstance(v, dict):
@@ -63,15 +56,10 @@ class Members(BaseModel):
                 members_list.append(member_data)
             return members_list
         return v
-    
+
     def all_members(self) -> Generator[BaseMember, None, None]:
         for item in itertools.chain(
-            self.owner,
-            self.chief,
-            self.strategist,
-            self.captain,
-            self.recruiter,
-            self.recruit
+            self.owner, self.chief, self.strategist, self.captain, self.recruiter, self.recruit
         ):
             yield item
 
@@ -90,6 +78,8 @@ class Guild(BaseModel):
     banner: Banner
     seasonRanks: Dict[str, SeasonRank] = Field(default_factory=dict)
 
+
+# crappy way to make sure API is still coherent with local models
 r = requests.get("https://api.wynncraft.com/v3/guild/Returners?identifier=username")
 guild = Guild(**r.json())
 print(guild.members.owner[0].username)

@@ -8,7 +8,7 @@ from lib.discord_paginated_embed import Paginator, from_lines
 from orm import DiscordAccount, Score, WeeklyEvent as WeeklyEventTable
 
 # logger = Logger()
-logger = logging.getLogger("discord.cogs.weeklyevent")
+logger = logging.getLogger("dazebot.cogs.weeklyevent")
 from bot import Bot
 
 WeekRange = commands.Range[int, 0]

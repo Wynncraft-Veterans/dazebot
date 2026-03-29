@@ -11,7 +11,7 @@ from lib.lib import ProfCategory
 from lib.wynn_api.player_models import CharacterProfessionsType
 from orm import MinecraftAccount, ProfessionCategories
 
-logger = logging.getLogger("discord.cogs.utility")
+logger = logging.getLogger("dazebot.cogs.utility")
 
 PROF_LABEL_TO_TYPE: dict[str, CharacterProfessionsType] = {
     "armouring": CharacterProfessionsType.ARMOURING,

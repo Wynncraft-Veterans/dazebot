@@ -18,13 +18,14 @@ _cog_instance: VanityRoles | None = None
 
 
 async def _minecraft_account_post_save(_sender, instance: MinecraftAccount, _created: bool, _using_db, _update_fields):
-    if _cog_instance is None or instance.person_id is None:
+    if _cog_instance is None:
         return
-    disc = await DiscordAccount.filter(person_id=instance.person_id).first()
+    disc = await DiscordAccount.filter(minecraft_account_id=instance.id).first()
     if disc is not None:
         await _cog_instance._handle_member_uuid(int(disc.disc_uuid))
 
 
+# TODO: delete either of the post saves, shouldnt be needed after deleting person table?
 async def _discord_account_post_save(_sender, instance: DiscordAccount, _created: bool, _using_db, _update_fields):
     if _cog_instance is not None:
         await _cog_instance._handle_member_uuid(int(instance.disc_uuid))
@@ -58,24 +59,22 @@ class VanityRoles(commands.Cog):
         await self.handle_member(member)
 
     async def handle_member(self, member: discord.Member):
-        account = (
-            await MinecraftAccount.filter(
-                person__discord_accounts__disc_uuid=member.id,
-            )
-            .exclude(first_join=None)
-            .order_by("first_join")
-            .first()
-        )
+        disc = await DiscordAccount.filter(disc_uuid=str(member.id)).select_related("minecraft_account").first()
 
-        if account is None:
-            logger.info(f"{member} ({member.id}) has no linked minecraft account, skipping")
+        if disc is None or disc.minecraft_account is None:
+            logger.debug(f"{member} ({member.id}) has no linked minecraft account, skipping")
             return
 
-        assert account.first_join is not None  # unreachable
+        mc = disc.minecraft_account
+        if mc.first_join is None:
+            logger.error(
+                f"{member} ({member.id}) linked MC account has no first_join, skipping. (this shouldnt happen?)"
+            )
+            return
 
-        role_id_str = get_vanity_role_id(account.first_join, CurrConfig)
+        role_id_str = get_vanity_role_id(mc.first_join, CurrConfig)
         if role_id_str is None:
-            logger.info(f"{member} ({member.id}) has no vanity role for first_join={account.first_join}, skipping")
+            logger.info(f"{member} ({member.id}) has no vanity role for first_join={mc.first_join}, skipping")
             return
 
         correct_role_id = int(role_id_str)
@@ -111,8 +110,8 @@ class VanityRoles(commands.Cog):
 
         checked = 0
         skipped = 0
-        async for account in DiscordAccount.filter(person_id__not_isnull=True):
-            member = guild.get_member(int(account.disc_uuid))
+        async for disc in DiscordAccount.filter(minecraft_account_id__not_isnull=True):
+            member = guild.get_member(int(disc.disc_uuid))
             if member is None:
                 skipped += 1
                 continue

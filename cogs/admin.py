@@ -1,13 +1,15 @@
 import logging
+from typing import Annotated
 import discord
 from discord.ext import commands
 
 from lib.auth import is_admin
+from lib.converters import CaseInsensitiveMember
 
 logger = logging.getLogger("dazebot.cogs.admin")
 from bot import Bot
 from tortoise.expressions import Q
-from orm import DiscordAccount, MinecraftAccount, Person
+from orm import DiscordAccount, MinecraftAccount
 
 
 class Admin(commands.Cog):
@@ -204,7 +206,9 @@ class Admin(commands.Cog):
 
     @commands.hybrid_command(name="set_shout_count")
     @is_admin()
-    async def set_shout_count(self, ctx: commands.Context, user: discord.Member, count: int):
+    async def set_shout_count(
+        self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember], count: int
+    ):
         """Forcefully set a user's shout_count (replaces the existing value)."""
         discord_acc, _ = await DiscordAccount.get_or_create(
             disc_uuid=str(user.id),
@@ -216,207 +220,102 @@ class Admin(commands.Cog):
             f"Set shout_count for {user.mention} to {count}", allowed_mentions=discord.AllowedMentions.none()
         )
 
-    @commands.hybrid_group(name="person")
+    @commands.hybrid_group(name="link")
     @is_admin()
-    async def person(self, ctx: commands.Context):
-        """Manage person accounts linking Minecraft and Discord"""
+    async def link(self, ctx: commands.Context):
+        """Link/unlink Discord ↔ Minecraft accounts"""
         if ctx.invoked_subcommand is None:
-            await ctx.send("Use subcommands: link, unlink, check")
+            await ctx.send("Use subcommands: set, remove, check")
 
-    @person.command(name="link")
-    async def person_link(self, ctx: commands.Context, user: discord.Member, username_or_uuid: str):
+    @link.command(name="set")
+    async def link_set(
+        self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember], username_or_uuid: str
+    ):
         """Link a Discord user to a Minecraft account"""
-        player = (
-            await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(wynn_username=username_or_uuid))
-            .prefetch_related("person")
-            .first()
-        )
+        mc = await MinecraftAccount.filter(
+            Q(uuid=username_or_uuid) | Q(mc_username=username_or_uuid) | Q(wynn_username=username_or_uuid)
+        ).first()
 
-        if player is None:
-            await ctx.reply("That minecraft user is not available. Try forcing a check on the guild.")
+        if mc is None:
+            await ctx.reply("That Minecraft account was not found. Try forcing a guild check first.")
             return
 
-        discord_acc, _ = await DiscordAccount.get_or_create(
-            disc_uuid=str(user.id),
-        )
-        await discord_acc.fetch_related("person")
-
-        if player.person and discord_acc.person:
-            if player.person.id == discord_acc.person.id:
-                await ctx.reply(
-                    f"{user.mention} is already linked to Minecraft account `{player.wynn_username}`",
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            else:
-                await ctx.reply("Both accounts are already linked to different persons. Please unlink first.")
-
-        elif player.person:
-            discord_acc.person = player.person
-            await discord_acc.save()
+        # Check if the MC account is already claimed by a different discord user
+        existing = await DiscordAccount.filter(minecraft_account_id=mc.id).first()
+        if existing is not None and existing.disc_uuid != str(user.id):
+            other = await self.bot.fetch_user(int(existing.disc_uuid))
             await ctx.reply(
-                f"Linked {user.mention} to existing person with Minecraft account `{player.wynn_username}`",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-
-        elif discord_acc.person:
-            player.person = discord_acc.person
-            await player.save()
-            await ctx.reply(
-                f"Linked Minecraft account `{player.wynn_username}` to {user.mention}'s existing person",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-
-        else:
-            person_obj = await Person.create(name=user.display_name)
-            player.person = person_obj
-            discord_acc.person = person_obj
-            await player.save()
-            await discord_acc.save()
-            await ctx.reply(
-                f"Created new person and linked {user.mention} to Minecraft account `{player.wynn_username}`",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-
-    @person.group(name="unlink")
-    async def person_unlink(self, ctx: commands.Context):
-        """Unlink accounts from persons"""
-        if ctx.invoked_subcommand is None:
-            await ctx.send("Use: unlink mc <username> or unlink disc <user>")
-
-    @person_unlink.command(name="mc")
-    async def person_unlink_mc(self, ctx: commands.Context, username_or_uuid: str):
-        """Unlink a Minecraft account from its person"""
-        player = (
-            await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(wynn_username=username_or_uuid))
-            .prefetch_related("person")
-            .first()
-        )
-
-        if player is None:
-            await ctx.reply("That minecraft user was not found.")
-            return
-
-        if player.person is None:
-            await ctx.reply(f"Minecraft account `{player.wynn_username}` is not linked to any person.")
-            return
-
-        player.person = None
-        await player.save()
-        await ctx.reply(f"Unlinked Minecraft account `{player.wynn_username}` from person.")
-
-    @person_unlink.command(name="disc")
-    @is_admin()
-    async def person_unlink_disc(self, ctx: commands.Context, user: discord.Member):
-        """Unlink a Discord account from its person"""
-        discord_acc = await DiscordAccount.filter(disc_uuid=str(user.id)).prefetch_related("person").first()
-
-        if discord_acc is None:
-            await ctx.reply(
-                f"{user.mention} does not have a Discord account registered.",
+                f"`{mc.mc_username}` is already linked to {other.mention}. Unlink them first.",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
 
-        if discord_acc.person is None:
+        disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(user.id))
+
+        if disc.minecraft_account_id == mc.id:
             await ctx.reply(
-                f"{user.mention} is not linked to any person.", allowed_mentions=discord.AllowedMentions.none()
-            )
-            return
-
-        discord_acc.person = None
-        await discord_acc.save()
-        await ctx.reply(f"Unlinked {user.mention} from person.", allowed_mentions=discord.AllowedMentions.none())
-
-    @person.group(name="check")
-    async def person_check(self, ctx: commands.Context):
-        """Check linked accounts"""
-        if ctx.invoked_subcommand is None:
-            await ctx.send("Use: check mc <username> or check disc <user>")
-
-    @person_check.command(name="mc")
-    async def person_check_mc(self, ctx: commands.Context, username_or_uuid: str):
-        """Check a Minecraft account's linked person and all associated accounts"""
-        player = (
-            await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(wynn_username__iexact=username_or_uuid))
-            .prefetch_related("person")
-            .first()
-        )
-
-        if player is None:
-            await ctx.reply("That minecraft user was not found.")
-            return
-
-        if player.person is None:
-            await ctx.reply(f"Minecraft account `{player.wynn_username}` is not linked to any person.")
-            return
-
-        # Fetch all linked accounts for this person
-        person_obj = await Person.get(id=player.person.id).prefetch_related("minecraft_accounts", "discord_accounts")
-
-        embed = discord.Embed(title=f"Person: {person_obj.name or 'Unnamed'}", color=discord.Color.blue())
-
-        # Minecraft accounts
-        mc_accounts = [f"• `{acc.wynn_username}` ({acc.uuid})" for acc in person_obj.minecraft_accounts]
-        if mc_accounts:
-            embed.add_field(name="Minecraft Accounts", value="\n".join(mc_accounts), inline=False)
-
-        # Discord accounts
-        discord_accounts = []
-        for acc in person_obj.discord_accounts:
-            try:
-                user_obj = await self.bot.fetch_user(int(acc.disc_uuid))
-                discord_accounts.append(f"• {user_obj.mention} ({user_obj.name})")
-            except:
-                discord_accounts.append(f"• <@{acc.disc_uuid}>")
-
-        if discord_accounts:
-            embed.add_field(name="Discord Accounts", value="\n".join(discord_accounts), inline=False)
-
-        await ctx.reply(embed=embed)
-
-    @person_check.command(name="disc")
-    async def person_check_disc(self, ctx: commands.Context, user: discord.Member):
-        """Check a Discord account's linked person and all associated accounts"""
-        discord_acc = await DiscordAccount.filter(disc_uuid=str(user.id)).prefetch_related("person").first()
-
-        if discord_acc is None:
-            await ctx.reply(
-                f"{user.mention} does not have a Discord account registered.",
+                f"{user.mention} is already linked to `{mc.mc_username}`.",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
 
-        if discord_acc.person is None:
+        disc.minecraft_account = mc
+        await disc.save(update_fields=["minecraft_account_id"])
+        await ctx.reply(
+            f"Linked {user.mention} to Minecraft account `{mc.mc_username}`.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @link.command(name="remove")
+    async def link_remove(self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember]):
+        """Unlink a Discord account from its Minecraft account"""
+        disc = await DiscordAccount.filter(disc_uuid=str(user.id)).select_related("minecraft_account").first()
+
+        if disc is None or disc.minecraft_account_id is None:
             await ctx.reply(
-                f"{user.mention} is not linked to any person.", allowed_mentions=discord.AllowedMentions.none()
+                f"{user.mention} is not linked to any Minecraft account.",
+                allowed_mentions=discord.AllowedMentions.none(),
             )
             return
 
-        # Fetch all linked accounts for this person
-        person_obj = await Person.get(id=discord_acc.person.id).prefetch_related(
-            "minecraft_accounts", "discord_accounts"
+        assert disc.minecraft_account is not None
+        mc_username = disc.minecraft_account.mc_username
+
+        disc.minecraft_account_id = None
+        await disc.save(update_fields=["minecraft_account_id"])
+        await ctx.reply(
+            f"Unlinked {user.mention} from Minecraft account `{mc_username}`.",
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
-        embed = discord.Embed(title=f"Person: {person_obj.name or 'Unnamed'}", color=discord.Color.blue())
+    # TODO: make this a group such that
+    # - link check mc <mc username or uuid>
+    # - link check disc <disc>
+    @link.command(name="check")
+    async def link_check(self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember]):
+        """Check a Discord user's linked Minecraft account"""
+        disc = await DiscordAccount.filter(disc_uuid=str(user.id)).select_related("minecraft_account").first()
 
-        # Minecraft accounts
-        mc_accounts = [f"• `{acc.wynn_username}` ({acc.uuid})" for acc in person_obj.minecraft_accounts]
-        if mc_accounts:
-            embed.add_field(name="Minecraft Accounts", value="\n".join(mc_accounts), inline=False)
+        if disc is None or disc.minecraft_account is None:
+            await ctx.reply(
+                f"{user.mention} is not linked to any Minecraft account.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
 
-        # Discord accounts
-        discord_accounts = []
-        for acc in person_obj.discord_accounts:
-            try:
-                user_obj = await self.bot.fetch_user(int(acc.disc_uuid))
-                discord_accounts.append(f"• {user_obj.mention} ({user_obj.name})")
-            except:
-                discord_accounts.append(f"• <@{acc.disc_uuid}>")
-
-        if discord_accounts:
-            embed.add_field(name="Discord Accounts", value="\n".join(discord_accounts), inline=False)
-
-        await ctx.reply(embed=embed)
+        mc = disc.minecraft_account
+        embed = discord.Embed(title="Linked Account", color=discord.Color.blue())
+        embed.add_field(name="Discord", value=user.mention, inline=True)
+        # TODO: idk make clearer distinction between mc_username and wynn_username everywhere, or only display mc_username, maybe with a symbol to notify wynn_username differs, then admins can run a command to fetch both names
+        embed.add_field(
+            name="Minecraft",
+            value=f"`{mc.mc_username}` {f'(`{mc.wynn_username}`)' if mc.wynn_username != mc.mc_username else ''}",
+            inline=True,
+        )
+        embed.add_field(name="UUID", value=f"`{mc.uuid}`", inline=False)
+        if mc.first_join:
+            embed.add_field(name="First Join", value=f"<t:{int(mc.first_join.timestamp())}:F>", inline=True)
+        await ctx.reply(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def setup(bot: Bot):

@@ -1,7 +1,7 @@
 import asyncio
 import collections
 import logging
-import time
+import os
 from typing import Any, Awaitable, Optional
 import aiohttp
 from aiohttp import ClientResponse
@@ -22,6 +22,7 @@ class SingletonMeta(type):
 class Requestor(metaclass=SingletonMeta):
     def __init__(self):
         self.deq: collections.deque[tuple[UUID, str, dict[str, Any]]] = collections.deque()
+        self.prio_deq: collections.deque[tuple[UUID, str, dict[str, Any]]] = collections.deque()
         self.out: dict[UUID, ClientResponse] = {}
         self._session: Optional[aiohttp.ClientSession] = None
         self._task: Optional[asyncio.Task] = None
@@ -32,7 +33,8 @@ class Requestor(metaclass=SingletonMeta):
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            headers = {"Authorization": f"Bearer {os.environ['WAPI_TOKENS'].split(',')[0]}"}
+            self._session = aiohttp.ClientSession(headers=headers)
         return self._session
 
     async def _probe(self, url: str, **kwargs: Any) -> ClientResponse:
@@ -50,26 +52,32 @@ class Requestor(metaclass=SingletonMeta):
     async def _loop(self):
         session = await self._get_session()
         while True:
-            if not self.deq:
+            if (not self.deq) and (not self.prio_deq):
                 # check 20 times a second
                 # TODO: maybe replace with asyncio.Event? idk, too lazy to check it out
                 await asyncio.sleep(1 / 20)
                 continue
-
+            deq = self.prio_deq or self.deq
             # probe a single request first, to get current ratelimit capacity (completes first request in line)
-            uuid, url, kwargs = self.deq.popleft()
+            uuid, url, kwargs = deq.popleft()
             probe = await self._probe(url, **kwargs)
             self.out[uuid] = probe
             remaining = int(float(probe.headers["RateLimit-Remaining"]))
             limit = int(float(probe.headers["RateLimit-Limit"]))
+            reset = int(float(probe.headers["RateLimit-Reset"]))
 
-            to_collect = min(len(self.deq), remaining)
-            logger.debug(f"{len(self.deq)=} {limit=} {remaining=} {to_collect=}")
+            usable = max(0, remaining - reset)
+
+            if usable <= 1:
+                await asyncio.sleep(1)
+
+            to_collect = min(len(deq), usable)
+            logger.debug(f"{len(deq)=} {limit=} {remaining=} {to_collect=} {reset=} {usable=} {self.prio_deq}")
 
             if not to_collect:
                 continue
 
-            collection = [self.deq.popleft() for _ in range(to_collect)]
+            collection = [deq.popleft() for _ in range(to_collect)]
 
             tasks: list[Awaitable[ClientResponse]] = []
             for _uuid, url, kwargs in collection:
@@ -84,7 +92,7 @@ class Requestor(metaclass=SingletonMeta):
                 elif res.status == 429:
                     d = {k: v for k, v in res.headers.items() if "ratelimit" in k.lower()}
                     logger.warning(f"Hit status code 429! {d}")
-                    self.deq.appendleft(c)
+                    deq.appendleft(c)
                 else:
                     d = {k: v for k, v in res.headers.items() if "ratelimit" in k.lower()}
                     logger.warning(f"Hit status code {res.status}!: {d}")
@@ -95,12 +103,28 @@ class Requestor(metaclass=SingletonMeta):
         self.deq.append((uuid, url, kwargs))
         return uuid
 
+    async def _add_request_important(self, url: str, **kwargs: Any) -> UUID:
+        uuid = uuid4()
+        self.prio_deq.append((uuid, url, kwargs))
+        return uuid
+
     # TODO: could probably use res.headers.Expires to also cache locally, but meh, it's unlikely we'll request cached data very often
     async def get(self, url: str, **kwargs: Any) -> ClientResponse:
         await self._ensure_loop()
 
         uuid = await self._add_request(url, **kwargs)
-        start = time.time()
+        while uuid not in self.out:
+            await asyncio.sleep(1 / 20)
+
+        res = self.out.pop(uuid)
+
+        return res
+
+    # get, but push to beginning of queue
+    async def get0(self, url: str, **kwargs: Any) -> ClientResponse:
+        await self._ensure_loop()
+
+        uuid = await self._add_request_important(url, **kwargs)
         while uuid not in self.out:
             await asyncio.sleep(1 / 20)
 

@@ -13,10 +13,11 @@ class API(commands.Cog):
         self.bot = bot
         logger.info("API cog initialized")
 
-    @commands.hybrid_command(name="joindate", description="Sync slash commands")
+    # TODO[002]: pull from database first if a row exists of that user
+    @commands.hybrid_command(name="joindate", description="get minecraft account wynncraft joindate")
     async def joindate(self, ctx: commands.Context, username_or_uuid: str):
         try:
-            player = await get_player_main_stats(username_or_uuid)
+            player = await get_player_main_stats(username_or_uuid, important=True)
             ts = int(player.firstJoin.timestamp())
             await ctx.send(f"Joindate for {player.username} is <t:{ts}:F>, which was <t:{ts}:R>")
         except Exception as e:

@@ -12,22 +12,8 @@ from lib.wynn_api.player_models import CharacterProfessionsType
 import uuid
 
 
-class Person(Model):
-    id = fields.UUIDField(pk=True)
-    name = fields.CharField(max_length=255, null=True)
-
-    discord_accounts: fields.ReverseRelation[DiscordAccount]
-
-    class Meta:
-        table = "person"
-
-
 class MinecraftAccount(Model):
     id = fields.UUIDField(pk=True)
-    person = fields.ForeignKeyField(
-        "models.Person", related_name="minecraft_accounts", null=True, on_delete=fields.SET_NULL
-    )
-    person_id: uuid.UUID
 
     uuid = fields.CharField(max_length=36, unique=True)
     guild: Optional[str] = fields.CharField(max_length=255, null=True, blank=True)  # type: ignore
@@ -36,6 +22,8 @@ class MinecraftAccount(Model):
     last_online = fields.DatetimeField(use_tz=True)
     last_manual_check = fields.DatetimeField(use_tz=True)
     first_join: datetime | None = fields.DatetimeField(use_tz=True, null=True)  # type: ignore
+
+    discord_account: fields.ReverseRelation[DiscordAccount]
 
     class Meta:
         table = "minecraft_accounts"
@@ -57,10 +45,10 @@ class ProfessionCategories(Model):
 
 class DiscordAccount(Model):
     id = fields.UUIDField(pk=True)
-    person = fields.ForeignKeyField(
-        "models.Person", related_name="discord_accounts", null=True, on_delete=fields.SET_NULL
+    minecraft_account: fields.ForeignKeyNullableRelation[MinecraftAccount] = fields.ForeignKeyField(
+        "models.MinecraftAccount", related_name="discord_account", null=True, on_delete=fields.SET_NULL, unique=True
     )
-    person_id: uuid.UUID
+    minecraft_account_id: uuid.UUID | None
 
     disc_uuid = fields.CharField(max_length=255, unique=True)
     shout_count = fields.IntField(default=0)
@@ -112,6 +100,32 @@ class Shout(Model):
 
     class Meta:
         table = "shouts"
+
+
+class LinkRequest(Model):
+    id = fields.UUIDField(pk=True)
+    minecraft_account = fields.ForeignKeyField(
+        "models.MinecraftAccount", related_name="link_requests", on_delete=fields.CASCADE
+    )
+    discord_account = fields.ForeignKeyField(
+        "models.DiscordAccount", related_name="link_requests", on_delete=fields.CASCADE
+    )
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "link_requests"
+        unique_together = (("minecraft_account", "discord_account"),)
+
+
+class Waitlist(Model):
+    id = fields.UUIDField(pk=True)
+    minecraft_account = fields.ForeignKeyField(
+        "models.MinecraftAccount", related_name="waitlist", on_delete=fields.CASCADE, unique=True
+    )
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "waitlist"
 
 
 # Database initialization helper

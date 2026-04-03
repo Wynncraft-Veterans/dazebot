@@ -27,6 +27,8 @@ class MinecraftAccount(Model):
 
     discord_account: fields.ReverseRelation[DiscordAccount]
 
+    waitlist: fields.ReverseRelation[Waitlist]
+
     class Meta:
         table = "minecraft_accounts"
 
@@ -125,7 +127,7 @@ class LinkRequest(Model):
 
 class Waitlist(Model):
     id = fields.UUIDField(pk=True)
-    minecraft_account = fields.ForeignKeyField(
+    minecraft_account: fields.ForeignKeyRelation[MinecraftAccount] = fields.ForeignKeyField(
         "models.MinecraftAccount", related_name="waitlist", on_delete=fields.CASCADE, unique=True
     )
     created_at = fields.DatetimeField(auto_now_add=True)

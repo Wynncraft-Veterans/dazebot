@@ -12,6 +12,9 @@ logger = logging.getLogger("dazebot.cogs.api_server")
 PORT = int(os.environ["DAZEBOT_PORT"])
 
 
+# this api should not be used for bridge!
+# this api is internal only
+# this api uses a blind trust philosophy for connecting with the PicoLimbo mini server
 class APIServer(commands.Cog):
     def __init__(self, bot: Bot):
         self.bot = bot

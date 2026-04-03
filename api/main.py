@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger("dazebot.api")
 
 
+# this api should not be used for bridge!
+# this api is internal only
+# this api uses a blind trust philosophy for connecting with the PicoLimbo mini server
 def create_app(bot: Bot) -> FastAPI:
     app = FastAPI(title="Dazebot API", version="0.1.0")
 

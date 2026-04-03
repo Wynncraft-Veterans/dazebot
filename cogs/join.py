@@ -321,6 +321,7 @@ class Join(commands.Cog):
             Q(waitlist__isnull=False) & Q(last_manual_check__lt=now - timedelta(days=1))
         ).all()
 
+        # TODO[005]: redundant? activity.py also resets MinecraftAccount.guild just from `Returner` guild checks i think
         for mc in mc_accounts:
             await check_player_full(mc.uuid)
 

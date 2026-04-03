@@ -233,10 +233,10 @@ class Join(commands.Cog):
 
     @tasks.loop(minutes=5)
     async def clear_old_requests(self):
-        await LinkRequest.filter(
-            Q(minecraft_account__discord_account_id__isnull=False)
-            | Q(discord_account__minecraft_account_id__isnull=False)
-        ).delete()
+        to_delete = await LinkRequest.filter(
+            Q(minecraft_account__discord_account__isnull=False) | Q(discord_account__minecraft_account_id__isnull=False)
+        ).values_list("id", flat=True)
+        await LinkRequest.filter(id__in=to_delete).delete()
 
     @commands.hybrid_command(name="join_guild")
     async def join_guild(self, ctx: commands.Context):
@@ -325,9 +325,10 @@ class Join(commands.Cog):
         for mc in mc_accounts:
             await check_player_full(mc.uuid)
 
-        await Waitlist.filter(
+        to_delete = await Waitlist.filter(
             Q(minecraft_account__guild__isnull=False) | Q(minecraft_account__last_online__lt=now - timedelta(days=9))
-        ).delete()
+        ).values_list("id", flat=True)
+        await Waitlist.filter(id__in=to_delete).delete()
 
     @commands.hybrid_command(name="waitlist", description="View the current waitlist.")
     async def waitlist(self, ctx: commands.Context):

@@ -45,6 +45,8 @@ class Config:
         0,  # Replace with actual mod
     }
 
+    BRIDGE_CHANNEL = 1458659889978020006
+
     class AnniConfig:
         ROLE_ID = 1457366058951249970
         CHANNEL_ID = 1339393368672702567

@@ -317,6 +317,46 @@ class Admin(commands.Cog):
             embed.add_field(name="First Join", value=f"<t:{int(mc.first_join.timestamp())}:F>", inline=True)
         await ctx.reply(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
+    @commands.hybrid_group(name="honourary")
+    @is_admin()
+    async def honourary(self, ctx: commands.Context):
+        """Manage honourary bridge access"""
+        if ctx.invoked_subcommand is None:
+            await ctx.send("Use subcommands: set, remove")
+
+    @honourary.command(name="set")
+    async def honourary_set(self, ctx: commands.Context, username_or_uuid: str):
+        """Grant honourary bridge access to a MC account"""
+        mc = await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(mc_username__iexact=username_or_uuid)).first()
+        if mc is None:
+            await ctx.reply(f"`{username_or_uuid}` not found.")
+            return
+
+        if mc.is_honourary:
+            await ctx.reply(f"`{mc.mc_username}` is already honourary.")
+            return
+
+        mc.is_honourary = True
+        await mc.save(update_fields=["is_honourary"])
+        await ctx.reply(f"`{mc.mc_username}` is now honourary.")
+
+    @honourary.command(name="remove")
+    async def honourary_remove(self, ctx: commands.Context, username_or_uuid: str):
+        """Revoke honourary bridge access"""
+        mc = await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(mc_username__iexact=username_or_uuid)).first()
+        if mc is None:
+            await ctx.reply(f"`{username_or_uuid}` not found.")
+            return
+
+        if not mc.is_honourary:
+            await ctx.reply(f"`{mc.mc_username}` is not honourary.")
+            return
+
+        mc.is_honourary = False
+        mc.token = None
+        await mc.save(update_fields=["is_honourary", "token"])
+        await ctx.reply(f"`{mc.mc_username}` is no longer honourary. Token revoked.")
+
 
 async def setup(bot: Bot):
     await bot.add_cog(Admin(bot))

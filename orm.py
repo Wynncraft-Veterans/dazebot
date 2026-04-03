@@ -14,6 +14,10 @@ from lib.wynn_api.player_models import CharacterProfessionsType
 import uuid
 
 
+def generate_token():
+    return "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+
+
 class MinecraftAccount(Model):
     id = fields.UUIDField(pk=True)
 
@@ -24,9 +28,10 @@ class MinecraftAccount(Model):
     last_online = fields.DatetimeField(use_tz=True)
     last_manual_check = fields.DatetimeField(use_tz=True)
     first_join: datetime | None = fields.DatetimeField(use_tz=True, null=True)  # type: ignore
+    token: Optional[str] = fields.CharField(max_length=6, null=True, default=None)  # type: ignore
+    is_honourary = fields.BooleanField(default=False)
 
     discord_account: fields.ReverseRelation[DiscordAccount]
-
     waitlist: fields.ReverseRelation[Waitlist]
 
     class Meta:

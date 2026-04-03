@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+import random
+import string
 from typing import Optional
 
 from tortoise import fields
@@ -102,12 +104,16 @@ class Shout(Model):
         table = "shouts"
 
 
+def short_id():
+    return "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
+
+
 class LinkRequest(Model):
-    id = fields.UUIDField(pk=True)
-    minecraft_account = fields.ForeignKeyField(
+    id = fields.CharField(pk=True, max_length=4, default=short_id)
+    minecraft_account: fields.ForeignKeyRelation[MinecraftAccount] = fields.ForeignKeyField(
         "models.MinecraftAccount", related_name="link_requests", on_delete=fields.CASCADE
     )
-    discord_account = fields.ForeignKeyField(
+    discord_account: fields.ForeignKeyRelation[DiscordAccount] = fields.ForeignKeyField(
         "models.DiscordAccount", related_name="link_requests", on_delete=fields.CASCADE
     )
     created_at = fields.DatetimeField(auto_now_add=True)

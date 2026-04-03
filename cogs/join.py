@@ -2,13 +2,16 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 from random import randint
+from typing import TYPE_CHECKING
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
+from tortoise.expressions import Q
 
+from lib.discord_paginated_embed import Paginator, from_lines
 from lib.wynn_api.player import get_player_full_stats
 from lib.wynn_api.requestor import Requestor
 from lib.link_listener import PendingLink, link_listeners
-from orm import DiscordAccount, MinecraftAccount
+from orm import DiscordAccount, LinkRequest, MinecraftAccount
 
 logger = logging.getLogger("dazebot.cogs.join")
 from bot import Bot
@@ -21,6 +24,7 @@ class Join(commands.Cog):
 
     def __init__(self, bot: Bot):
         self.bot = bot
+        self.clear_old_requests.start()
         logger.info("Join cog initialized")
 
     # maybe use a command group?
@@ -32,7 +36,126 @@ class Join(commands.Cog):
         name="request_link",
         description="Request to link your discord account to a minecraft account (case-sensitive!).",
     )
-    async def request_link(self, ctx: commands.Context, username_or_uuid: str): ...
+    async def request_link(self, ctx: commands.Context, username_or_uuid: str):
+        existing_disc = (
+            await LinkRequest.filter(discord_account_id=ctx.author.id).prefetch_related("minecraft_account").first()
+        )
+        if existing_disc is not None:
+            await ctx.reply(
+                f"You ({ctx.author.mention}) already have a pending link request to `{existing_disc.minecraft_account.mc_username}` (`{existing_disc.minecraft_account.uuid}`)",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        existing_mc = (
+            await LinkRequest.filter(
+                Q(minecraft_account__uuid=username_or_uuid) | Q(minecraft_account__mc_username__iexact=username_or_uuid)
+            )
+            .prefetch_related("minecraft_account", "discord_account")
+            .first()
+        )
+        if existing_mc is not None:
+            await ctx.reply(
+                f"You ({ctx.author.mention}) already have a pending link request to `{existing_mc.minecraft_account.mc_username}` (`{existing_mc.minecraft_account.uuid}`)",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        linked_mc = await MinecraftAccount.filter(discord_account__disc_uuid=str(ctx.author.id)).first()
+        if linked_mc is not None:
+            await ctx.reply(
+                f"You ({ctx.author.mention}) are already linked to `{linked_mc.mc_username}` (`{linked_mc.uuid}`)",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        linked_disc = (
+            await DiscordAccount.filter(
+                Q(minecraft_account__uuid=username_or_uuid) | Q(minecraft_account__mc_username__iexact=username_or_uuid)
+            )
+            .prefetch_related("minecraft_account")
+            .first()
+        )
+        if linked_disc is not None:
+            if TYPE_CHECKING:
+                assert linked_disc.minecraft_account is not None
+            await ctx.reply(
+                f"{ctx.author.mention} is already linked to `{linked_disc.minecraft_account.mc_username}` (`{linked_disc.minecraft_account.uuid}`)",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        # TODO[003]: maybe make a function in `lib` that 1. checks if minecraft account exists (returns) 2. get stats 3. create row (returns)
+        mc = await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(mc_username__iexact=username_or_uuid)).first()
+
+        if mc is None:
+            fs = await get_player_full_stats(username_or_uuid)
+            mc = await MinecraftAccount.create(
+                uuid=fs.uuid,
+                wynn_username=fs.username,
+                mc_username=fs.username,
+                last_online=fs.lastJoin or datetime.fromtimestamp(0, tz=timezone.utc),
+                last_manual_check=datetime.fromtimestamp(0, tz=timezone.utc),
+                first_join=fs.firstJoin,
+            )
+
+        disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
+
+        await LinkRequest.create(
+            minecraft_account=mc,
+            discord_account=disc,
+        )
+
+        await ctx.reply(
+            f"Link request created for {ctx.author.mention} → `{mc.mc_username}` (`{mc.uuid}`). A staff member will approve it.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @commands.hybrid_command(name="link_requests", description="")
+    async def link_requests(self, ctx: commands.Context):
+        lrs = await LinkRequest.all().prefetch_related("minecraft_account", "discord_account")
+        lrs.sort(key=lambda e: e.created_at)
+        lines = [
+            f"{lr.id} - <t:{int(lr.created_at.timestamp())}:R> - <@{lr.discord_account.disc_uuid}> - `{lr.minecraft_account.mc_username}` (`{lr.minecraft_account.uuid}`)"
+            for lr in lrs
+        ]
+
+        if not lines:
+            await ctx.reply("No pending link requests.")
+            return
+
+        embeds = from_lines(
+            title="Current link requests",
+            lines=lines,
+            lines_per_page=10,
+            logger=logger,
+        )
+
+        await ctx.send(
+            embed=embeds[0],
+            view=Paginator(embeds),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @commands.hybrid_command(name="link_approve", description="")
+    async def link_approve(self, ctx: commands.Context, id: str):
+        lr = await LinkRequest.filter(id=id).prefetch_related("minecraft_account", "discord_account").first()
+        if lr is None:
+            await ctx.reply(f"That (`{id}`) id doesn't exist.")
+            return
+
+        disc = lr.discord_account
+        mc = lr.minecraft_account
+
+        disc.minecraft_account = mc
+        await disc.save()
+        await lr.delete()
+
+        user = await self.bot.fetch_user(int(disc.disc_uuid))
+        await ctx.reply(
+            f"Linked {user.mention} to `{mc.mc_username}` (`{mc.uuid}`).",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @commands.hybrid_command(name="link_code", description="Link your minecraft account.")
     async def link_code(self, ctx: commands.Context, username: str):
@@ -68,8 +191,7 @@ class Join(commands.Cog):
         disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
 
         if disc.minecraft_account_id:
-            assert disc.minecraft_account is not None
-            other_mc = await disc.minecraft_account  # TODO[001]: will this even work???
+            other_mc = await MinecraftAccount.get(id=disc.minecraft_account_id)
             await ctx.reply(
                 f"{ctx.author.mention} is already linked to `{other_mc.mc_username}`.",
                 allowed_mentions=discord.AllowedMentions.none(),
@@ -106,6 +228,13 @@ class Join(commands.Cog):
         # this command should give a pretty embed explaining everything, including the server ip and how to link
         ...
 
+    @tasks.loop(minutes=5)
+    async def clear_old_requests(self):
+        await LinkRequest.filter(
+            Q(minecraft_account__discord_account_id__isnull=False)
+            | Q(discord_account__minecraft_account_id__isnull=False)
+        ).delete()
+
     # some fruma stuff:
     # - self add
     # - self remove
@@ -139,6 +268,9 @@ class Join(commands.Cog):
         ...
 
     # @commands.hybrid_group(name="fruma")
+
+    def cog_unload(self):
+        self.clear_old_requests.cancel()
 
 
 async def setup(bot: Bot):

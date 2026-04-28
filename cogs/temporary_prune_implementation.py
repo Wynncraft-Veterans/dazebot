@@ -8,7 +8,7 @@ from bot import Bot
 # TODO: This is disgusting, and is a temporary workaround for api issues.
 # The cached system will need to replace this once we fix the endpoints.
 
-INACTIVE_DAYS = 9
+INACTIVE_DAYS = 7
 
 
 class TemporaryPruneCog(commands.Cog):

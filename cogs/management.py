@@ -645,7 +645,7 @@ class Management(commands.Cog):
     @is_staff()
     async def list_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
-            await ctx.reply("Use `/list unlinked`.")
+            await ctx.reply("Use `/list unlinked` or `/list linked`.")
 
     @list_group.command(name="unlinked", description="List in-game VETS members not linked to a Discord account.")
     async def list_unlinked(self, ctx: commands.Context):
@@ -682,6 +682,66 @@ class Management(commands.Cog):
             logger=logger,
         )
         await ctx.send(embed=embeds[0], view=Paginator(embeds))
+
+    @list_group.command(
+        name="linked",
+        description="List every Discord<->Minecraft link the bot knows about.",
+    )
+    async def list_linked(self, ctx: commands.Context):
+        from lib.discord_paginated_embed import Paginator, from_lines
+
+        await ctx.defer()
+
+        # Primary links: every DiscordAccount with a non-null minecraft_account.
+        discs = await DiscordAccount.filter(
+            minecraft_account_id__not_isnull=True
+        ).select_related("minecraft_account")
+
+        # Alts: collect per discord_account so we can show them grouped.
+        alts = await MinecraftAlt.all().prefetch_related("discord_account", "minecraft_account")
+        alts_by_disc: dict[str, list[MinecraftAlt]] = {}
+        for a in alts:
+            alts_by_disc.setdefault(a.discord_account.disc_uuid, []).append(a)
+
+        if not discs and not alts_by_disc:
+            await ctx.reply("_(no linked accounts)_")
+            return
+
+        total_alts = len(alts)
+
+        # Sort primaries by mc_username for stable output.
+        discs.sort(key=lambda d: (d.minecraft_account.mc_username or "").lower())
+
+        lines: list[str] = []
+        for d in discs:
+            mc = d.minecraft_account
+            assert mc is not None
+            mention = f"<@{d.disc_uuid}>"
+            guild_tag = f" _[{mc.guild}]_" if mc.guild else " _[guildless]_"
+            lines.append(f"\u2022 {mention} \u2014 `{mc.mc_username}`{guild_tag}")
+            for a in alts_by_disc.pop(d.disc_uuid, []):
+                amc = a.minecraft_account
+                lines.append(f"  \u21b3 alt `{amc.mc_username}`")
+
+        # Any leftover alts whose discord_account has no primary link.
+        for disc_uuid, alt_list in alts_by_disc.items():
+            mention = f"<@{disc_uuid}>"
+            lines.append(f"\u2022 {mention} \u2014 _(no primary, alts only)_")
+            for a in alt_list:
+                amc = a.minecraft_account
+                lines.append(f"  \u21b3 alt `{amc.mc_username}`")
+
+        embeds = from_lines(
+            title=f"Linked accounts ({len(discs)} primary, {total_alts} alts)",
+            lines=lines,
+            lines_per_page=15,
+            logger=logger,
+        )
+        await ctx.send(
+            embed=embeds[0],
+            view=Paginator(embeds),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @commands.hybrid_command(
         name="username",

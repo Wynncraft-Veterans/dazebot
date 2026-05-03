@@ -1,6 +1,6 @@
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from typing import Optional, Dict
 
 
@@ -70,33 +70,37 @@ class Character(BaseModel):
 
 
 class WynncraftPlayer(BaseModel):
+    """Wynncraft v3 /player response.
+
+    Per https://docs.wynncraft.com/privacy, players may opt to hide individual
+    fields. ANY field below that is `Optional[...] = None` may be null because
+    of privacy settings, not just because the data is missing.
+
+    The previous behaviour of mapping `None` -> epoch (1970) for `firstJoin` /
+    `lastJoin` has been removed: callers MUST explicitly handle `None` (e.g.
+    skip inactivity actions, do not assign vanity role) per instructions1.md §7.
+    """
+
     username: str
-    online: bool
-    server: Optional[str]
+    online: Optional[bool] = None
+    server: Optional[str] = None
     activeCharacter: Optional[str] = None
     nickname: Optional[str] = None
     uuid: str
-    rank: str
-    rankBadge: Optional[str]
-    legacyRankColour: Optional[LegacyRankColour]
+    rank: Optional[str] = None
+    rankBadge: Optional[str] = None
+    legacyRankColour: Optional[LegacyRankColour] = None
     shortenedRank: Optional[str] = None
-    supportRank: Optional[str]
+    supportRank: Optional[str] = None
     veteran: Optional[bool] = None
-    firstJoin: datetime = Field(default_factory=lambda: datetime.fromtimestamp(0, tz=timezone.utc))
-    lastJoin: datetime = Field(default_factory=lambda: datetime.fromtimestamp(0, tz=timezone.utc))
-    playtime: float = Field(default_factory=float)
-    guild: Optional[Guild]
+    firstJoin: Optional[datetime] = None
+    lastJoin: Optional[datetime] = None
+    playtime: Optional[float] = None
+    guild: Optional[Guild] = None
     globalData: Optional[GlobalData] = None
     forumLink: Optional[int] = None
-    ranking: Dict[str, int]
-    previousRanking: Dict[str, int]
+    ranking: Dict[str, int] = Field(default_factory=dict)
+    previousRanking: Dict[str, int] = Field(default_factory=dict)
     publicProfile: Optional[bool] = None
     onlineStatus: Optional[bool] = None
     characters: Optional[dict[str, Character]] = None
-
-    @field_validator("lastJoin", "firstJoin", mode="before")
-    def handle_none_datetime(cls, v):
-        """Convert None to epoch datetime, let Pydantic handle everything else"""
-        if v is None:
-            return datetime.fromtimestamp(0, tz=timezone.utc)
-        return v

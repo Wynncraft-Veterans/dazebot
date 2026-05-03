@@ -2,9 +2,6 @@ import itertools
 from pydantic import BaseModel, Field
 from typing import Dict, Generator, List, Optional
 
-import requests
-
-
 from pydantic import field_validator
 from typing import Any
 
@@ -29,11 +26,27 @@ class SeasonRank(BaseModel):
 class BaseMember(BaseModel):
     username: str
     uuid: str
-    online: bool
+    # Wynncraft privacy opt-out (https://docs.wynncraft.com/privacy) means
+    # several previously-required fields can now be null.
+    online: Optional[bool] = None
     server: Optional[str] = None
-    contributed: int
-    contributionRank: int
-    joined: str
+    contributed: Optional[int] = None
+    contributionRank: Optional[int] = None
+    joined: Optional[str] = None
+    # `username` is the player's CURRENT Minecraft username. `legacyName`, when
+    # present, is an OLDER username that some other parts of the Wynncraft API
+    # may still report (i.e. the desynced cached name). Use it as an additional
+    # candidate when matching API rows to local records by name; treat
+    # `username` as canonical. (instructions1.md \u00a74)
+    legacyName: Optional[str] = None
+
+    def name_candidates(self) -> tuple[str, ...]:
+        """Returns names that could plausibly match a local record: the
+        canonical (current) username first, then the desynced legacyName.
+        """
+        if self.legacyName and self.legacyName != self.username:
+            return (self.username, self.legacyName)
+        return (self.username,)
 
 
 class Members(BaseModel):
@@ -79,7 +92,6 @@ class Guild(BaseModel):
     seasonRanks: Dict[str, SeasonRank] = Field(default_factory=dict)
 
 
-# crappy way to make sure API is still coherent with local models
-r = requests.get("https://api.wynncraft.com/v3/guild/Returners?identifier=username")
-guild = Guild(**r.json())
-print(guild.members.owner[0].username)
+# Note: removed module-level network call that previously validated the model
+# against the live API at import time. It made test/CI runs slow and brittle
+# (and broke whenever Wynncraft is down).

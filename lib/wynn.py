@@ -13,9 +13,10 @@ async def check_player_full(uuid: str) -> tuple[str, WynncraftPlayer, MinecraftA
     account = await MinecraftAccount.get(uuid=player.uuid)
     # if player.guild is None:
     #     account.guild = None
-    if account.last_online < player.lastJoin:
+    # Wynncraft privacy: lastJoin/firstJoin can be None. Skip update in that case.
+    if player.lastJoin is not None and account.last_online < player.lastJoin:
         account.last_online = player.lastJoin
-    if player.firstJoin:
+    if player.firstJoin is not None:
         account.first_join = player.firstJoin
     account.wynn_username = player.username
     account.mc_username = mc_username

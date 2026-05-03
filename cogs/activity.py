@@ -45,7 +45,17 @@ class Activity(commands.Cog):
     async def eat_queue(self): ...
 
     async def _apply_guild(self, guild: Guild, member: BaseMember):
-        mc_username = await mc.get_mc_username(member.uuid)
+        # Resolve the canonical Minecraft username. Prefer the API's legacyName
+        # when it differs from the live username (renamed account), otherwise
+        # fall back to the cached Mojang lookup. (instructions1.md §4)
+        try:
+            mc_username = await mc.get_mc_username(member.uuid)
+        except RuntimeError:
+            # All upstream Mojang providers down + no cache: fall back to
+            # whatever the Wynncraft API reports so we still record the row.
+            mc_username = member.username
+        # online may be null per Wynncraft privacy opt-out.
+        is_online = bool(member.online)
         account, created = await MinecraftAccount.get_or_create(
             uuid=member.uuid,
             defaults={
@@ -53,7 +63,7 @@ class Activity(commands.Cog):
                 "wynn_username": member.username,
                 "mc_username": mc_username,
                 "last_online": datetime.now(timezone.utc)
-                if member.online
+                if is_online
                 else datetime.fromtimestamp(0, tz=timezone.utc),
                 "last_manual_check": datetime.fromtimestamp(0, tz=timezone.utc),
             },
@@ -64,7 +74,7 @@ class Activity(commands.Cog):
             account.wynn_username = member.username
             account.mc_username = mc_username
             now = datetime.now(timezone.utc)
-            if member.online and account.last_online <= now:
+            if is_online and account.last_online <= now:
                 account.last_online = now
             await account.save()
 
@@ -75,22 +85,84 @@ class Activity(commands.Cog):
 
         tasks = []
 
+        # Detect newly-joined and newly-left members of *Returners* and fire the
+        # role-state machine accordingly. (instructions1.md \u00a76)
+        if guild_name_full == "Returners":
+            api_uuids = {m.uuid for m in members}
+            previously_in: list[MinecraftAccount] = await MinecraftAccount.filter(guild=guild_name_full).all()
+            previously_in_uuids = {a.uuid for a in previously_in}
+            joined_uuids = api_uuids - previously_in_uuids
+            await self._fire_role_transitions_for_uuids(joined_uuids, _trigger="joined")
+
         for member in members:
             tasks.append(self._apply_guild(guild, member))
 
         accounts = await MinecraftAccount.filter(Q(guild=guild_name_full) & ~Q(uuid__in=[m.uuid for m in members]))
+        left_uuids = [a.uuid for a in accounts]
         for account in accounts:
             account.guild = None
             await account.save()
 
         await asyncio.gather(*tasks)
 
+        if guild_name_full == "Returners" and left_uuids:
+            await self._fire_role_transitions_for_uuids(set(left_uuids), _trigger="became_guildless")
+        elif guild_name_full != "Returners":
+            # When we re-check a non-Returners guild, fire JOINED_OTHER_GUILD
+            # for every uuid we already had in our DB. The state machine
+            # ignores no-op transitions, so this is safe even if they've been
+            # in this guild for a while.
+            api_uuids = {m.uuid for m in members}
+            known = await MinecraftAccount.filter(uuid__in=list(api_uuids)).values_list("uuid", flat=True)
+            await self._fire_role_transitions_for_uuids(set(known), _trigger="joined_other_guild")
+
         return guild
+
+    async def _fire_role_transitions_for_uuids(self, uuids: set[str], _trigger: str):
+        """Resolve each uuid -> linked discord member -> apply the appropriate
+        ``Trigger`` from ``lib.role_state``.
+        """
+        if not uuids:
+            return
+        from lib.role_state import Trigger, apply_transition  # local import: cog may load before lib
+
+        guild = self.bot.get_guild(self.bot.config.GUILD)
+        if guild is None:
+            return
+        # Gather discord links for these MC accounts.
+        discs = await DiscordAccount.filter(
+            minecraft_account__uuid__in=list(uuids)
+        ).select_related("minecraft_account")
+        # And alts.
+        from orm import MinecraftAlt
+
+        alt_links = await MinecraftAlt.filter(
+            minecraft_account__uuid__in=list(uuids)
+        ).select_related("discord_account", "minecraft_account")
+        all_disc_uuids: set[str] = {d.disc_uuid for d in discs}
+        all_disc_uuids.update(a.discord_account.disc_uuid for a in alt_links)
+
+        trig_map = {
+            "joined": Trigger.JOINED_VETS,
+            "became_guildless": Trigger.BECAME_GUILDLESS,
+            "joined_other_guild": Trigger.JOINED_OTHER_GUILD,
+        }
+        trig = trig_map[_trigger]
+
+        for disc_uuid in all_disc_uuids:
+            member = guild.get_member(int(disc_uuid))
+            if member is None:
+                continue
+            try:
+                await apply_transition(member, trig, reason=f"automation:{_trigger}")
+            except discord.HTTPException as e:
+                logger.warning(f"automation: failed transition {_trigger} for {member}: {e}")
 
     @tasks.loop(minutes=11)
     async def check_guild(self):
         logger.info("Doing check_guild task")
         guild = await self._check_guild("Returners")
+        # online may be None per privacy opt-out; treat unknown as not-online for alerts.
         online = [m for m in guild.members.all_members() if m.online]
 
         logger.info(f"members to check right now {[m.username for m in online]}")
@@ -112,7 +184,9 @@ class Activity(commands.Cog):
             # logger.debug(f"STARTED _check_member_helper {member.mc_username=} {member.uuid=}")
             _, player, _ = await check_player_full(member.uuid)
 
-            if player.server and (
+            # Wynncraft privacy: lastJoin may be None. Treat "None" as "unknown";
+            # do NOT trigger inactivity actions for opted-out players.
+            if player.server and player.lastJoin is not None and (
                 player.lastJoin <= datetime.now(timezone.utc) - timedelta(days=9)
             ):  # TODO configurable
                 logger.debug(f"checking {player.server}")

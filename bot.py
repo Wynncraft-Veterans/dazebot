@@ -40,28 +40,27 @@ class Bot(commands.Bot):
             logger.info("Connected to database")
         except Exception as e:
             logger.error(f"Failed to connect to database: {e}")
-        await self._load_cogs()
+        # Apply persisted /config overrides on top of compiled defaults.
+        try:
+            from lib.runtime_config import load_overrides
 
-    # Cogs whose functionality is currently still owned by the
-    # `temporary-server` deployment (Discord ↔ in-game chat bridge and the
-    # associated per-player bridge-token auth). Keep them disabled here
-    # until temporary-server is decommissioned, then remove this set.
-    SKIP_COGS = {
-        "chat_bridge",
-        "auth",
-    }
+            await load_overrides()
+        except Exception as e:
+            logger.error(f"Failed to load runtime config overrides: {e}")
+        # Register persistent views so buttons survive restarts.
+        try:
+            from lib.first_install_view import FirstInstallView
+
+            self.add_view(FirstInstallView())
+        except Exception as e:
+            logger.error(f"Failed to register FirstInstallView: {e}")
+        await self._load_cogs()
 
     async def _load_cogs(self):
         """Load all cogs from the cogs directory"""
         for filename in os.listdir("./cogs"):
             if filename.endswith(".py") and not filename.startswith("__"):
                 cog_name = filename[:-3]
-                if cog_name in self.SKIP_COGS:
-                    logger.warning(
-                        f"Skipping cog '{cog_name}' "
-                        "(handled by temporary-server for now)"
-                    )
-                    continue
                 try:
                     await self.load_extension(f"cogs.{cog_name}")
                     logger.info(f"Loaded cog: {cog_name}")

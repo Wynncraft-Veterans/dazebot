@@ -1,18 +1,18 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
-from random import randint
 from typing import TYPE_CHECKING
 import discord
 from discord.ext import commands, tasks
 from tortoise.expressions import Q
 
+from config import CurrConfig
 from lib.auth import is_moderator
 from lib.discord_paginated_embed import Paginator, from_lines
+from lib.linking import dm_or_log, get_or_issue_code
 from lib.wynn import check_player_full
 from lib.wynn_api.player import get_player_full_stats
 from lib.wynn_api.requestor import Requestor
-from lib.link_listener import PendingLink, link_listeners
 from orm import DiscordAccount, LinkRequest, MinecraftAccount, Waitlist
 
 logger = logging.getLogger("dazebot.cogs.join")
@@ -99,7 +99,7 @@ class Join(commands.Cog):
                 mc_username=fs.username,
                 last_online=fs.lastJoin or datetime.fromtimestamp(0, tz=timezone.utc),
                 last_manual_check=datetime.fromtimestamp(0, tz=timezone.utc),
-                first_join=fs.firstJoin,
+                first_join=fs.firstJoin,  # may be None per Wynncraft privacy opt-out
             )
 
         disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
@@ -162,67 +162,43 @@ class Join(commands.Cog):
 
     @commands.hybrid_command(name="link_code", description="Link your minecraft account.")
     async def link_code(self, ctx: commands.Context, username: str):
-        key = username.lower()
+        # Reject if username already linked to anyone (including this user).
+        existing_link = await MinecraftAccount.filter(mc_username__iexact=username).first()
+        if existing_link is not None:
+            owner = await DiscordAccount.filter(minecraft_account=existing_link).first()
+            if owner is not None:
+                if owner.disc_uuid == str(ctx.author.id):
+                    await ctx.reply(
+                        f"You are already linked to `{existing_link.mc_username}`.",
+                        ephemeral=True,
+                    )
+                else:
+                    await ctx.reply(
+                        f"`{existing_link.mc_username}` is already linked to another Discord account.",
+                        ephemeral=True,
+                    )
+                return
 
-        if key in link_listeners:
-            await ctx.reply("There's already a pending link for that username. Wait for it to finish or time out.")
-            return
+        row, is_new = await get_or_issue_code(str(ctx.author.id), username)
 
-        code = randint(100_000, 999_999)
-        future: asyncio.Future[tuple[str, str, str]] = self.bot.loop.create_future()
-        link_listeners[key] = PendingLink(future=future)
+        body = (
+            f"Your link code for **{username}**:\n\n"
+            f"```\n{row.code}\n```\n"
+            f"1. Connect to `{CurrConfig.MC_PUBLIC_HOST}` in Minecraft.\n"
+            f"2. Type the code above into chat.\n\n"
+            f"The code is persistent — it does not expire and you can re-run "
+            f"`/link_code {username}` any time to see it again."
+        )
 
-        await ctx.reply(f"1. Join `IP_HERE`\n2. Type in chat: `{code}`\n3. You have 1 minute")
-
-        try:
-            uuid, real_username, message = await asyncio.wait_for(future, timeout=60)
-        except asyncio.TimeoutError:
-            await ctx.reply("Link timed out. Run the command again to retry.")
-            return
-        finally:
-            link_listeners.pop(key, None)
-
-        existing = await DiscordAccount.filter(minecraft_account__uuid=uuid).first()
-        if existing is not None and existing.disc_uuid != str(ctx.author.id):
-            other = await self.bot.fetch_user(int(existing.disc_uuid))
+        dmed = await dm_or_log(ctx.author, body, fallback_logger=logger)
+        if dmed:
+            verb = "issued" if is_new else "re-sent existing"
             await ctx.reply(
-                f"`{real_username}` is already linked to {other.mention}. Unlink them first.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-
-        disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
-
-        if disc.minecraft_account_id:
-            other_mc = await MinecraftAccount.get(id=disc.minecraft_account_id)
-            await ctx.reply(
-                f"{ctx.author.mention} is already linked to `{other_mc.mc_username}`.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-
-        if str(code) in message:
-            mc = await MinecraftAccount.filter(uuid=uuid).first()
-            if mc is None:
-                fs = await get_player_full_stats(uuid)
-                mc = await MinecraftAccount.create(
-                    uuid=uuid,
-                    wynn_username=fs.username,
-                    mc_username=real_username,
-                    last_online=fs.lastJoin or datetime.fromtimestamp(0, tz=timezone.utc),
-                    last_manual_check=datetime.fromtimestamp(0, tz=timezone.utc),
-                    first_join=fs.firstJoin,
-                )
-
-            disc.minecraft_account = mc
-            await disc.save()
-
-            await ctx.reply(
-                f"Linked {ctx.author.mention} to Minecraft account `{real_username}`.",
-                allowed_mentions=discord.AllowedMentions.none(),
+                f"Code {verb} via DM. Check your messages.",
+                ephemeral=True,
             )
         else:
-            await ctx.reply("Wrong code. Run the command again to retry.")
+            await ctx.reply(body, ephemeral=True)
 
     @commands.hybrid_command(name="linking", description="Extra info on how to link")
     async def linking(self, ctx: commands.Context):
@@ -276,9 +252,12 @@ class Join(commands.Cog):
 
         await ctx.reply("You have been removed from the waitlist.")
 
-    @commands.hybrid_command(name="waitlist_add", description="Add a player to the waitlist (staff).")
+    @commands.hybrid_command(name="waitlist_add", description="DEPRECATED: use /waitlist add (in management cog).")
     @is_moderator()
     async def waitlist_add(self, ctx: commands.Context, username_or_uuid: str):
+        # Kept as a thin compatibility shim for prefix-command users; the slash
+        # version is owned by cogs/management.py /waitlist add. No role-state
+        # transition is fired here \u2014 callers should migrate.
         mc = await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(mc_username__iexact=username_or_uuid)).first()
 
         if mc is None:
@@ -289,7 +268,7 @@ class Join(commands.Cog):
                 mc_username=fs.username,
                 last_online=fs.lastJoin or datetime.fromtimestamp(0, tz=timezone.utc),
                 last_manual_check=datetime.fromtimestamp(0, tz=timezone.utc),
-                first_join=fs.firstJoin,
+                first_join=fs.firstJoin,  # may be None per Wynncraft privacy opt-out
             )
 
         existing = await Waitlist.filter(minecraft_account=mc).first()

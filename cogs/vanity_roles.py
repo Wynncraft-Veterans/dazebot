@@ -59,6 +59,16 @@ class VanityRoles(commands.Cog):
         await self.handle_member(member)
 
     async def handle_member(self, member: discord.Member):
+        # If the user has explicitly chosen a vanity role via /vanity, honour it
+        # and do not let firstJoin-based assignment override their choice.
+        # See instructions1.md \u00a72g.
+        from orm import UserVanityChoice  # local import to avoid early import cycles
+
+        choice = await UserVanityChoice.filter(disc_uuid=str(member.id)).first()
+        if choice is not None:
+            await self._set_role_exclusive(member, int(choice.role_id))
+            return
+
         disc = await DiscordAccount.filter(disc_uuid=str(member.id)).select_related("minecraft_account").first()
 
         if disc is None or disc.minecraft_account is None:
@@ -67,8 +77,11 @@ class VanityRoles(commands.Cog):
 
         mc = disc.minecraft_account
         if mc.first_join is None:
-            logger.error(
-                f"{member} ({member.id}) linked MC account has no first_join, skipping. (this shouldnt happen?)"
+            # Wynncraft privacy: firstJoin can be None. Per instructions1.md \u00a77,
+            # do NOT assign or strip a vanity role in this case.
+            logger.info(
+                f"{member} ({member.id}) has no first_join (privacy opt-out or unknown). "
+                "Leaving vanity roles alone."
             )
             return
 
@@ -77,16 +90,23 @@ class VanityRoles(commands.Cog):
             logger.info(f"{member} ({member.id}) has no vanity role for first_join={mc.first_join}, skipping")
             return
 
-        correct_role_id = int(role_id_str)
+        await self._set_role_exclusive(member, int(role_id_str))
+
+    async def _set_role_exclusive(self, member: discord.Member, correct_role_id: int):
         current_vanity_roles = [r for r in member.roles if r.id in VANITY_ROLE_IDS]
 
         if len(current_vanity_roles) == 1 and current_vanity_roles[0].id == correct_role_id:
-            logger.info(f"{member} ({member.id}) already has the correct vanity role, skipping")
+            logger.debug(f"{member} ({member.id}) already has the correct vanity role, skipping")
             return
 
-        if current_vanity_roles:
-            await member.remove_roles(*current_vanity_roles)
-            logger.info(f"Removed vanity role(s) {[r.name for r in current_vanity_roles]} from {member} ({member.id})")
+        # Remove any vanity role that isn't the target (preserve target if held).
+        to_remove = [r for r in current_vanity_roles if r.id != correct_role_id]
+        if to_remove:
+            await member.remove_roles(*to_remove)
+            logger.info(f"Removed vanity role(s) {[r.name for r in to_remove]} from {member} ({member.id})")
+
+        if any(r.id == correct_role_id for r in current_vanity_roles):
+            return
 
         role = member.guild.get_role(correct_role_id)
         if role is None:

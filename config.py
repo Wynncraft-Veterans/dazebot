@@ -8,6 +8,44 @@ class Config:
     GUILD_DEAD_ALERT_CHANNEL = 1401676479300898939
     GUILD_FULL_ALERT_CHANNEL = 1401676479300898939
 
+    # --- VETS membership-state roles (see .vscode/instructions1.md §6) ---
+    ROLE_REGISTERED = 1407078577450520637  # Never been a vets member
+    ROLE_HIATUS = 1407078148440592444  # Was in vets, currently guildless
+    ROLE_MEMBER = 1407078065137254563  # Currently in vets
+    ROLE_HONOURARY = 1450046372853055498  # Honourary member
+    ROLE_WAITLISTED = 1474854046685855795  # On the waitlist
+
+    # Roles that are wiped on /first-install (legacy)
+    ROLES_FIRST_INSTALL_WIPE = (
+        1313782801933537371,
+        1474854046685855795,
+        1450046372853055498,
+    )
+
+    # Staff role (members can run staff slash commands without having admin perm)
+    STAFF_ROLE = 1337993168502788216
+
+    # Channel where blocklist alerts are posted when a blocked user is currently in the in-game guild.
+    BLOCKLIST_ALERT_CHANNEL = 1412981365179416616
+
+    # Public-facing Minecraft server address users connect to in order to redeem
+    # link codes (the picolimbo mini-server). Surfaced in onboarding DMs.
+    MC_PUBLIC_HOST = os.environ.get("MC_PUBLIC_HOST", "verify.wynnvets.org")
+
+    # The original-tier vanity role (<1.0 / 2013). Users may NOT self-assign this via /vanity;
+    # only staff /vanity force can grant it.
+    ROLE_VANITY_ORIGINAL = 1318063966420729866
+
+    # --- Inactivity thresholds (configurable via /config) ---
+    # x: members in VETS with no last_online activity for INACTIVITY_MEMBER_DAYS get a DM warning.
+    #    Default: disabled (False) until staff opts in.
+    INACTIVITY_MEMBER_DAYS = 14
+    INACTIVITY_MEMBER_ENABLED = False
+    # y: waitlisted users (Registered/Hiatus/Honourary + Waitlisted) get the waitlist role removed
+    #    after this many days. Default: enabled (True).
+    INACTIVITY_WAITLIST_DAYS = 3
+    INACTIVITY_WAITLIST_ENABLED = True
+
     GUILD_DEAD_ALERT_ROLE_USA = 1402295013169172500
     GUILD_DEAD_ALERT_ROLE_EUROPE = 1436108975132119221
     GUILD_DEAD_ALERT_ROLE_ASIA = 1436109140195020892
@@ -44,8 +82,6 @@ class Config:
     MODERATORS = ADMINS | {
         0,  # Replace with actual mod
     }
-
-    BRIDGE_CHANNEL = 1458659889978020006
 
     class AnniConfig:
         ROLE_ID = 1457366058951249970

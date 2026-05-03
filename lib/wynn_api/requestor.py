@@ -41,7 +41,14 @@ class Requestor(metaclass=SingletonMeta):
         logger.debug("Started probing")
         session = await self._get_session()
         res = await session.get(url, **kwargs)
-        reset = float(res.headers["RateLimit-Reset"])
+        # RateLimit-* headers are not always present (e.g. cached responses,
+        # upstream errors, CDN short-circuits). Fall back to Retry-After or a
+        # small default rather than raising KeyError into the request loop.
+        reset_hdr = res.headers.get("RateLimit-Reset") or res.headers.get("Retry-After")
+        try:
+            reset = float(reset_hdr) if reset_hdr is not None else 1.0
+        except ValueError:
+            reset = 1.0
         if res.status == 429:
             logger.info(f"Hit 429 during probing! Waiting {reset} seconds")
             await asyncio.sleep(reset)
@@ -62,9 +69,19 @@ class Requestor(metaclass=SingletonMeta):
             uuid, url, kwargs = deq.popleft()
             probe = await self._probe(url, **kwargs)
             self.out[uuid] = probe
-            remaining = int(float(probe.headers["RateLimit-Remaining"]))
-            limit = int(float(probe.headers["RateLimit-Limit"]))
-            reset = int(float(probe.headers["RateLimit-Reset"]))
+            # Same defensive handling as _probe: missing headers => assume
+            # we have no extra capacity this tick and move on.
+            try:
+                remaining = int(float(probe.headers["RateLimit-Remaining"]))
+                limit = int(float(probe.headers["RateLimit-Limit"]))
+                reset = int(float(probe.headers["RateLimit-Reset"]))
+            except (KeyError, ValueError):
+                logger.debug(
+                    f"Probe response missing RateLimit-* headers (status={probe.status}); "
+                    "skipping batch this tick"
+                )
+                await asyncio.sleep(1)
+                continue
 
             usable = max(0, remaining - reset)
 

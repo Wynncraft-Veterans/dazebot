@@ -248,6 +248,70 @@ class Management(commands.Cog):
         )
 
     # =================================================================
+    # SCRIPT (one-off admin maintenance scripts)
+    # =================================================================
+
+    @commands.hybrid_group(
+        name="script",
+        description="(Admin) One-off maintenance scripts.",
+    )
+    @is_server_admin()
+    async def script_group(self, ctx: commands.Context):
+        if ctx.invoked_subcommand is None:
+            await ctx.reply(
+                "Available scripts: `/script edit_welcome <channel> <message_id>`."
+            )
+
+    @script_group.command(
+        name="edit_welcome",
+        description="(Admin) Rewrite an onboarding message to the simplified copy, keeping the link button.",
+    )
+    @is_server_admin()
+    @app_commands.describe(
+        channel="Channel containing the onboarding message.",
+        message_id="ID of the message to edit (must have been posted by this bot).",
+    )
+    async def script_edit_welcome(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel,
+        message_id: str,
+    ):
+        from lib.first_install_view import FirstInstallView
+
+        await ctx.defer(ephemeral=True)
+        try:
+            mid = int(message_id)
+        except ValueError:
+            await ctx.reply("`message_id` must be numeric.", ephemeral=True)
+            return
+
+        try:
+            msg = await channel.fetch_message(mid)
+        except (discord.NotFound, discord.Forbidden) as e:
+            await ctx.reply(f"\u274c Couldn't fetch that message: {e}", ephemeral=True)
+            return
+
+        if msg.author.id != self.bot.user.id:
+            await ctx.reply(
+                "\u274c That message wasn't posted by me, so I can't edit it.",
+                ephemeral=True,
+            )
+            return
+
+        new_content = (
+            "# IN-GAME VETS GUILD MEMBERS!\n"
+            "## Use this to unlock guild-specific channels!"
+        )
+        try:
+            await msg.edit(content=new_content, embed=None, view=FirstInstallView())
+        except discord.HTTPException as e:
+            await ctx.reply(f"\u274c Edit failed: {e}", ephemeral=True)
+            return
+
+        await ctx.reply(f"\u2705 Edited {msg.jump_url}.", ephemeral=True)
+
+    # =================================================================
     # BLOCK / UNBLOCK
     # =================================================================
 

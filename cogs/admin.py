@@ -5,11 +5,12 @@ from discord.ext import commands
 
 from lib.auth import is_admin
 from lib.converters import CaseInsensitiveMember
+from lib.role_state import ensure_linked_baseline
 
 logger = logging.getLogger("dazebot.cogs.admin")
 from bot import Bot
 from tortoise.expressions import Q
-from orm import DiscordAccount, MinecraftAccount
+from orm import Blocklist, DiscordAccount, MinecraftAccount
 
 
 class Admin(commands.Cog):
@@ -263,8 +264,27 @@ class Admin(commands.Cog):
 
         disc.minecraft_account = mc
         await disc.save(update_fields=["minecraft_account_id"])
+
+        # Apply the linked-account role invariant: in Returners -> MEMBER,
+        # else REGISTERED. Same logic as the chat-code link path.
+        baseline_note = ""
+        try:
+            blocked = await Blocklist.filter(minecraft_account=mc).exists()
+            await ensure_linked_baseline(
+                user,
+                in_returners=(mc.guild == "Returners"),
+                blocked=blocked,
+                reason=f"/link set by {ctx.author}",
+            )
+        except discord.HTTPException as e:
+            logger.warning(f"/link set: ensure_linked_baseline failed for {user}: {e}")
+            baseline_note = f"\n\u26a0\ufe0f Could not update roles: {e}"
+        except Exception:  # noqa: BLE001
+            logger.exception("/link set: ensure_linked_baseline crashed")
+            baseline_note = "\n\u26a0\ufe0f Could not update roles (see logs)."
+
         await ctx.reply(
-            f"Linked {user.mention} to Minecraft account `{mc.mc_username}`.",
+            f"Linked {user.mention} to Minecraft account `{mc.mc_username}`.{baseline_note}",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 

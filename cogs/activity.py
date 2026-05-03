@@ -211,8 +211,8 @@ class Activity(commands.Cog):
 
         tasks = []
 
-        for guild in guilds_to_check:
-            tasks.append(self._check_guild(guild))
+        for other_guild in guilds_to_check:
+            tasks.append(self._check_guild(other_guild))
 
         await asyncio.gather(*tasks)
 

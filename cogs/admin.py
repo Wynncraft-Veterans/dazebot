@@ -233,7 +233,9 @@ class Admin(commands.Cog):
     ):
         """Link a Discord user to a Minecraft account"""
         mc = await MinecraftAccount.filter(
-            Q(uuid=username_or_uuid) | Q(mc_username=username_or_uuid) | Q(wynn_username=username_or_uuid)
+            Q(uuid=username_or_uuid)
+            | Q(mc_username__iexact=username_or_uuid)
+            | Q(wynn_username__iexact=username_or_uuid)
         ).first()
 
         if mc is None:

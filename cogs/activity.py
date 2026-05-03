@@ -334,7 +334,9 @@ class Activity(commands.Cog):
     async def last_online(self, ctx: commands.Context, username_or_uuid: str):
         try:
             player = await MinecraftAccount.get(
-                Q(uuid=username_or_uuid) | Q(mc_username=username_or_uuid) | Q(wynn_username=username_or_uuid)
+                Q(uuid=username_or_uuid)
+                | Q(mc_username__iexact=username_or_uuid)
+                | Q(wynn_username__iexact=username_or_uuid)
             )
             ts = int(player.last_online.timestamp())
             await ctx.send(

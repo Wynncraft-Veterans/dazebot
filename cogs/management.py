@@ -136,7 +136,7 @@ class Management(commands.Cog):
     # =================================================================
 
     @commands.hybrid_command(
-        name="first-install",
+        name="first_install",
         description="(Admin) Post the onboarding message with a 'Link Minecraft' button.",
     )
     @is_server_admin()

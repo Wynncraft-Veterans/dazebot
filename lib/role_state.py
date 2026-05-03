@@ -297,6 +297,18 @@ async def ensure_linked_baseline(
     rem_roles = [r for r in (guild.get_role(rid) for rid in to_remove_ids) if r is not None]
     add_roles = [r for r in (guild.get_role(rid) for rid in to_add_ids) if r is not None]
     default_reason = f"linked baseline -> {'MEMBER' if target == MEM else 'REGISTERED'}"
+    if to_add_ids and not add_roles:
+        logger.error(
+            "ensure_linked_baseline: target role(s) %s could not be resolved in guild %s "
+            "(check CurrConfig.ROLE_MEMBER / ROLE_REGISTERED ids). Aborting for %s.",
+            to_add_ids, guild.id, member,
+        )
+        return
+    if to_remove_ids and not rem_roles:
+        logger.warning(
+            "ensure_linked_baseline: stale role(s) %s could not be resolved in guild %s for %s",
+            to_remove_ids, guild.id, member,
+        )
     if rem_roles:
         await member.remove_roles(*rem_roles, reason=reason or default_reason)
     if add_roles:

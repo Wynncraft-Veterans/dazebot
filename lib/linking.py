@@ -212,14 +212,40 @@ async def _enforce_linked_baseline_for(bot: Bot, disc_uuid: str, mc: MinecraftAc
     """
     in_returners = mc.guild == "Returners"
     blocked = await Blocklist.filter(minecraft_account=mc).exists()
+    logger.info(
+        "enforce_baseline: start disc=%s mc_uuid=%s mc_guild=%r in_returners=%s blocked=%s",
+        disc_uuid, mc.uuid, mc.guild, in_returners, blocked,
+    )
     try:
         uid = int(disc_uuid)
     except ValueError:
+        logger.error("enforce_baseline: disc_uuid %r is not an int, aborting", disc_uuid)
         return
+    found_anywhere = False
     for guild in bot.guilds:
         member = guild.get_member(uid)
         if member is None:
-            continue
+            # Cache miss. Fall back to a REST fetch so we don't silently skip
+            # users whose member objects haven't been chunked yet.
+            try:
+                member = await guild.fetch_member(uid)
+            except discord.NotFound:
+                logger.debug(
+                    "enforce_baseline: %s not in guild %s (%s)",
+                    uid, guild.name, guild.id,
+                )
+                continue
+            except discord.HTTPException as e:
+                logger.warning(
+                    "enforce_baseline: fetch_member(%s) in %s failed: %s",
+                    uid, guild.name, e,
+                )
+                continue
+            logger.info(
+                "enforce_baseline: cache miss for %s in %s, used REST fetch",
+                uid, guild.name,
+            )
+        found_anywhere = True
         try:
             await ensure_linked_baseline(
                 member,
@@ -227,8 +253,18 @@ async def _enforce_linked_baseline_for(bot: Bot, disc_uuid: str, mc: MinecraftAc
                 blocked=blocked,
                 reason="link_completed",
             )
+            logger.info(
+                "enforce_baseline: applied for %s (%s) in %s",
+                member, member.id, guild.name,
+            )
         except discord.HTTPException as e:
             logger.warning(f"ensure_linked_baseline failed for {member} in {guild}: {e}")
+    if not found_anywhere:
+        logger.error(
+            "enforce_baseline: disc %s not found in ANY of %d bot guilds; "
+            "user will not receive MEMBER/REGISTERED role!",
+            uid, len(bot.guilds),
+        )
 
 
 async def dm_or_log(

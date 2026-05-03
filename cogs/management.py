@@ -157,6 +157,10 @@ class Management(commands.Cog):
             await ctx.reply("This command must be used in a guild.")
             return
 
+        # Slash commands must ack within 3s; the role-wipe loop below can take
+        # much longer. defer() is a no-op for prefix invocations.
+        await ctx.defer()
+
         target_channel = channel or (
             ctx.channel if isinstance(ctx.channel, discord.TextChannel) else None
         )

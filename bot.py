@@ -42,11 +42,26 @@ class Bot(commands.Bot):
             logger.error(f"Failed to connect to database: {e}")
         await self._load_cogs()
 
+    # Cogs whose functionality is currently still owned by the
+    # `temporary-server` deployment (Discord ↔ in-game chat bridge and the
+    # associated per-player bridge-token auth). Keep them disabled here
+    # until temporary-server is decommissioned, then remove this set.
+    SKIP_COGS = {
+        "chat_bridge",
+        "auth",
+    }
+
     async def _load_cogs(self):
         """Load all cogs from the cogs directory"""
         for filename in os.listdir("./cogs"):
             if filename.endswith(".py") and not filename.startswith("__"):
                 cog_name = filename[:-3]
+                if cog_name in self.SKIP_COGS:
+                    logger.warning(
+                        f"Skipping cog '{cog_name}' "
+                        "(handled by temporary-server for now)"
+                    )
+                    continue
                 try:
                     await self.load_extension(f"cogs.{cog_name}")
                     logger.info(f"Loaded cog: {cog_name}")

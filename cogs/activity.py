@@ -207,6 +207,7 @@ class Activity(commands.Cog):
         await asyncio.gather(*check_members_task)
 
         guilds_to_check.discard("Returners")
+        guilds_to_check.discard(None)
 
         tasks = []
 

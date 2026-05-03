@@ -25,8 +25,9 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from lib.role_state import ensure_linked_baseline
 from lib.wynn_api.player import get_player_full_stats
-from orm import DiscordAccount, LinkCode, MinecraftAccount
+from orm import Blocklist, DiscordAccount, LinkCode, MinecraftAccount
 
 if TYPE_CHECKING:
     from bot import Bot
@@ -153,12 +154,47 @@ async def try_consume_code(
     await disc.save()
     await row.delete()
 
+    # Enforce the linked-account role invariant immediately. Without this,
+    # a user who linked AFTER joining Returners would never get the MEMBER
+    # role, since the activity loop only fires JOINED_VETS for in-game
+    # join events. ensure_linked_baseline is idempotent and safe to retry.
+    try:
+        await _enforce_linked_baseline_for(bot, row.disc_uuid, mc)
+    except Exception:  # noqa: BLE001 - role enforcement must never break linking
+        logger.exception("try_consume_code: failed to enforce linked baseline for %s", row.disc_uuid)
+
     return LinkCompletion(
         success=True,
         reason=f"Linked to `{mc.mc_username}` (`{mc.uuid}`).",
         discord_user=discord_user,
         mc_account=mc,
     )
+
+
+async def _enforce_linked_baseline_for(bot: Bot, disc_uuid: str, mc: MinecraftAccount) -> None:
+    """Look up the Discord member across the bot's guilds and call
+    ``ensure_linked_baseline`` so they end up with REGISTERED or MEMBER as
+    appropriate. No-op if the user is not in any guild the bot can see.
+    """
+    in_returners = mc.guild == "Returners"
+    blocked = await Blocklist.filter(minecraft_account=mc).exists()
+    try:
+        uid = int(disc_uuid)
+    except ValueError:
+        return
+    for guild in bot.guilds:
+        member = guild.get_member(uid)
+        if member is None:
+            continue
+        try:
+            await ensure_linked_baseline(
+                member,
+                in_returners=in_returners,
+                blocked=blocked,
+                reason="link_completed",
+            )
+        except discord.HTTPException as e:
+            logger.warning(f"ensure_linked_baseline failed for {member} in {guild}: {e}")
 
 
 async def dm_or_log(

@@ -246,3 +246,63 @@ async def force_to_registered_only(member: discord.Member, *, reason: str | None
         await member.remove_roles(*rem_roles, reason=reason or "block:force-registered")
     if add_roles:
         await member.add_roles(*add_roles, reason=reason or "block:force-registered")
+
+
+async def ensure_linked_baseline(
+    member: discord.Member,
+    *,
+    in_returners: bool,
+    blocked: bool = False,
+    reason: str | None = None,
+) -> None:
+    """Enforce the invariant: any linked Discord user must be MEMBER or
+    REGISTERED, never both, never neither.
+
+    - blocked OR not in Returners \u2192 REGISTERED (clears MEMBER/HIATUS/HONOURARY).
+    - in Returners (and not blocked) \u2192 MEMBER (clears REGISTERED/HIATUS/HONOURARY).
+
+    WAITLISTED is preserved \u2014 it's an additive flag managed separately by
+    the waitlist commands and is independent of the in-guild status.
+
+    Idempotent: if the member already has the correct primary role and no
+    conflicting ones, this is a no-op (no API calls made). Safe to call
+    repeatedly from background loops.
+
+    HONOURARY is intentionally cleared \u2014 honourary status is mutually
+    exclusive with the linked-account baseline; staff can re-grant it.
+    """
+    REG = State.REGISTERED
+    MEM = State.MEMBER
+    HIA = State.HIATUS
+    HON = State.HONOURARY
+
+    state = state_of(member)
+    target = REG if (blocked or not in_returners) else MEM
+    primary_state_flags = (REG, MEM, HIA, HON)
+
+    target_role_id = _STATE_ROLE_MAP[target]()
+    to_remove_ids = {
+        _STATE_ROLE_MAP[s]()
+        for s in primary_state_flags
+        if s != target and s in state
+    }
+    to_add_ids: set[int] = set()
+    if target not in state:
+        to_add_ids.add(target_role_id)
+
+    if not to_add_ids and not to_remove_ids:
+        return
+
+    guild = member.guild
+    rem_roles = [r for r in (guild.get_role(rid) for rid in to_remove_ids) if r is not None]
+    add_roles = [r for r in (guild.get_role(rid) for rid in to_add_ids) if r is not None]
+    default_reason = f"linked baseline -> {'MEMBER' if target == MEM else 'REGISTERED'}"
+    if rem_roles:
+        await member.remove_roles(*rem_roles, reason=reason or default_reason)
+    if add_roles:
+        await member.add_roles(*add_roles, reason=reason or default_reason)
+    logger.info(
+        f"ensure_linked_baseline: {member} ({member.id}) -> "
+        f"{'MEMBER' if target == MEM else 'REGISTERED'} "
+        f"+{[r.name for r in add_roles]} -{[r.name for r in rem_roles]}"
+    )

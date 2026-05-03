@@ -162,7 +162,6 @@ class Management(commands.Cog):
         # much longer. defer() is a no-op for prefix invocations.
         await ctx.defer()
         logger.info("first_install: deferred, beginning channel resolution")
-
         target_channel = channel or (
             ctx.channel if isinstance(ctx.channel, discord.TextChannel) else None
         )

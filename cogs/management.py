@@ -693,9 +693,12 @@ class Management(commands.Cog):
         await ctx.defer()
 
         # Primary links: every DiscordAccount with a non-null minecraft_account.
-        discs = await DiscordAccount.filter(
-            minecraft_account_id__isnull=False
-        ).select_related("minecraft_account")
+        all_discs = await DiscordAccount.all().select_related("minecraft_account")
+        discs = [d for d in all_discs if d.minecraft_account is not None]
+        logger.info(
+            f"/list linked: scanned {len(all_discs)} DiscordAccount rows, "
+            f"{len(discs)} have a primary minecraft_account"
+        )
 
         # Alts: collect per discord_account so we can show them grouped.
         alts = await MinecraftAlt.all().prefetch_related("discord_account", "minecraft_account")
@@ -946,6 +949,103 @@ class Management(commands.Cog):
     async def config_reset(self, ctx: commands.Context, key: str):
         await runtime_config.clear_override(key)
         await ctx.reply(f"\u2705 Cleared override for `{key}`. Restart bot for compiled default to take effect.")
+
+    # =================================================================
+    # /alerts  (shortcuts on top of /config for the guild dead/full alerts)
+    # =================================================================
+
+    @commands.hybrid_group(name="alerts", description="(Admin) Mute / unmute / tune guild dead+full alerts.")
+    @is_server_admin()
+    async def alerts_group(self, ctx: commands.Context):
+        if ctx.invoked_subcommand is None:
+            await ctx.reply(
+                "Use `/alerts status`, `/alerts mute [duration_hours]`, `/alerts unmute`, "
+                "`/alerts thresholds <dead_when> <full_when>`."
+            )
+
+    # A duration big enough that the throttle effectively silences the alert,
+    # but still finite/reset-able. ~10 years.
+    _ALERTS_MUTE_SECONDS = 10 * 365 * 24 * 3600
+
+    @alerts_group.command(
+        name="status",
+        description="Show current dead/full alert thresholds and throttle deltas.",
+    )
+    async def alerts_status(self, ctx: commands.Context):
+        dead_when = runtime_config.get_value("GUILD_DEAD_WHEN")
+        full_when = runtime_config.get_value("GUILD_FULL_WHEN")
+        dead_delta = runtime_config.get_value("GUILD_DEAD_ALERT_DELTA")
+        full_delta = runtime_config.get_value("GUILD_FULL_ALERT_DELTA")
+
+        def _muted(delta: timedelta) -> str:
+            return " \u26d4 muted" if delta.total_seconds() >= 365 * 24 * 3600 else ""
+
+        await ctx.reply(
+            "**Guild alert config**\n"
+            f"\u2022 Dead alert: fires when online \u2264 `{dead_when}`, "
+            f"throttled `{dead_delta}`{_muted(dead_delta)}\n"
+            f"\u2022 Full alert: fires when members \u2265 `{full_when}`, "
+            f"throttled `{full_delta}`{_muted(full_delta)}"
+        )
+
+    @alerts_group.command(
+        name="mute",
+        description="Silence dead+full guild alerts (default: ~forever).",
+    )
+    @app_commands.describe(duration_hours="How long to mute, in hours. Omit for ~forever.")
+    async def alerts_mute(self, ctx: commands.Context, duration_hours: Optional[float] = None):
+        seconds = int(duration_hours * 3600) if duration_hours else self._ALERTS_MUTE_SECONDS
+        try:
+            await runtime_config.set_override("GUILD_DEAD_ALERT_DELTA", str(seconds))
+            await runtime_config.set_override("GUILD_FULL_ALERT_DELTA", str(seconds))
+        except (KeyError, PermissionError, ValueError) as e:
+            await ctx.reply(f"\u274c {e}")
+            return
+        td = timedelta(seconds=seconds)
+        await ctx.reply(f"\ud83d\udd07 Muted dead+full alerts for `{td}`. Use `/alerts unmute` to restore.")
+
+    @alerts_group.command(
+        name="unmute",
+        description="Restore the compiled default throttle for dead+full alerts.",
+    )
+    async def alerts_unmute(self, ctx: commands.Context):
+        await runtime_config.clear_override("GUILD_DEAD_ALERT_DELTA")
+        await runtime_config.clear_override("GUILD_FULL_ALERT_DELTA")
+        await ctx.reply(
+            "\ud83d\udd0a Cleared dead+full alert throttle overrides. "
+            "Compiled defaults take effect after the next bot restart; "
+            "the running process keeps the muted values until then."
+        )
+
+    @alerts_group.command(
+        name="thresholds",
+        description="Set dead-when (online <=) and full-when (members >=) thresholds.",
+    )
+    @app_commands.describe(
+        dead_when="Online-player count at or below which the dead alert fires.",
+        full_when="Member count at or above which the full alert fires.",
+    )
+    async def alerts_thresholds(
+        self,
+        ctx: commands.Context,
+        dead_when: Optional[int] = None,
+        full_when: Optional[int] = None,
+    ):
+        if dead_when is None and full_when is None:
+            await ctx.reply("Provide at least one of `dead_when` or `full_when`.")
+            return
+        changes: list[str] = []
+        try:
+            if dead_when is not None:
+                v = await runtime_config.set_override("GUILD_DEAD_WHEN", str(dead_when))
+                changes.append(f"`GUILD_DEAD_WHEN` = `{v}`")
+            if full_when is not None:
+                v = await runtime_config.set_override("GUILD_FULL_WHEN", str(full_when))
+                changes.append(f"`GUILD_FULL_WHEN` = `{v}`")
+        except (KeyError, PermissionError, ValueError) as e:
+            await ctx.reply(f"\u274c {e}")
+            return
+        await ctx.reply("\u2705 " + "; ".join(changes))
 
     # =================================================================
     # INACTIVITY LOOP

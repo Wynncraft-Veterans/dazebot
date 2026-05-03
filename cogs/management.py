@@ -197,7 +197,6 @@ class Management(commands.Cog):
         vanity_role_ids = set(int(r) for _, r in CurrConfig.VanityRolesConfig.CUTOFFS)
         legacy_role_ids = set(int(r) for r in CurrConfig.ROLES_FIRST_INSTALL_WIPE)
 
-        await ctx.guild.chunk()
         # NOTE: do NOT call ctx.guild.chunk() here. With members/presence
         # intents on, the cache is populated from gateway events at connect
         # time; an explicit chunk request can hang indefinitely on some

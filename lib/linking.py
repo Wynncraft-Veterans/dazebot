@@ -138,6 +138,10 @@ async def try_consume_code(
                 uuid=mc_uuid,
                 wynn_username=fs.username,
                 mc_username=mc_username,
+                # Populate guild from the live API so ensure_linked_baseline
+                # below can correctly grant MEMBER instead of REGISTERED for
+                # users who joined Returners between activity-loop ticks.
+                guild=fs.guild.name if fs.guild else None,
                 last_online=fs.lastJoin or datetime.fromtimestamp(0, tz=timezone.utc),
                 last_manual_check=datetime.fromtimestamp(0, tz=timezone.utc),
                 first_join=fs.firstJoin,  # may be None per Wynncraft privacy opt-out
@@ -153,6 +157,19 @@ async def try_consume_code(
     disc.minecraft_account = mc
     await disc.save()
     await row.delete()
+
+    # Refresh mc.guild from the live API before enforcing the baseline so
+    # the MEMBER vs REGISTERED decision is based on current truth, not on
+    # whatever the activity loop happened to cache last. Best-effort: if the
+    # API call fails, we fall back to whatever is stored.
+    try:
+        fs = await get_player_full_stats(mc_uuid)
+        live_guild = fs.guild.name if fs.guild else None
+        if mc.guild != live_guild:
+            mc.guild = live_guild
+            await mc.save(update_fields=["guild"])
+    except Exception:  # noqa: BLE001 - third-party API
+        logger.warning("try_consume_code: guild refresh failed for %s; using stored value", mc_uuid)
 
     # Enforce the linked-account role invariant immediately. Without this,
     # a user who linked AFTER joining Returners would never get the MEMBER

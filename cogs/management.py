@@ -151,6 +151,7 @@ class Management(commands.Cog):
         quote_message_id: Optional[str] = None,
     ):
         """One-shot install command. See instructions1.md \u00a71."""
+        logger.info(f"first_install: invoked by {ctx.author} (id={ctx.author.id}) in guild={ctx.guild}")
         from lib.first_install_view import FirstInstallView, build_welcome_embed
 
         if ctx.guild is None:
@@ -160,6 +161,7 @@ class Management(commands.Cog):
         # Slash commands must ack within 3s; the role-wipe loop below can take
         # much longer. defer() is a no-op for prefix invocations.
         await ctx.defer()
+        logger.info("first_install: deferred, beginning channel resolution")
 
         target_channel = channel or (
             ctx.channel if isinstance(ctx.channel, discord.TextChannel) else None

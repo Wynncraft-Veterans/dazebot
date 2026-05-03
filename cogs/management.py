@@ -198,6 +198,7 @@ class Management(commands.Cog):
 
         await ctx.guild.chunk()
         async with ctx.typing():
+            logger.info(f"first-install: scanning {len(ctx.guild.members)} members for legacy/vanity roles")
             for member in ctx.guild.members:
                 to_remove = [
                     r for r in member.roles

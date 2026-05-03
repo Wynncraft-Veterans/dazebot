@@ -198,6 +198,12 @@ class Management(commands.Cog):
         legacy_role_ids = set(int(r) for r in CurrConfig.ROLES_FIRST_INSTALL_WIPE)
 
         await ctx.guild.chunk()
+        # NOTE: do NOT call ctx.guild.chunk() here. With members/presence
+        # intents on, the cache is populated from gateway events at connect
+        # time; an explicit chunk request can hang indefinitely on some
+        # gateway sessions (observed: deferred command never returns). The
+        # iteration below uses the cached `ctx.guild.members` directly,
+        # which is sufficient for our purposes.
         async with ctx.typing():
             logger.info(f"first-install: scanning {len(ctx.guild.members)} members for legacy/vanity roles")
             for member in ctx.guild.members:

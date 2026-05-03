@@ -648,7 +648,7 @@ class Management(commands.Cog):
     @is_staff()
     async def waitlist_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
-            await ctx.reply("Use `/waitlist add <user> [username]`.")
+            await ctx.reply("Use `/waitlist add <user> [username]`, `/waitlist view`, or `/waitlist remove <user>`.")
 
     @waitlist_group.command(
         name="add",
@@ -709,6 +709,49 @@ class Management(commands.Cog):
             f"\u2705 {user.mention} (`{mc.mc_username}`) added to waitlist.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    @waitlist_group.command(
+        name="view",
+        description="View the current waitlist.",
+    )
+    async def waitlist_group_view(self, ctx: commands.Context):
+        from lib.discord_paginated_embed import Paginator, from_lines
+
+        entries = await Waitlist.all().prefetch_related("minecraft_account").order_by("created_at")
+        lines = [
+            f"{i + 1}. <t:{int(entry.created_at.timestamp())}:R> - "
+            f"`{entry.minecraft_account.mc_username}` (`{entry.minecraft_account.uuid}`)"
+            for i, entry in enumerate(entries)
+        ]
+        if not lines:
+            await ctx.reply("The waitlist is empty.")
+            return
+
+        embeds = from_lines(
+            title="Current waitlist",
+            lines=lines,
+            lines_per_page=10,
+            logger=logger,
+        )
+        await ctx.send(
+            embed=embeds[0],
+            view=Paginator(embeds),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @waitlist_group.command(
+        name="remove",
+        description="Remove a player from the waitlist by Minecraft username or UUID.",
+    )
+    async def waitlist_group_remove(self, ctx: commands.Context, username_or_uuid: str):
+        deleted = await Waitlist.filter(
+            Q(minecraft_account__uuid=username_or_uuid)
+            | Q(minecraft_account__mc_username__iexact=username_or_uuid)
+        ).delete()
+        if not deleted:
+            await ctx.reply(f"`{username_or_uuid}` is not on the waitlist.")
+            return
+        await ctx.reply(f"`{username_or_uuid}` has been removed from the waitlist.")
 
     # =================================================================
     # /config

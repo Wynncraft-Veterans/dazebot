@@ -7,7 +7,6 @@ from discord.ext import commands, tasks
 from tortoise.expressions import Q
 
 from config import CurrConfig
-from lib.auth import is_moderator
 from lib.discord_paginated_embed import Paginator, from_lines
 from lib.linking import dm_or_log, get_or_issue_code
 from lib.wynn import check_player_full
@@ -252,45 +251,9 @@ class Join(commands.Cog):
 
         await ctx.reply("You have been removed from the waitlist.")
 
-    @commands.hybrid_command(name="waitlist_add", description="DEPRECATED: use /waitlist add (in management cog).")
-    @is_moderator()
-    async def waitlist_add(self, ctx: commands.Context, username_or_uuid: str):
-        # Kept as a thin compatibility shim for prefix-command users; the slash
-        # version is owned by cogs/management.py /waitlist add. No role-state
-        # transition is fired here \u2014 callers should migrate.
-        mc = await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(mc_username__iexact=username_or_uuid)).first()
-
-        if mc is None:
-            fs = await get_player_full_stats(username_or_uuid)
-            mc = await MinecraftAccount.create(
-                uuid=fs.uuid,
-                wynn_username=fs.username,
-                mc_username=fs.username,
-                last_online=fs.lastJoin or datetime.fromtimestamp(0, tz=timezone.utc),
-                last_manual_check=datetime.fromtimestamp(0, tz=timezone.utc),
-                first_join=fs.firstJoin,  # may be None per Wynncraft privacy opt-out
-            )
-
-        existing = await Waitlist.filter(minecraft_account=mc).first()
-        if existing:
-            await ctx.reply(f"`{mc.mc_username}` is already on the waitlist.")
-            return
-
-        await Waitlist.create(minecraft_account=mc)
-        await ctx.reply(f"`{mc.mc_username}` has been added to the waitlist.")
-
-    @commands.hybrid_command(name="waitlist_remove", description="Remove a player from the waitlist (staff).")
-    @is_moderator()
-    async def waitlist_remove(self, ctx: commands.Context, username_or_uuid: str):
-        deleted = await Waitlist.filter(
-            Q(minecraft_account__uuid=username_or_uuid) | Q(minecraft_account__mc_username__iexact=username_or_uuid)
-        ).delete()
-
-        if not deleted:
-            await ctx.reply(f"`{username_or_uuid}` is not on the waitlist.")
-            return
-
-        await ctx.reply(f"`{username_or_uuid}` has been removed from the waitlist.")
+    # NOTE: staff-side waitlist management (add / view / remove) lives in
+    # cogs/management.py under the `/waitlist` hybrid group. Self-removal
+    # (above) stays here because it's a regular-user command, not staff.
 
     @tasks.loop(minutes=1)
     async def waitlist_cleanup(self):
@@ -308,31 +271,6 @@ class Join(commands.Cog):
             Q(minecraft_account__guild__isnull=False) | Q(minecraft_account__last_online__lt=now - timedelta(days=9))
         ).values_list("id", flat=True)
         await Waitlist.filter(id__in=to_delete).delete()
-
-    @commands.hybrid_command(name="waitlist", description="View the current waitlist.")
-    async def waitlist(self, ctx: commands.Context):
-        entries = await Waitlist.all().prefetch_related("minecraft_account").order_by("created_at")
-        lines = [
-            f"{i + 1}. <t:{int(entry.created_at.timestamp())}:R> - `{entry.minecraft_account.mc_username}` (`{entry.minecraft_account.uuid}`)"
-            for i, entry in enumerate(entries)
-        ]
-
-        if not lines:
-            await ctx.reply("The waitlist is empty.")
-            return
-
-        embeds = from_lines(
-            title="Current waitlist",
-            lines=lines,
-            lines_per_page=10,
-            logger=logger,
-        )
-
-        await ctx.send(
-            embed=embeds[0],
-            view=Paginator(embeds),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
 
     def cog_unload(self):
         self.clear_old_requests.cancel()

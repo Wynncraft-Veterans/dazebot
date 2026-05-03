@@ -67,16 +67,29 @@ async def get_or_issue_code(disc_uuid: str, mc_username: str) -> tuple[LinkCode,
     key = mc_username.lower()
     existing = await LinkCode.filter(mc_username=key).first()
     if existing is not None and existing.disc_uuid == disc_uuid:
+        logger.info(
+            "link code reused: disc=%s mc=%s code=%s",
+            disc_uuid, key, existing.code,
+        )
         return existing, False
     if existing is not None:
+        prev_disc = existing.disc_uuid
         existing.disc_uuid = disc_uuid
         existing.code = _generate_code()
         await existing.save(update_fields=["disc_uuid", "code", "updated_at"])
+        logger.info(
+            "link code rotated: mc=%s new_disc=%s prev_disc=%s code=%s",
+            key, disc_uuid, prev_disc, existing.code,
+        )
         return existing, True
     row = await LinkCode.create(
         mc_username=key,
         disc_uuid=disc_uuid,
         code=_generate_code(),
+    )
+    logger.info(
+        "link code issued: disc=%s mc=%s code=%s",
+        disc_uuid, key, row.code,
     )
     return row, True
 
@@ -97,6 +110,10 @@ async def try_consume_code(
     # Case-insensitive substring match — Minecraft chat is shouty.
     if row.code.upper() not in message.upper():
         return None  # not the right message; keep waiting
+    logger.info(
+        "link code consumed: mc=%s mc_uuid=%s disc=%s code=%s",
+        key, mc_uuid, row.disc_uuid, row.code,
+    )
 
     # Resolve the discord user up-front for logging / DM.
     try:

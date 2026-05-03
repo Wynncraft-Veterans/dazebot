@@ -233,6 +233,10 @@ class Admin(commands.Cog):
         self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember], username_or_uuid: str
     ):
         """Link a Discord user to a Minecraft account"""
+        # Defer immediately: ensure_linked_baseline below can issue 1-2
+        # role-mutation API calls, which can easily blow past Discord's 3s
+        # interaction-ack window and otherwise yield "Unknown interaction".
+        await ctx.defer()
         mc = await MinecraftAccount.filter(
             Q(uuid=username_or_uuid)
             | Q(mc_username__iexact=username_or_uuid)

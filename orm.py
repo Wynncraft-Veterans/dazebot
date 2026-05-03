@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-import random
-import string
 from typing import Optional
 
 from tortoise import fields
@@ -12,10 +10,6 @@ from lib.lib import ProfCategory
 from lib.wynn_api.player_models import CharacterProfessionsType
 
 import uuid
-
-
-def generate_token():
-    return "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
 
 
 class MinecraftAccount(Model):
@@ -139,6 +133,137 @@ class Waitlist(Model):
 
     class Meta:
         table = "waitlist"
+
+
+class Blocklist(Model):
+    """Users on this list are forced to the Registered role and can never become
+    Honourary / Hiatus / Member / Waitlisted. See instructions1.md §2b.
+    """
+
+    id = fields.UUIDField(pk=True)
+    minecraft_account: fields.ForeignKeyRelation[MinecraftAccount] = fields.ForeignKeyField(
+        "models.MinecraftAccount", related_name="blocklist", on_delete=fields.CASCADE, unique=True
+    )
+    reason: Optional[str] = fields.CharField(max_length=500, null=True)  # type: ignore
+    blocked_by_disc_uuid = fields.CharField(max_length=255, null=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "blocklist"
+
+
+class MinecraftAlt(Model):
+    """Additional Minecraft accounts attached to a Discord user beyond their
+    primary linked one (used by /add). The 'primary' link still lives on
+    DiscordAccount.minecraft_account_id; this table holds the others.
+    """
+
+    id = fields.UUIDField(pk=True)
+    discord_account: fields.ForeignKeyRelation[DiscordAccount] = fields.ForeignKeyField(
+        "models.DiscordAccount", related_name="alts", on_delete=fields.CASCADE
+    )
+    minecraft_account: fields.ForeignKeyRelation[MinecraftAccount] = fields.ForeignKeyField(
+        "models.MinecraftAccount", related_name="alt_of", on_delete=fields.CASCADE
+    )
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "minecraft_alts"
+        unique_together = (("discord_account", "minecraft_account"),)
+
+
+class UserVanityChoice(Model):
+    """Records that a user has manually picked a vanity role via /vanity. The
+    automatic firstJoin-based assignment must NOT override this.
+    See instructions1.md §2g.
+    """
+
+    id = fields.UUIDField(pk=True)
+    disc_uuid = fields.CharField(max_length=255, unique=True)
+    role_id = fields.CharField(max_length=255)
+    chosen_by_staff = fields.BooleanField(default=False)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "user_vanity_choices"
+
+
+class MojangNameCache(Model):
+    """Persistent cache of Mojang uuid -> username lookups (instructions1.md §5).
+    Refresh after `MAX_AGE` to handle name changes.
+    """
+
+    uuid = fields.CharField(pk=True, max_length=36)
+    username = fields.CharField(max_length=255)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "mojang_name_cache"
+
+
+class BotConfigOverride(Model):
+    """Persisted overrides for Config attributes set via /config admin command.
+    See instructions1.md §3.
+    """
+
+    key = fields.CharField(pk=True, max_length=255)
+    # JSON-encoded value, so any of int / bool / list / etc. round-trips cleanly.
+    value_json = fields.TextField()
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "bot_config_overrides"
+
+
+class FirstInstallMonitor(Model):
+    """Persisted record of the message being monitored for /first-install chains
+    reactions. There may be exactly one active row at a time (enforced in
+    application logic).
+    """
+
+    id = fields.UUIDField(pk=True)
+    guild_id = fields.CharField(max_length=255)
+    channel_id = fields.CharField(max_length=255)
+    message_id = fields.CharField(max_length=255, unique=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "first_install_monitors"
+
+
+class DMSentLog(Model):
+    """Tracks one-shot DMs already sent (e.g. first-install chains-DM, member
+    inactivity warning) so we don't spam the same user repeatedly.
+    """
+
+    id = fields.UUIDField(pk=True)
+    disc_uuid = fields.CharField(max_length=255)
+    kind = fields.CharField(max_length=64)
+    sent_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "dm_sent_log"
+        unique_together = (("disc_uuid", "kind"),)
+
+
+class LinkCode(Model):
+    """A persistent (until consumed) Minecraft<->Discord link code.
+
+    Keyed by ``mc_username`` (lowercased) so re-running ``/link_code`` for the
+    same username re-DMs the same code, while a different discord user
+    requesting the same username overwrites the row (invalidating the prior
+    code).
+    """
+
+    id = fields.UUIDField(pk=True)
+    mc_username = fields.CharField(max_length=64, unique=True)  # lowercased
+    disc_uuid = fields.CharField(max_length=255)
+    code = fields.CharField(max_length=16)  # 6-char alphanumeric, case-insensitive on compare
+    created_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "link_code"
 
 
 # Database initialization helper

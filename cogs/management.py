@@ -694,7 +694,7 @@ class Management(commands.Cog):
 
         # Primary links: every DiscordAccount with a non-null minecraft_account.
         discs = await DiscordAccount.filter(
-            minecraft_account_id__not_isnull=True
+            minecraft_account_id__isnull=False
         ).select_related("minecraft_account")
 
         # Alts: collect per discord_account so we can show them grouped.

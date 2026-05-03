@@ -14,8 +14,12 @@ class BannerLayer(BaseModel):
 class Banner(BaseModel):
     base: str
     tier: int
-    structure: str
-    layers: List[BannerLayer]
+    # `structure` was removed from the v3 API response (2026-05); banners now
+    # report only base/tier/layers (and an optional `pattern`). Keep both
+    # fields optional so older cached payloads still validate.
+    structure: Optional[str] = None
+    pattern: Optional[str] = None
+    layers: List[BannerLayer] = Field(default_factory=list)
 
 
 class SeasonRank(BaseModel):
@@ -84,7 +88,9 @@ class Guild(BaseModel):
     level: int
     xpPercent: int
     territories: int
-    wars: int
+    # `wars` is null for guilds that have never participated in wars (and for
+    # some privacy-opted-out responses). Treat missing as 0-equivalent.
+    wars: Optional[int] = None
     created: str
     members: Members
     online: int

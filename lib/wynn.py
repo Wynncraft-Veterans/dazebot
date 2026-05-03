@@ -36,7 +36,11 @@ async def check_player_full(uuid: str) -> tuple[str, WynncraftPlayer, MinecraftA
             minecraft_account=account,
             prof_type=prof_type,
             defaults={
-                "category": ProfCategory(["pleb", "void", "dernic"][(level >= 100) + (level >= 103)]),
+                "category": ProfCategory(
+                    ["pleb", "void", "dernic", "titanium", "cinnabar"][
+                        (level >= 100) + (level >= 105) + (level >= 110) + (level >= 115)
+                    ]
+                ),
             },
         )
 

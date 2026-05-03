@@ -25,8 +25,19 @@ PROF_LABEL_TO_TYPE: dict[str, CharacterProfessionsType] = {
 }
 
 CATEGORY_EMOJI = {
+    ProfCategory.CINNABAR: "🔴",
+    ProfCategory.TITANIUM: "⚙️",
     ProfCategory.DERNIC: "💎",
     ProfCategory.VOID: "🌀",
+}
+
+# Higher tiers should appear first in listings.
+CATEGORY_TIER_ORDER = {
+    ProfCategory.CINNABAR: 0,
+    ProfCategory.TITANIUM: 1,
+    ProfCategory.DERNIC: 2,
+    ProfCategory.VOID: 3,
+    ProfCategory.PLEB: 4,
 }
 
 LINES_PER_PAGE = 10
@@ -90,7 +101,12 @@ class ProferSelect(discord.ui.Select):
 
         filters: dict[str, Any] = dict(
             prof_type=prof_type,
-            category__in=[ProfCategory.DERNIC, ProfCategory.VOID],
+            category__in=[
+                ProfCategory.CINNABAR,
+                ProfCategory.TITANIUM,
+                ProfCategory.DERNIC,
+                ProfCategory.VOID,
+            ],
         )
         if not self.include_non_members:
             filters["minecraft_account__guild"] = "Returners"
@@ -98,11 +114,17 @@ class ProferSelect(discord.ui.Select):
         base_qs = (
             ProfessionCategories.filter(**filters)
             .select_related("minecraft_account")
-            .order_by("category", "-minecraft_account__last_online")
+            .order_by("-minecraft_account__last_online")
         )
 
-        online = await base_qs.filter(minecraft_account__last_online__gte=cutoff)
-        offline = await base_qs.filter(minecraft_account__last_online__lt=cutoff)
+        online = sorted(
+            await base_qs.filter(minecraft_account__last_online__gte=cutoff),
+            key=lambda r: CATEGORY_TIER_ORDER.get(r.category, 99),
+        )
+        offline = sorted(
+            await base_qs.filter(minecraft_account__last_online__lt=cutoff),
+            key=lambda r: CATEGORY_TIER_ORDER.get(r.category, 99),
+        )
 
         if not online and not offline:
             await interaction.followup.send(

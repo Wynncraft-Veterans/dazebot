@@ -10,3 +10,5 @@ class ProfCategory(Enum):
     PLEB = "pleb"
     VOID = "void"
     DERNIC = "dernic"
+    TITANIUM = "titanium"
+    CINNABAR = "cinnabar"

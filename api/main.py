@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 
 from lib import mc
+from lib.first_install_view import post_fallback_completion
 from lib.linking import dm_or_log, try_consume_code
 
 if TYPE_CHECKING:
@@ -63,14 +64,23 @@ def create_app(bot: Bot) -> FastAPI:
             return {"status": "ignored"}
 
         # DM the user the result so they get feedback even if they're not in
-        # the channel where they triggered the original /link flow.
+        # the channel where they triggered the original /link flow. If the DM
+        # fails (DMs closed), post a public confirmation in the fallback
+        # channel so the user still sees the outcome.
         if outcome.discord_user is not None:
             verb = "Link complete" if outcome.success else "Link failed"
-            await dm_or_log(
+            dmed = await dm_or_log(
                 outcome.discord_user,
                 f"**{verb}** - {outcome.reason}",
                 fallback_logger=logger,
             )
+            if not dmed:
+                await post_fallback_completion(
+                    bot,
+                    outcome.discord_user,
+                    success=outcome.success,
+                    reason=outcome.reason,
+                )
 
         return {
             "status": "linked" if outcome.success else "refused",

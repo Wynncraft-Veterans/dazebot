@@ -32,6 +32,12 @@ class Config:
     # link codes (the picolimbo mini-server). Surfaced in onboarding DMs.
     MC_PUBLIC_HOST = os.environ.get("MC_PUBLIC_HOST", "verify.wynnvets.org")
 
+    # Channel used as the public fallback when a user with DMs closed clicks
+    # the welcome "Link my Minecraft account" button. The bot pings the user
+    # there with a view exposing "Try DM again" / "Show my code" buttons,
+    # and posts the link-complete/refused confirmation there too.
+    LINK_FALLBACK_CHANNEL = 1313786489112494080
+
     # The original-tier vanity role (<1.0 / 2013). Users may NOT self-assign this via /vanity;
     # only staff /vanity force can grant it.
     ROLE_VANITY_ORIGINAL = 1318063966420729866
@@ -113,6 +119,7 @@ class Config:
 class DevConfig(Config):
     GUILD = 1407388408472666243
     GUILD_DEAD_ALERT_CHANNEL = GUILD_FULL_ALERT_CHANNEL = 1407388410393399494  # general
+    LINK_FALLBACK_CHANNEL = 1407388410393399494  # general
     GUILD_FULL_ALERT_ROLE = 1409300773439012874  # @aaaaa
     GUILD_DEAD_WHEN = 10
     GUILD_FULL_WHEN = 10

@@ -49,9 +49,10 @@ class Bot(commands.Bot):
             logger.error(f"Failed to load runtime config overrides: {e}")
         # Register persistent views so buttons survive restarts.
         try:
-            from lib.first_install_view import FirstInstallView
+            from lib.first_install_view import FirstInstallView, LinkFallbackView
 
             self.add_view(FirstInstallView())
+            self.add_view(LinkFallbackView())
         except Exception as e:
             logger.error(f"Failed to register FirstInstallView: {e}")
         await self._load_cogs()

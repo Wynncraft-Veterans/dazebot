@@ -11,7 +11,6 @@ def _or[T](ls: list[T | None]) -> T | None:
 
 class CaseInsensitiveMember(commands.Converter):
     async def convert(self, ctx: commands.Context, argument: str) -> discord.Member:
-        print(f"Converting member: {argument}")
         # Try default converter first (handles mentions, IDs, case-sensitive names)
         try:
             return await commands.MemberConverter().convert(ctx, argument)
@@ -20,11 +19,6 @@ class CaseInsensitiveMember(commands.Converter):
 
         if ctx.guild is None:
             raise commands.MemberNotFound(argument)
-
-        print([m.name for m in ctx.guild.members])
-        print([m.display_name for m in ctx.guild.members])
-        print([m.global_name for m in ctx.guild.members])
-        print([m.nick for m in ctx.guild.members])
 
         # i did it like this so you can change the order of priority
         # "_" is case sensitive, im not 100% if discord checks all of these by default

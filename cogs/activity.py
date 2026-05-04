@@ -11,7 +11,9 @@ from lib.wynn_api.guild_models import BaseMember, Guild
 from lib.wynn_api.player import get_player_full_stats
 from lib.wynn_api.requestor import Requestor
 from orm import (
+    DeadGuildAlert,
     DiscordAccount,
+    GuildCapacityAlert,
     MinecraftAccount,
     Shout,
     UNKNOWN_LAST_ONLINE,
@@ -223,18 +225,29 @@ class Activity(commands.Cog):
 
         alerts = []
         now = datetime.now(timezone.utc)
+
+        # Throttle timestamps must persist across bot restarts; otherwise an
+        # admin's `/alerts mute` is silently undone by the next process
+        # restart (the in-memory ``LAST_*_ALERT`` resets to epoch and the
+        # very next check fires regardless of the configured delta).
+        last_dead_row = await DeadGuildAlert.all().order_by("-created_at").first()
+        last_dead = last_dead_row.created_at if last_dead_row else self.bot.nosql.LAST_DEAD_ALERT
         if (
             len(online) <= self.bot.config.GUILD_DEAD_WHEN
-            and now - self.bot.nosql.LAST_DEAD_ALERT >= self.bot.config.GUILD_DEAD_ALERT_DELTA
+            and now - last_dead >= self.bot.config.GUILD_DEAD_ALERT_DELTA
         ):
             self.bot.nosql.LAST_DEAD_ALERT = now
+            await DeadGuildAlert.create()
             alerts.append(self._low_count_alert())
 
+        last_cap_row = await GuildCapacityAlert.all().order_by("-created_at").first()
+        last_cap = last_cap_row.created_at if last_cap_row else self.bot.nosql.LAST_CAP_ALERT
         if (
             guild.members.total >= self.bot.config.GUILD_FULL_WHEN
-            and now - self.bot.nosql.LAST_CAP_ALERT >= self.bot.config.GUILD_FULL_ALERT_DELTA
+            and now - last_cap >= self.bot.config.GUILD_FULL_ALERT_DELTA
         ):
             self.bot.nosql.LAST_CAP_ALERT = now
+            await GuildCapacityAlert.create()
             alerts.append(self._guild_full_alert())
 
         logger.info(f"{len(online)=}")

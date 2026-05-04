@@ -23,6 +23,22 @@ from config import CurrConfig
 logger = logging.getLogger("dazebot.runtime_config")
 
 
+async def _checkpoint_wal() -> None:
+    """Force a SQLite WAL checkpoint so writes hit the main DB file.
+
+    Without this, container restarts via SIGKILL (which discord.py does not
+    trap on SIGTERM) can leave override writes stuck in the -wal sidecar
+    that doesn't always replay cleanly across container recreates.
+    """
+    try:
+        from tortoise import Tortoise
+
+        conn = Tortoise.get_connection("default")
+        await conn.execute_query("PRAGMA wal_checkpoint(TRUNCATE);")
+    except Exception as e:
+        logger.warning(f"WAL checkpoint failed: {e}")
+
+
 _SUPPORTED_TYPES = (int, float, bool, str)
 
 
@@ -122,6 +138,7 @@ async def set_override(key: str, raw_value: str) -> Any:
     await BotConfigOverride.update_or_create(
         key=key, defaults={"value_json": _serialize(new_value)}
     )
+    await _checkpoint_wal()
     logger.info(f"Set runtime config override {key} = {new_value!r}")
     return new_value
 
@@ -131,6 +148,7 @@ async def clear_override(key: str) -> None:
 
     deleted = await BotConfigOverride.filter(key=key).delete()
     if deleted:
+        await _checkpoint_wal()
         logger.info(f"Cleared runtime config override {key}")
 
 

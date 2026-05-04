@@ -290,9 +290,22 @@ class LinkCode(Model):
 
 # Database initialization helper
 async def init_db():
+    """Initialise the Tortoise ORM connection.
+
+    The DB path defaults to the mounted ``/app/data`` volume in the docker
+    deployment so the file survives container recreation
+    (``manage update dazebot``); falls back to a working-dir file for local
+    development. Override with ``DAZEBOT_DB_PATH`` if needed.
+    """
+    import os
     from tortoise import Tortoise
 
-    await Tortoise.init(db_url="sqlite://dev.db", modules={"models": ["orm"]})
+    db_path = os.environ.get("DAZEBOT_DB_PATH")
+    if db_path is None:
+        db_path = "/app/data/dazebot.db" if os.path.isdir("/app/data") else "dazebot.db"
+
+    db_url = f"sqlite://{db_path}"
+    await Tortoise.init(db_url=db_url, modules={"models": ["orm"]})
     await Tortoise.generate_schemas()
 
 

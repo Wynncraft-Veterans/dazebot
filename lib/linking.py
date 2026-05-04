@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
+import re
 import secrets
 from typing import TYPE_CHECKING
 
@@ -49,6 +50,12 @@ class LinkCompletion:
 # in Minecraft chat don't trip on them.
 _CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 _CODE_LENGTH = 6
+
+# Compiled once: matches any whitespace-bounded run of CODE_LENGTH chars from
+# the alphabet. Used purely for forensic logging in try_consume_code so that a
+# user typing a valid-looking code that doesn't match any pending row shows up
+# in the logs instead of silently dissolving into a 200 OK.
+_CODE_SHAPED_RE = re.compile(rf"(?<![A-Z0-9])[{_CODE_ALPHABET}]{{{_CODE_LENGTH}}}(?![A-Z0-9])")
 
 
 def _generate_code() -> str:
@@ -106,9 +113,29 @@ async def try_consume_code(
     key = mc_username.lower()
     row = await LinkCode.filter(mc_username=key).first()
     if row is None:
+        # Forensic: if the message *looked* like a link code but no row
+        # matched this username, surface it so we can spot wiped-DB or
+        # casing/typo issues before users complain.
+        msg_upper = message.upper()
+        shaped = _CODE_SHAPED_RE.findall(msg_upper)
+        if shaped:
+            other = await LinkCode.filter(code__in=shaped).first()
+            logger.info(
+                "try_consume_code: ignoring shaped code(s) %s from mc=%s mc_uuid=%s "
+                "(no LinkCode for this username; matches different username row: %s)",
+                shaped, key, mc_uuid,
+                f"mc_username={other.mc_username!r} disc={other.disc_uuid}" if other else "none",
+            )
         return None
     # Case-insensitive substring match — Minecraft chat is shouty.
     if row.code.upper() not in message.upper():
+        # Forensic: row exists but the message didn't contain the code. Most
+        # of the time this is just normal chatter from a user with a pending
+        # code, so log at DEBUG to avoid noise.
+        logger.debug(
+            "try_consume_code: row exists for mc=%s but code %s not in message (len=%d)",
+            key, row.code, len(message),
+        )
         return None  # not the right message; keep waiting
     logger.info(
         "link code consumed: mc=%s mc_uuid=%s disc=%s code=%s",
@@ -173,7 +200,6 @@ async def try_consume_code(
 
     disc.minecraft_account = mc
     await disc.save()
-    await row.delete()
 
     # Refresh mc.guild from the live API before enforcing the baseline so
     # the MEMBER vs REGISTERED decision is based on current truth, not on
@@ -192,10 +218,29 @@ async def try_consume_code(
     # a user who linked AFTER joining Returners would never get the MEMBER
     # role, since the activity loop only fires JOINED_VETS for in-game
     # join events. ensure_linked_baseline is idempotent and safe to retry.
+    #
+    # IMPORTANT: only delete the LinkCode row after enforcement confirms the
+    # member was found in at least one guild and roles applied without
+    # error. If enforcement can't find the member (cache cold + REST race,
+    # bot recently joined, etc.), we KEEP the row so the periodic janitor
+    # in cogs/join.py can retry. Without this, a user could end up with the
+    # DiscordAccount<->MinecraftAccount link in the DB but neither the
+    # MEMBER nor REGISTERED role -- the exact invariant violation we're
+    # protecting against.
+    enforcement_ok = False
     try:
-        await _enforce_linked_baseline_for(bot, row.disc_uuid, mc)
+        enforcement_ok = await _enforce_linked_baseline_for(bot, row.disc_uuid, mc)
     except Exception:  # noqa: BLE001 - role enforcement must never break linking
         logger.exception("try_consume_code: failed to enforce linked baseline for %s", row.disc_uuid)
+
+    if enforcement_ok:
+        await row.delete()
+    else:
+        logger.error(
+            "try_consume_code: KEEPING LinkCode row for disc=%s mc=%s because role "
+            "enforcement did not confirm success; periodic janitor will retry.",
+            row.disc_uuid, key,
+        )
 
     return LinkCompletion(
         success=True,
@@ -205,10 +250,15 @@ async def try_consume_code(
     )
 
 
-async def _enforce_linked_baseline_for(bot: Bot, disc_uuid: str, mc: MinecraftAccount) -> None:
+async def _enforce_linked_baseline_for(bot: Bot, disc_uuid: str, mc: MinecraftAccount) -> bool:
     """Look up the Discord member across the bot's guilds and call
     ``ensure_linked_baseline`` so they end up with REGISTERED or MEMBER as
-    appropriate. No-op if the user is not in any guild the bot can see.
+    appropriate.
+
+    Returns ``True`` iff the member was found in at least one guild AND the
+    ``ensure_linked_baseline`` call for every guild they were found in
+    completed without raising. ``False`` otherwise -- callers MUST treat
+    ``False`` as "don't delete the LinkCode row, retry later".
     """
     in_returners = mc.guild == "Returners"
     blocked = await Blocklist.filter(minecraft_account=mc).exists()
@@ -220,8 +270,9 @@ async def _enforce_linked_baseline_for(bot: Bot, disc_uuid: str, mc: MinecraftAc
         uid = int(disc_uuid)
     except ValueError:
         logger.error("enforce_baseline: disc_uuid %r is not an int, aborting", disc_uuid)
-        return
+        return False
     found_anywhere = False
+    all_applied_cleanly = True
     for guild in bot.guilds:
         member = guild.get_member(uid)
         if member is None:
@@ -259,12 +310,15 @@ async def _enforce_linked_baseline_for(bot: Bot, disc_uuid: str, mc: MinecraftAc
             )
         except discord.HTTPException as e:
             logger.warning(f"ensure_linked_baseline failed for {member} in {guild}: {e}")
+            all_applied_cleanly = False
     if not found_anywhere:
         logger.error(
             "enforce_baseline: disc %s not found in ANY of %d bot guilds; "
             "user will not receive MEMBER/REGISTERED role!",
             uid, len(bot.guilds),
         )
+        return False
+    return all_applied_cleanly
 
 
 async def dm_or_log(

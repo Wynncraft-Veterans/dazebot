@@ -376,16 +376,13 @@ class Activity(commands.Cog):
 
         lines: list[str] = []
         if confirmed:
-            lines.append(f"**Inactive (>{days} days, live-verified):**")
+            lines.append(f"__**Inactive**__ *(>{days} days)*")
             for a, lj in confirmed:
                 lines.append(f"- `{_name(a)}` \u2014 last seen {(now - lj).days} day(s) ago ({lj.date()})")
         if api_disabled:
             if confirmed:
                 lines.append("")
-            lines.append(
-                f"**API-disabled ({len(api_disabled)}; lastJoin hidden by Wynncraft privacy "
-                "\u2014 activity unknown, review manually):**"
-            )
+            lines.append("__**Unknown**__ *(They have their API disabled)*")
             for a in api_disabled:
                 lines.append(f"- `{_name(a)}`")
 

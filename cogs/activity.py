@@ -55,11 +55,14 @@ class Activity(commands.Cog):
     async def eat_queue(self): ...
 
     async def _apply_guild(self, guild: Guild, member: BaseMember):
-        # Resolve the canonical Minecraft username. Prefer the API's legacyName
-        # when it differs from the live username (renamed account), otherwise
-        # fall back to the cached Mojang lookup. (instructions1.md §4)
+        # Resolve the canonical Minecraft username. We have two independent
+        # sources of truth on every tick: the Wynncraft API (member.username)
+        # and our Mojang-cache stack. resolve_canonical_username compares the
+        # two and, on disagreement, force-refreshes from Mojang directly to
+        # break the tie -- catches the failure mode where ashcon (or any
+        # cached value) is serving a stale legacy name.
         try:
-            mc_username = await mc.get_mc_username(member.uuid)
+            mc_username = await mc.resolve_canonical_username(member.uuid, hint=member.username)
         except RuntimeError:
             # All upstream Mojang providers down + no cache: fall back to
             # whatever the Wynncraft API reports so we still record the row.

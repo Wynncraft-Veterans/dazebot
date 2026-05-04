@@ -112,34 +112,59 @@ async def try_consume_code(
     """
     key = mc_username.lower()
     row = await LinkCode.filter(mc_username=key).first()
-    if row is None:
-        # Forensic: if the message *looked* like a link code but no row
-        # matched this username, surface it so we can spot wiped-DB or
-        # casing/typo issues before users complain.
+
+    # Primary path: row matches by username AND message contains the code.
+    if row is not None and row.code.upper() in message.upper():
+        pass  # fall through to the "consume" block below
+    else:
+        # Fallback path: the username didn't match (typo in the modal, account
+        # rename, capitalisation), but if the message contains a code that
+        # uniquely matches exactly one pending LinkCode, we can still trust
+        # it -- the 6-char code from _CODE_ALPHABET is effectively a shared
+        # secret. The disc_uuid on the row is the source of truth for who
+        # gets linked, so the username they typed in the modal is irrelevant.
         msg_upper = message.upper()
         shaped = _CODE_SHAPED_RE.findall(msg_upper)
-        if shaped:
-            other = await LinkCode.filter(code__in=shaped).first()
+        if not shaped:
+            if row is not None:
+                # Row exists for this username but no code in the message --
+                # just normal chat from someone with a pending link.
+                logger.debug(
+                    "try_consume_code: row exists for mc=%s but no shaped code in message (len=%d)",
+                    key, len(message),
+                )
+            return None
+
+        candidates = await LinkCode.filter(code__in=shaped).all()
+        if not candidates:
             logger.info(
                 "try_consume_code: ignoring shaped code(s) %s from mc=%s mc_uuid=%s "
-                "(no LinkCode for this username; matches different username row: %s)",
+                "(no LinkCode rows match)",
                 shaped, key, mc_uuid,
-                f"mc_username={other.mc_username!r} disc={other.disc_uuid}" if other else "none",
             )
-        return None
-    # Case-insensitive substring match — Minecraft chat is shouty.
-    if row.code.upper() not in message.upper():
-        # Forensic: row exists but the message didn't contain the code. Most
-        # of the time this is just normal chatter from a user with a pending
-        # code, so log at DEBUG to avoid noise.
-        logger.debug(
-            "try_consume_code: row exists for mc=%s but code %s not in message (len=%d)",
-            key, row.code, len(message),
+            return None
+        if len(candidates) > 1:
+            logger.warning(
+                "try_consume_code: ambiguous shaped code(s) %s from mc=%s mc_uuid=%s "
+                "matched %d LinkCode rows: %s -- refusing to guess",
+                shaped, key, mc_uuid, len(candidates),
+                [(c.mc_username, c.disc_uuid) for c in candidates],
+            )
+            return None
+
+        # Exactly one candidate. Use it, but log loudly that the username
+        # didn't match so we can keep an eye on this fallback path.
+        row = candidates[0]
+        logger.warning(
+            "try_consume_code: username fallback -- chat from mc=%s mc_uuid=%s contained "
+            "code %s which belongs to a row registered under mc_username=%r (disc=%s). "
+            "Accepting via code-uniqueness; user typed wrong/old name in the link modal.",
+            key, mc_uuid, row.code, row.mc_username, row.disc_uuid,
         )
-        return None  # not the right message; keep waiting
+
     logger.info(
-        "link code consumed: mc=%s mc_uuid=%s disc=%s code=%s",
-        key, mc_uuid, row.disc_uuid, row.code,
+        "link code consumed: mc=%s mc_uuid=%s disc=%s code=%s row_mc_username=%s",
+        key, mc_uuid, row.disc_uuid, row.code, row.mc_username,
     )
 
     # Resolve the discord user up-front for logging / DM.

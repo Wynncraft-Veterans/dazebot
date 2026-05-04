@@ -1,12 +1,17 @@
 """Mojang username lookup helpers with persistent caching and rate-limit
 fallbacks.
 
-Provider order (per ``.vscode/instructions1.md`` \u00a75):
+Provider order:
     1. Local DB cache (uuid -> username, refreshed after CACHE_MAX_AGE)
-    2. ashcon (``api.ashcon.app``) \u2014 generally the kindest upstream
-    3. mcuuid.net \u2014 fallback, lenient rate limits
-    4. Mojang's official ``api.minecraftservices.com/minecraft/profile/lookup``
-       \u2014 absolute last resort
+    2. Mojang's official ``api.minecraftservices.com/minecraft/profile/lookup``
+       — the source of truth for current usernames.
+    3. PlayerDB (``playerdb.co``) — Nodecraft-operated, no rate limits, JSON.
+       This is the official replacement for the (now defunct) mcuuid.net JSON
+       endpoint; mcuuid.net itself explicitly redirects API users to PlayerDB.
+    4. ashcon (``api.ashcon.app``) — last-resort fallback. NOTE: ashcon's
+       data is occasionally stale and has been observed to return *legacy*
+       names instead of current ones (see incident with WrittenInWater /
+       ShiningValiant on 2026-05-04). Use only when the above are unreachable.
 
 Every successful upstream hit is written through to the cache.
 """
@@ -24,6 +29,11 @@ logger = logging.getLogger("dazebot.lib.mc")
 _session: aiohttp.ClientSession | None = None
 _lookup_lock: dict[str, asyncio.Lock] = {}
 
+# PlayerDB asks API consumers to send an identifying user-agent so they can
+# reach out if our usage causes problems. Sent on every outbound request from
+# this module.
+_USER_AGENT = "dazebot/1.0 (+https://wynnvets.org/discord)"
+
 # Cache freshness window before we re-query upstream. Players can change names,
 # but not very often; one week balances freshness vs. rate limits.
 CACHE_MAX_AGE = timedelta(days=7)
@@ -32,7 +42,7 @@ CACHE_MAX_AGE = timedelta(days=7)
 async def get_session() -> aiohttp.ClientSession:
     global _session
     if _session is None or _session.closed:
-        _session = aiohttp.ClientSession()
+        _session = aiohttp.ClientSession(headers={"User-Agent": _USER_AGENT})
     return _session
 
 
@@ -56,26 +66,32 @@ async def _try_ashcon(uuid: str) -> str | None:
         return None
 
 
-async def _try_mcuuid(uuid: str) -> str | None:
+async def _try_playerdb(uuid: str) -> str | None:
+    """PlayerDB.co — Nodecraft's JSON Mojang lookup. Returns ``data.player.username``
+    on success.
+    """
     session = await get_session()
     try:
         async with session.get(
-            f"https://mcuuid.net/?q={uuid}&fmt=json",
+            f"https://playerdb.co/api/player/minecraft/{uuid}",
             timeout=aiohttp.ClientTimeout(total=10),
         ) as res:
             if res.status != 200:
-                logger.debug(f"mcuuid returned {res.status} for {uuid}")
+                logger.debug(f"playerdb returned {res.status} for {uuid}")
                 return None
             data = await res.json(content_type=None)
-            return data.get("name") or data.get("username")
+            if not data.get("success"):
+                logger.debug(f"playerdb returned success=false for {uuid}: {data.get('code')}")
+                return None
+            return (data.get("data") or {}).get("player", {}).get("username")
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        logger.warning(f"mcuuid lookup failed for {uuid}: {e}")
+        logger.warning(f"playerdb lookup failed for {uuid}: {e}")
         return None
 
 
 async def _try_mojang(uuid: str) -> str | None:
-    """Absolute last resort. Mojang's /profile/lookup expects the uuid in the
-    URL path (no dashes) and returns the current name in the response.
+    """Mojang's /profile/lookup expects the uuid in the URL path (no dashes)
+    and returns the current name in the response. This is the source of truth.
     """
     session = await get_session()
     normalized = _normalize_uuid(uuid)
@@ -112,7 +128,11 @@ async def get_mc_username(uuid: str, *, force_refresh: bool = False) -> str:
             if age < CACHE_MAX_AGE:
                 return cached.username
 
-        for provider, fn in (("ashcon", _try_ashcon), ("mcuuid", _try_mcuuid), ("mojang", _try_mojang)):
+        for provider, fn in (
+            ("mojang", _try_mojang),
+            ("playerdb", _try_playerdb),
+            ("ashcon", _try_ashcon),
+        ):
             name = await fn(uuid)
             if name:
                 await MojangNameCache.update_or_create(uuid=uuid, defaults={"username": name})
@@ -124,6 +144,70 @@ async def get_mc_username(uuid: str, *, force_refresh: bool = False) -> str:
             return cached.username
 
         raise RuntimeError(f"All Mojang providers failed and no cache available for uuid {uuid}")
+
+
+async def resolve_canonical_username(uuid: str, hint: str | None) -> str:
+    """Like ``get_mc_username``, but cross-checks the resolved name against an
+    independently-sourced ``hint`` (e.g. the Wynncraft API's username for the
+    same UUID). If the two disagree case-insensitively, treat that as evidence
+    that one of our cached/fallback providers is stale and force a refresh
+    from Mojang as the authoritative tiebreaker.
+
+    This is the right entry point for any caller that already has a separate
+    source of truth on hand (currently: the activity loop, which gets the Wynn
+    username from the same API response that gives us the UUID). Callers
+    without a hint should keep using ``get_mc_username``.
+
+    Always returns a non-empty string. Falls back to ``hint`` (or whatever
+    ``get_mc_username`` produced) if the Mojang refresh itself fails.
+    """
+    try:
+        resolved = await get_mc_username(uuid)
+    except RuntimeError:
+        # Cache empty AND all providers down. Trust the hint if we have one,
+        # otherwise re-raise.
+        if hint:
+            return hint
+        raise
+
+    if hint is None or resolved.lower() == hint.lower():
+        return resolved
+
+    # Mismatch: Wynn says one thing, our Mojang-cache stack says another.
+    # Force-refresh from Mojang directly (bypassing both cache and the
+    # other providers) and use that as the tiebreaker. ``_try_mojang`` is
+    # the only provider we trust unconditionally for this purpose.
+    authoritative = await _try_mojang(uuid)
+    if authoritative is None:
+        # Mojang itself failed. Keep whatever get_mc_username gave us
+        # (probably stale), but log loudly so the discrepancy doesn't go
+        # unnoticed.
+        logger.warning(
+            "resolve_canonical_username: name discrepancy for %s (hint=%r resolved=%r) "
+            "but Mojang refresh failed; keeping resolved value",
+            uuid, hint, resolved,
+        )
+        return resolved
+
+    if authoritative.lower() != resolved.lower():
+        # Our cached/fallback value was wrong; overwrite the cache so future
+        # lookups stop returning the stale name.
+        from orm import MojangNameCache  # local import: ORM may not be initialised at import time
+        await MojangNameCache.update_or_create(uuid=uuid, defaults={"username": authoritative})
+        logger.warning(
+            "resolve_canonical_username: corrected stale cache for %s "
+            "(was %r, hint=%r, mojang says %r)",
+            uuid, resolved, hint, authoritative,
+        )
+    elif authoritative.lower() != hint.lower():
+        # Mojang agrees with our cache; the *Wynn* hint is the outlier.
+        # Quieter log -- this can legitimately happen if a player was
+        # renamed between Wynn's last refresh and Mojang's.
+        logger.info(
+            "resolve_canonical_username: Wynn hint %r disagrees with Mojang %r for %s; using Mojang",
+            hint, authoritative, uuid,
+        )
+    return authoritative
 
 
 async def unload():

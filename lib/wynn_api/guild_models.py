@@ -1,4 +1,5 @@
 import itertools
+from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import Dict, Generator, List, Optional
 
@@ -37,6 +38,10 @@ class BaseMember(BaseModel):
     contributed: Optional[int] = None
     contributionRank: Optional[int] = None
     joined: Optional[str] = None
+    # Per-member ``lastJoin`` from the v3 /guild endpoint. Verified to match
+    # /v3/player/{uuid}.lastJoin exactly, including the privacy-opted-out
+    # ``null`` cases. May be absent on older cached payloads.
+    lastJoin: Optional[datetime] = None
     # `username` is the player's CURRENT Minecraft username. `legacyName`, when
     # present, is an OLDER username that some other parts of the Wynncraft API
     # may still report (i.e. the desynced cached name). Use it as an additional

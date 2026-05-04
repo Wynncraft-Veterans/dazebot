@@ -17,9 +17,8 @@ from discord.ext import commands, tasks
 from tortoise.expressions import Q
 
 from bot import Bot
-from lib.linking import _enforce_linked_baseline_for
 from lib.wynn import check_player_full
-from orm import DiscordAccount, LinkRequest, MinecraftAccount, Waitlist
+from orm import LinkRequest, MinecraftAccount, Waitlist
 
 logger = logging.getLogger("dazebot.cogs.join")
 
@@ -31,7 +30,6 @@ class Join(commands.Cog):
         self.bot = bot
         self.clear_old_requests.start()
         self.waitlist_cleanup.start()
-        self.enforce_linked_baselines.start()
         logger.info("Join cog initialized")
 
     @tasks.loop(minutes=5)
@@ -61,57 +59,9 @@ class Join(commands.Cog):
         ).values_list("id", flat=True)
         await Waitlist.filter(id__in=to_delete).delete()
 
-    @tasks.loop(minutes=5)
-    async def enforce_linked_baselines(self):
-        """Belt-and-braces sweep of the linked-account role invariant.
-
-        For every ``DiscordAccount`` with a non-null ``minecraft_account_id``
-        we re-run ``ensure_linked_baseline`` (via the linking helper). The
-        helper is idempotent and a no-op when the member already has the
-        correct primary role, so this loop is cheap.
-
-        This closes the only remaining window where a linked user could end
-        up with neither MEMBER nor REGISTERED:
-          * race between ``try_consume_code`` and discord's member cache,
-          * staff using ``/link set`` while the bot is briefly disconnected,
-          * any future code path that creates a link without going through
-            the central linking helper.
-        """
-        await self.bot.wait_until_ready()
-        accounts = await DiscordAccount.filter(
-            minecraft_account_id__isnull=False
-        ).select_related("minecraft_account").all()
-        if not accounts:
-            return
-        retried = 0
-        for disc in accounts:
-            mc = disc.minecraft_account
-            if mc is None:
-                continue
-            try:
-                ok = await _enforce_linked_baseline_for(self.bot, disc.disc_uuid, mc)
-                if not ok:
-                    retried += 1
-            except Exception:  # noqa: BLE001 - never let the loop die
-                logger.exception(
-                    "enforce_linked_baselines: unexpected failure for disc=%s mc=%s",
-                    disc.disc_uuid, mc.uuid,
-                )
-        if retried:
-            logger.info(
-                "enforce_linked_baselines: %d/%d linked accounts could not be "
-                "confirmed this pass (will retry next tick)",
-                retried, len(accounts),
-            )
-
-    @enforce_linked_baselines.before_loop
-    async def _before_enforce_linked_baselines(self):
-        await self.bot.wait_until_ready()
-
     def cog_unload(self):
         self.clear_old_requests.cancel()
         self.waitlist_cleanup.cancel()
-        self.enforce_linked_baselines.cancel()
 
 
 async def setup(bot: Bot):

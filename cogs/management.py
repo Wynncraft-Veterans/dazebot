@@ -29,6 +29,7 @@ from lib.role_state import (
     state_of,
 )
 from lib.wynn_api.guild import get_guild
+from lib.wynn_api.errors import WynnApiError
 from lib.wynn_api.player import get_player_full_stats
 from orm import (
     Blocklist,
@@ -814,7 +815,15 @@ class Management(commands.Cog):
                 )
                 return
             # Functional /register
-            mc = await _ensure_mc_account(username)
+            try:
+                mc = await _ensure_mc_account(username)
+            except WynnApiError as e:
+                await ctx.reply(f"Could not find `{username}` on Wynncraft: {e.message}")
+                return
+            except Exception as e:  # noqa: BLE001 — third-party API
+                logger.exception("/waitlist add: failed to fetch player stats")
+                await ctx.reply(f"Failed to fetch Wynncraft stats for `{username}`: {e}")
+                return
             existing = await DiscordAccount.filter(minecraft_account_id=mc.id).first()
             if existing is not None and existing.disc_uuid != str(user.id):
                 other = await self.bot.fetch_user(int(existing.disc_uuid))

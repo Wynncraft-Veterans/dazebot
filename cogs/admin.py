@@ -6,11 +6,13 @@ from discord.ext import commands
 from lib.auth import is_admin
 from lib.converters import CaseInsensitiveMember
 from lib.role_state import ensure_linked_baseline
+from lib.wynn_api.errors import WynnApiError
+from lib.wynn_api.player import get_player_full_stats
 
 logger = logging.getLogger("dazebot.cogs.admin")
 from bot import Bot
 from tortoise.expressions import Q
-from orm import Blocklist, DiscordAccount, MinecraftAccount
+from orm import Blocklist, DiscordAccount, MinecraftAccount, UNKNOWN_LAST_ONLINE
 
 
 class Admin(commands.Cog):
@@ -244,8 +246,29 @@ class Admin(commands.Cog):
         ).first()
 
         if mc is None:
-            await ctx.reply("That Minecraft account was not found. Try forcing a guild check first.")
-            return
+            # Not in our DB yet (e.g. player isn't in any tracked guild and has
+            # never self-linked). Fall back to the Wynncraft API and create a
+            # row on the fly, mirroring the /join and /waitlist add behavior.
+            try:
+                fs = await get_player_full_stats(username_or_uuid)
+            except WynnApiError as e:
+                await ctx.reply(
+                    f"Could not find `{username_or_uuid}` on Wynncraft: {e.message}"
+                )
+                return
+            except Exception as e:  # noqa: BLE001 — third-party API
+                logger.exception("/link set: get_player_full_stats failed")
+                await ctx.reply(f"Failed to fetch Wynncraft stats for `{username_or_uuid}`: {e}")
+                return
+            mc = await MinecraftAccount.create(
+                uuid=fs.uuid,
+                wynn_username=fs.username,
+                mc_username=fs.username,
+                guild=fs.guild.name if fs.guild else None,
+                last_online=fs.lastJoin or UNKNOWN_LAST_ONLINE,
+                last_manual_check=UNKNOWN_LAST_ONLINE,
+                first_join=fs.firstJoin,
+            )
 
         # Check if the MC account is already claimed by a different discord user
         existing = await DiscordAccount.filter(minecraft_account_id=mc.id).first()

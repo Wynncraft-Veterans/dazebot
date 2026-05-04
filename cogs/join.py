@@ -234,6 +234,20 @@ class Join(commands.Cog):
             await ctx.reply(f"You (`{mc.mc_username}`) are already in a different guild called `{mc.guild}`")
             return
 
+        # Self-add to the waitlist is restricted to Hiatus / Honourary members.
+        # Registered (never-been-a-VETS-member) users must be added by staff
+        # via /waitlist add. See instructions1.md §1m + role transition table.
+        if isinstance(ctx.author, discord.Member):
+            role_ids = {r.id for r in ctx.author.roles}
+            allowed = {CurrConfig.ROLE_HIATUS, CurrConfig.ROLE_HONOURARY}
+            if not (role_ids & allowed):
+                await ctx.reply(
+                    "Self-joining the waitlist is restricted to Hiatus and Honourary members. "
+                    "Ask a staff member to add you via `/waitlist add`.",
+                    ephemeral=True,
+                )
+                return
+
         lrq = await Waitlist.filter(minecraft_account__discord_account__disc_uuid=disc_uuid).first()
         if lrq:
             await ctx.reply(f"You (`{mc.mc_username}`) are already made a request to join, you are on the waitlist")

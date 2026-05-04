@@ -3,7 +3,7 @@ from typing import Annotated
 import discord
 from discord.ext import commands
 
-from lib.auth import is_admin
+from lib.auth import is_admin, is_staff
 from lib.converters import CaseInsensitiveMember
 from lib.role_state import ensure_linked_baseline
 from lib.wynn_api.errors import WynnApiError
@@ -224,7 +224,7 @@ class Admin(commands.Cog):
         )
 
     @commands.hybrid_group(name="link")
-    @is_admin()
+    @is_staff()
     async def link(self, ctx: commands.Context):
         """Link/unlink Discord ↔ Minecraft accounts"""
         if ctx.invoked_subcommand is None:

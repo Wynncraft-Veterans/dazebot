@@ -8,8 +8,15 @@ from lib.discord_paginated_embed import Paginator, from_lines
 from lib.wynn import check_player_full
 from lib.wynn_api.guild import get_guild
 from lib.wynn_api.guild_models import BaseMember, Guild
+from lib.wynn_api.player import get_player_full_stats
 from lib.wynn_api.requestor import Requestor
-from orm import DiscordAccount, MinecraftAccount, Shout
+from orm import (
+    DiscordAccount,
+    MinecraftAccount,
+    Shout,
+    UNKNOWN_LAST_ONLINE,
+    is_last_online_unknown,
+)
 
 logger = logging.getLogger("dazebot.cogs.activity")
 from bot import Bot
@@ -56,16 +63,30 @@ class Activity(commands.Cog):
             mc_username = member.username
         # online may be null per Wynncraft privacy opt-out.
         is_online = bool(member.online)
+        now = datetime.now(timezone.utc)
+
+        # Source of truth for last_online, in priority order:
+        #   1. Currently online -> right now.
+        #   2. Guild endpoint's per-member ``lastJoin`` (verified to match the
+        #      /player endpoint exactly, including for renamed accounts and
+        #      privacy-hidden accounts; see commit history / DEVGUIDE).
+        #   3. ``UNKNOWN_LAST_ONLINE`` sentinel when the player has hidden
+        #      lastJoin via Wynncraft privacy.
+        if is_online:
+            api_last_online = now
+        elif member.lastJoin is not None:
+            api_last_online = member.lastJoin
+        else:
+            api_last_online = UNKNOWN_LAST_ONLINE
+
         account, created = await MinecraftAccount.get_or_create(
             uuid=member.uuid,
             defaults={
                 "guild": guild.name,
                 "wynn_username": member.username,
                 "mc_username": mc_username,
-                "last_online": datetime.now(timezone.utc)
-                if is_online
-                else datetime.fromtimestamp(0, tz=timezone.utc),
-                "last_manual_check": datetime.fromtimestamp(0, tz=timezone.utc),
+                "last_online": api_last_online,
+                "last_manual_check": UNKNOWN_LAST_ONLINE,
             },
         )
 
@@ -73,9 +94,11 @@ class Activity(commands.Cog):
             account.guild = guild.name
             account.wynn_username = member.username
             account.mc_username = mc_username
-            now = datetime.now(timezone.utc)
-            if is_online and account.last_online <= now:
-                account.last_online = now
+            # Only advance ``last_online``; never roll it back, and never
+            # overwrite a real timestamp with the unknown sentinel.
+            if not is_last_online_unknown(api_last_online):
+                if is_last_online_unknown(account.last_online) or account.last_online < api_last_online:
+                    account.last_online = api_last_online
             await account.save()
 
     async def _check_guild(self, guild_name_full: str) -> Guild:
@@ -165,56 +188,38 @@ class Activity(commands.Cog):
         # online may be None per privacy opt-out; treat unknown as not-online for alerts.
         online = [m for m in guild.members.all_members() if m.online]
 
-        logger.info(f"members to check right now {[m.username for m in online]}")
-        members_to_check = await MinecraftAccount.filter(
+        # The guild endpoint returns a per-member ``lastJoin`` that has been
+        # verified to match ``/v3/player/{uuid}.lastJoin`` exactly (including
+        # the privacy-opted-out ``null`` cases). ``_apply_guild`` above has
+        # already written that into the DB, so we no longer need a per-member
+        # /player fanout just to keep inactivity timestamps fresh.
+        #
+        # We DO still want to periodically pull each member's full stats so
+        # ``ProfessionCategories`` (and any moves to a different guild) stay
+        # current. Limit that to one weekly pass per account, dispatched
+        # through the non-priority Requestor queue so it cannot block
+        # interactive lookups.
+        members_for_prof_refresh = await MinecraftAccount.filter(
             Q(guild="Returners")
-            & (
-                Q(
-                    last_online__lt=datetime.now(timezone.utc) - timedelta(days=9),  # TODO make configurable
-                )
-                | Q(last_manual_check__lt=datetime.now(timezone.utc) - timedelta(weeks=1))  # TODO make configurable
-            )
+            & Q(last_manual_check__lt=datetime.now(timezone.utc) - timedelta(weeks=1))  # TODO configurable
         )
 
-        guilds_to_check = set()
+        guilds_to_check: set[str] = set()
+        logger.debug(f"weekly prof refresh: {len(members_for_prof_refresh)} member(s)")
 
-        logger.debug(f"checking members {len(members_to_check)=}")
+        async def _refresh_prof(member: MinecraftAccount):
+            try:
+                _, player, _ = await check_player_full(member.uuid)
+            except Exception:
+                logger.exception(f"prof refresh failed for {member.mc_username}")
+                return
+            if player.guild and player.guild.name:
+                guilds_to_check.add(player.guild.name)
 
-        async def _check_member_helper(member: MinecraftAccount):
-            # logger.debug(f"STARTED _check_member_helper {member.mc_username=} {member.uuid=}")
-            _, player, _ = await check_player_full(member.uuid)
-
-            # Wynncraft privacy: lastJoin may be None. Treat "None" as "unknown";
-            # do NOT trigger inactivity actions for opted-out players.
-            if player.server and player.lastJoin is not None and (
-                player.lastJoin <= datetime.now(timezone.utc) - timedelta(days=9)
-            ):  # TODO configurable
-                logger.debug(f"checking {player.server}")
-                if member.uuid in await get_server_players(player.server):
-                    account = await MinecraftAccount.get(uuid=player.uuid)
-                    account.last_online = datetime.now(timezone.utc)
-                    await account.save()
-
-            guild_name = player.guild.name if player.guild else None
-            guilds_to_check.add(guild_name)
-            # logger.debug(f"FINSHED _check_member_helper {member.mc_username=} {member.uuid=}")
-
-        check_members_task = []
-        for member in members_to_check:
-            check_members_task.append(_check_member_helper(member))
-            # await _check_member_helper(member)
-
-        await asyncio.gather(*check_members_task)
+        await asyncio.gather(*(_refresh_prof(m) for m in members_for_prof_refresh))
 
         guilds_to_check.discard("Returners")
-        guilds_to_check.discard(None)
-
-        tasks = []
-
-        for other_guild in guilds_to_check:
-            tasks.append(self._check_guild(other_guild))
-
-        await asyncio.gather(*tasks)
+        await asyncio.gather(*(self._check_guild(g) for g in guilds_to_check))
 
         alerts = []
         now = datetime.now(timezone.utc)
@@ -268,25 +273,110 @@ class Activity(commands.Cog):
         await self.check_guild()
 
     @commands.hybrid_command(name="purgelist")
-    async def purgelist(self, ctx: commands.Context, days: int = 9):
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        absent_guild_members = await MinecraftAccount.filter(guild="Returners", last_online__lt=cutoff).order_by(
-            "-last_online"
-        )
+    async def purgelist(
+        self,
+        ctx: commands.Context,
+        days: int = 9,
+        refresh: bool = False,
+    ):
+        """Show Returners members inactive for more than ``days`` days.
 
-        if not absent_guild_members:
+        Output is split into two sections:
+          - **Inactive**: members whose ``lastJoin`` is confirmed to be older
+            than the cutoff. Each candidate is double-checked against the
+            ``/v3/player/{uuid}`` endpoint immediately before display so that
+            stale DB rows cannot produce false positives (e.g. someone who
+            logged on five minutes ago must not appear here).
+          - **API-disabled**: members whose ``lastJoin`` is hidden by
+            Wynncraft privacy settings. Their activity status cannot be
+            determined; they MUST be reviewed manually before any kick.
+
+        ``refresh=True`` forces a full re-poll of the Returners guild before
+        sampling, for use when staff want maximal accuracy at the cost of one
+        extra GUILD-bucket request.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        await ctx.defer()
+
+        if refresh:
+            # Single GUILD-bucket request; ``_apply_guild`` will write the
+            # latest ``lastJoin`` for every member back into the DB.
+            await self._check_guild("Returners")
+
+        candidates = await MinecraftAccount.filter(guild="Returners")
+
+        api_disabled: list[MinecraftAccount] = []
+        likely_inactive: list[MinecraftAccount] = []
+        for m in candidates:
+            if is_last_online_unknown(m.last_online):
+                api_disabled.append(m)
+            elif m.last_online < cutoff:
+                likely_inactive.append(m)
+
+        # Final-pass freshness verification: re-query /player for each likely
+        # candidate. Dispatched through the non-priority Requestor queue so
+        # interactive lookups are not blocked. Cost: one PLAYER-bucket request
+        # per candidate (typically <20), all 2-min-cached upstream.
+        confirmed: list[tuple[MinecraftAccount, datetime]] = []
+        false_positives: list[tuple[MinecraftAccount, datetime]] = []
+
+        async def _verify(m: MinecraftAccount):
+            try:
+                player = await get_player_full_stats(m.uuid)
+            except Exception:
+                logger.exception(f"purgelist verify failed for {m.mc_username}; trusting DB")
+                confirmed.append((m, m.last_online))
+                return
+            if player.lastJoin is None:
+                # Player flipped to privacy-hidden between the guild tick
+                # and now. Reclassify.
+                api_disabled.append(m)
+                return
+            if player.lastJoin < cutoff:
+                confirmed.append((m, player.lastJoin))
+            else:
+                false_positives.append((m, player.lastJoin))
+
+        await asyncio.gather(*(_verify(m) for m in likely_inactive))
+
+        if false_positives:
+            logger.info(
+                f"purgelist: dropped {len(false_positives)} false positive(s) "
+                f"after live verify: {[m.mc_username for m, _ in false_positives]}"
+            )
+
+        confirmed.sort(key=lambda t: t[1])
+        api_disabled.sort(key=lambda a: a.mc_username.lower())
+
+        if not confirmed and not api_disabled:
             await ctx.send(f"No members have been away for more than {days} days.")
             return
 
-        logger.info([m.last_online.tzinfo for m in absent_guild_members])
-        logger.info(datetime.now().tzinfo)
+        now = datetime.now(timezone.utc)
 
-        lines = [
-            f"- `{m.wynn_username if m.wynn_username == m.mc_username else m.wynn_username + '|' + m.mc_username}` has been away for {(datetime.now(timezone.utc) - m.last_online).days} days."
-            for m in reversed(absent_guild_members)
-        ]
+        def _name(a: MinecraftAccount) -> str:
+            # Show both the Wynncraft (legacy) name and the canonical Mojang
+            # name when they have desynced (renamed account).
+            if a.wynn_username and a.mc_username and a.wynn_username != a.mc_username:
+                return f"{a.wynn_username}|{a.mc_username}"
+            return a.wynn_username or a.mc_username
 
-        embeds = from_lines("Purgelist", lines, 10, logger)
+        lines: list[str] = []
+        if confirmed:
+            lines.append(f"**Inactive (>{days} days, live-verified):**")
+            for a, lj in confirmed:
+                lines.append(f"- `{_name(a)}` \u2014 last seen {(now - lj).days} day(s) ago ({lj.date()})")
+        if api_disabled:
+            if confirmed:
+                lines.append("")
+            lines.append(
+                f"**API-disabled ({len(api_disabled)}; lastJoin hidden by Wynncraft privacy "
+                "\u2014 activity unknown, review manually):**"
+            )
+            for a in api_disabled:
+                lines.append(f"- `{_name(a)}`")
+
+        embeds = from_lines("Purgelist", lines, 15, logger)
         await ctx.send(embed=embeds[0], view=Paginator(embeds))
 
     @commands.hybrid_command(name="shout")

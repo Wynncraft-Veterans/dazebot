@@ -12,7 +12,7 @@ from lib.linking import dm_or_log, get_or_issue_code
 from lib.wynn import check_player_full
 from lib.wynn_api.player import get_player_full_stats
 from lib.wynn_api.requestor import Requestor
-from orm import DiscordAccount, LinkRequest, MinecraftAccount, Waitlist
+from orm import DiscordAccount, LinkRequest, MinecraftAccount, UNKNOWN_LAST_ONLINE, Waitlist
 
 logger = logging.getLogger("dazebot.cogs.join")
 from bot import Bot
@@ -96,8 +96,10 @@ class Join(commands.Cog):
                 uuid=fs.uuid,
                 wynn_username=fs.username,
                 mc_username=fs.username,
-                last_online=fs.lastJoin or datetime.fromtimestamp(0, tz=timezone.utc),
-                last_manual_check=datetime.fromtimestamp(0, tz=timezone.utc),
+                # fs.lastJoin is None when the player has hidden it via Wynncraft
+                # privacy. UNKNOWN_LAST_ONLINE is the in-band sentinel for that.
+                last_online=fs.lastJoin or UNKNOWN_LAST_ONLINE,
+                last_manual_check=UNKNOWN_LAST_ONLINE,
                 first_join=fs.firstJoin,  # may be None per Wynncraft privacy opt-out
             )
 

@@ -27,7 +27,7 @@ import discord
 
 from lib.role_state import ensure_linked_baseline
 from lib.wynn_api.player import get_player_full_stats
-from orm import Blocklist, DiscordAccount, LinkCode, MinecraftAccount
+from orm import Blocklist, DiscordAccount, LinkCode, MinecraftAccount, UNKNOWN_LAST_ONLINE
 
 if TYPE_CHECKING:
     from bot import Bot
@@ -159,8 +159,8 @@ async def try_consume_code(
                 # below can correctly grant MEMBER instead of REGISTERED for
                 # users who joined Returners between activity-loop ticks.
                 guild=fs.guild.name if fs.guild else None,
-                last_online=fs.lastJoin or datetime.fromtimestamp(0, tz=timezone.utc),
-                last_manual_check=datetime.fromtimestamp(0, tz=timezone.utc),
+                last_online=fs.lastJoin or UNKNOWN_LAST_ONLINE,
+                last_manual_check=UNKNOWN_LAST_ONLINE,
                 first_join=fs.firstJoin,  # may be None per Wynncraft privacy opt-out
             )
         except Exception as e:  # noqa: BLE001  \u2014 third-party API

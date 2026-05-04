@@ -38,6 +38,7 @@ from orm import (
     LinkRequest,
     MinecraftAccount,
     MinecraftAlt,
+    UNKNOWN_LAST_ONLINE,
     UserVanityChoice,
     Waitlist,
 )
@@ -82,8 +83,10 @@ async def _ensure_mc_account(value: str) -> MinecraftAccount:
         uuid=fs.uuid,
         wynn_username=fs.username,
         mc_username=fs.username,
-        last_online=fs.lastJoin or datetime.fromtimestamp(0, tz=timezone.utc),
-        last_manual_check=datetime.fromtimestamp(0, tz=timezone.utc),
+        # fs.lastJoin / firstJoin can be None per Wynncraft privacy opt-out;
+        # use UNKNOWN_LAST_ONLINE as the in-band "unknown" marker.
+        last_online=fs.lastJoin or UNKNOWN_LAST_ONLINE,
+        last_manual_check=UNKNOWN_LAST_ONLINE,
         first_join=fs.firstJoin,
     )
 

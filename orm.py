@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from tortoise import fields
@@ -10,6 +10,28 @@ from lib.lib import ProfCategory
 from lib.wynn_api.player_models import CharacterProfessionsType
 
 import uuid
+
+
+# Sentinel value written to ``MinecraftAccount.last_online`` when the upstream
+# Wynncraft API reports ``lastJoin = None``. This happens when the player has
+# opted out via privacy settings (https://docs.wynncraft.com/privacy) OR when
+# the account simply has no join data on record. The DB column is NOT NULL,
+# so we use the Unix epoch as an in-band "unknown" marker. Use
+# :func:`is_last_online_unknown` to test for it; never compare directly.
+UNKNOWN_LAST_ONLINE: datetime = datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+def is_last_online_unknown(dt: datetime | None) -> bool:
+    """Return True if ``dt`` is the "unknown / API-hidden" sentinel.
+
+    ``None`` is treated as unknown for forward-compat with a future schema
+    migration to a nullable column.
+    """
+    if dt is None:
+        return True
+    # Anything within 24h of the epoch is treated as the sentinel; avoids any
+    # tz-roundtrip drift around 1970-01-01.
+    return dt <= datetime.fromtimestamp(86400, tz=timezone.utc)
 
 
 class MinecraftAccount(Model):

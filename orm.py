@@ -271,7 +271,7 @@ class DMSentLog(Model):
 class LinkCode(Model):
     """A persistent (until consumed) Minecraft<->Discord link code.
 
-    Keyed by ``mc_username`` (lowercased) so re-running ``/link_code`` for the
+    Keyed by ``mc_username`` (lowercased) so re-running ``/link code`` for the
     same username re-DMs the same code, while a different discord user
     requesting the same username overwrites the row (invalidating the prior
     code).

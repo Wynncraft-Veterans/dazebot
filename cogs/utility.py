@@ -8,6 +8,7 @@ from discord.ext import commands
 
 from bot import Bot
 from lib import mc
+from lib.auth import is_guild
 from lib.discord_paginated_embed import Paginator, from_lines
 from lib.lib import ProfCategory
 from lib.wynn_api.player_models import CharacterProfessionsType
@@ -205,6 +206,7 @@ class Utility(commands.Cog):
         logger.info("Initialized Utility")
 
     @commands.hybrid_command(name="findprofer")
+    @is_guild()
     async def findprofer(self, ctx: commands.Context, include_non_members: bool = False):
         """Find a Returners profer. Pass include_non_members:True to also include former members."""
         view = ProferView(include_non_members=include_non_members)

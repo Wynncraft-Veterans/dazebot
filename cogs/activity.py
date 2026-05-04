@@ -4,7 +4,7 @@ import logging
 import discord
 from discord.ext import commands, tasks
 from lib import mc
-from lib.auth import is_admin, is_shouter
+from lib.auth import is_shouter, is_staff
 from lib.discord_paginated_embed import Paginator, from_lines
 from lib.wynn import check_player_full
 from lib.wynn_api.guild import get_guild
@@ -281,12 +281,8 @@ class Activity(commands.Cog):
         )
         await channel.send(embed=embed)
 
-    @commands.hybrid_command(name="force_check")
-    @is_admin()
-    async def force_check(self, _ctx: commands.Context):
-        await self.check_guild()
-
     @commands.hybrid_command(name="purgelist")
+    @commands.check_any(is_staff(), is_shouter(ROLES_ALLOWED_TO_SHOUT))
     async def purgelist(
         self,
         ctx: commands.Context,
@@ -390,60 +386,49 @@ class Activity(commands.Cog):
         embeds = from_lines("Purgelist", lines, 15, logger)
         await ctx.send(embed=embeds[0], view=Paginator(embeds))
 
-    @commands.hybrid_command(name="shout")
+    @commands.hybrid_group(name="shout", description="In-game shout actions and stats")
+    async def shout_group(self, ctx: commands.Context):
+        if ctx.invoked_subcommand is None:
+            await ctx.reply("Use subcommands: send, board, last")
+
+    @shout_group.command(name="send", description="Record a shout you just did in-game")
     @is_shouter(ROLES_ALLOWED_TO_SHOUT)
-    async def shout(self, ctx: commands.Context):
+    async def shout_send(self, ctx: commands.Context):
         discord_acc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
         await Shout.create(shouter=discord_acc)
         discord_acc.shout_count += 1
         await discord_acc.save(update_fields=["shout_count"])
         await ctx.send(f"Thank you for helping the guild, {ctx.author.mention}!\nYour shout has been recorded.")
 
-    @commands.hybrid_command(name="last_shout")
-    async def last_shout(self, ctx: commands.Context):
+    @shout_group.command(name="last", description="Show the most recent shouts")
+    @commands.check_any(is_staff(), is_shouter(ROLES_ALLOWED_TO_SHOUT))
+    async def shout_last(self, ctx: commands.Context):
         shouts = await Shout.all().order_by("-created_at").limit(3).prefetch_related("shouter")
         lines = []
         for shout in shouts:
             delta = datetime.now(timezone.utc) - shout.created_at
             user = await self.bot.fetch_user(int(shout.shouter.disc_uuid))
-            lines.append(f"{user.mention} - {delta.seconds // 3600} hours and {(delta.seconds // 60) % 60} minutes ago")
-
+            lines.append(
+                f"{user.mention} - {delta.seconds // 3600} hours and {(delta.seconds // 60) % 60} minutes ago"
+            )
         if lines:
             await ctx.send("\n".join(lines), silent=True)
         else:
             await ctx.send("There have been no recorded shouts.")
 
-    @commands.hybrid_command(name="shouterboard")
-    async def shouterboard(self, ctx: commands.Context):
+    @shout_group.command(name="board", description="Per-shouter shout-count leaderboard")
+    @commands.check_any(is_staff(), is_shouter(ROLES_ALLOWED_TO_SHOUT))
+    async def shout_board(self, ctx: commands.Context):
         shouters = await DiscordAccount.filter(shout_count__gt=0).order_by("-shout_count")
-
         lines = []
         for shouter in shouters:
             user = await self.bot.fetch_user(int(shouter.disc_uuid))
             lines.append(f"{user.mention}: {shouter.shout_count} shouts")
-
         if lines:
             embeds = from_lines("Shouterboard", lines, 10, logger)
             await ctx.send(embed=embeds[0], view=Paginator(embeds))
         else:
             await ctx.send("No shouts recorded yet.")
-
-    @commands.hybrid_command(name="last_online")
-    async def last_online(self, ctx: commands.Context, username_or_uuid: str):
-        try:
-            player = await MinecraftAccount.get(
-                Q(uuid=username_or_uuid)
-                | Q(mc_username__iexact=username_or_uuid)
-                | Q(wynn_username__iexact=username_or_uuid)
-            )
-            ts = int(player.last_online.timestamp())
-            await ctx.send(
-                f"{player.mc_username} was last online on <t:{ts}:F>, which was <t:{ts}:R>. (100% accurate from `TODO configurable`+ days)"
-            )
-        except Exception as e:
-            logger.error(f"[/last_online] {e}")
-            await ctx.send("That user probably does not exist, is too new or is not in the guild.")
-            raise e
 
 
 async def setup(bot: Bot):

@@ -2,17 +2,20 @@ import logging
 from typing import Annotated
 import discord
 from discord.ext import commands
+from tortoise.expressions import Q
 
-from lib.auth import is_operator, is_staff
+from bot import Bot
+from config import CurrConfig
+from lib.auth import is_admin, is_operator, is_staff, is_registered
 from lib.converters import CaseInsensitiveMember
+from lib.discord_paginated_embed import Paginator, from_lines
+from lib.linking import dm_or_log, get_or_issue_code
 from lib.role_state import ensure_linked_baseline
 from lib.wynn_api.errors import WynnApiError
 from lib.wynn_api.player import get_player_full_stats
+from orm import Blocklist, DiscordAccount, LinkRequest, MinecraftAccount, UNKNOWN_LAST_ONLINE
 
 logger = logging.getLogger("dazebot.cogs.admin")
-from bot import Bot
-from tortoise.expressions import Q
-from orm import Blocklist, DiscordAccount, MinecraftAccount, UNKNOWN_LAST_ONLINE
 
 
 class Admin(commands.Cog):
@@ -22,11 +25,19 @@ class Admin(commands.Cog):
         self.bot = bot
         logger.info("Admin cog initialized")
 
-    @commands.hybrid_command(name="sync", description="Sync slash commands")
+    # =================================================================
+    # /admin (operator)  — bot-internal maintenance
+    # =================================================================
+
+    @commands.hybrid_group(name="admin", description="(Operator) Bot maintenance commands")
     @is_operator()
-    async def sync_commands(self, ctx: commands.Context):
-        """Manually sync slash commands"""
-        logger.info(f"Sync command initiated by {ctx.author} ({ctx.author.id}) in {ctx.guild}")
+    async def admin_group(self, ctx: commands.Context):
+        if ctx.invoked_subcommand is None:
+            await ctx.send("Use subcommands: sync, reload, load, unload")
+
+    @admin_group.command(name="sync", description="Sync slash commands")
+    async def admin_sync(self, ctx: commands.Context):
+        logger.info(f"/admin sync initiated by {ctx.author} ({ctx.author.id}) in {ctx.guild}")
         try:
             synced = await self.bot.tree.sync()
             logger.info(f"Successfully synced {len(synced)} slash commands")
@@ -35,11 +46,9 @@ class Admin(commands.Cog):
             logger.error(f"Failed to sync commands: {e}")
             await ctx.send(f"Failed to sync commands: {e}")
 
-    @commands.hybrid_command(name="reload", description="Reload a specific cog")
-    @is_operator()
-    async def reload_cog(self, ctx: commands.Context, cog_name: str):
-        """Reload a cog or all cogs"""
-        logger.info(f"Reload command initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
+    @admin_group.command(name="reload", description="Reload a specific cog")
+    async def admin_reload(self, ctx: commands.Context, cog_name: str):
+        logger.info(f"/admin reload initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
         try:
             if cog_name == "ALL":
                 for ext in self.bot.extensions:
@@ -51,43 +60,40 @@ class Admin(commands.Cog):
                 logger.info(f"Successfully reloaded cog '{cog_name}'")
                 await ctx.send(f"Successfully reloaded {cog_name}")
             await self.bot.tree.sync()
-            logger.debug(f"Synced slash commands after reloading '{cog_name}'")
         except Exception as e:
             logger.error(f"Failed to reload cog '{cog_name}': {e}")
             await ctx.send(f"Failed to reload {cog_name}: {e}")
 
-    @commands.hybrid_command(name="load", description="Load a specific cog")
-    @is_operator()
-    async def load_cog(self, ctx: commands.Context, cog_name: str):
-        """Load a specific cog"""
-        logger.info(f"Load command initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
+    @admin_group.command(name="load", description="Load a specific cog")
+    async def admin_load(self, ctx: commands.Context, cog_name: str):
+        logger.info(f"/admin load initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
         try:
             await self.bot.load_extension(f"cogs.{cog_name}")
             logger.info(f"Successfully loaded cog '{cog_name}'")
             await ctx.send(f"Successfully loaded {cog_name}")
             await self.bot.tree.sync()
-            logger.debug(f"Synced slash commands after loading '{cog_name}'")
         except Exception as e:
             logger.error(f"Failed to load cog '{cog_name}': {e}")
             await ctx.send(f"Failed to load {cog_name}: {e}")
 
-    @commands.hybrid_command(name="unload", description="Unload a specific cog")
-    @is_operator()
-    async def unload_cog(self, ctx: commands.Context, cog_name: str):
-        """Unload a specific cog"""
-        logger.info(f"Unload command initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
+    @admin_group.command(name="unload", description="Unload a specific cog")
+    async def admin_unload(self, ctx: commands.Context, cog_name: str):
+        logger.info(f"/admin unload initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
         try:
             await self.bot.unload_extension(f"cogs.{cog_name}")
             logger.info(f"Successfully unloaded cog '{cog_name}'")
             await ctx.send(f"Successfully unloaded {cog_name}")
             await self.bot.tree.sync()
-            logger.debug(f"Synced slash commands after unloading '{cog_name}'")
         except Exception as e:
             logger.error(f"Failed to unload cog '{cog_name}': {e}")
             await ctx.send(f"Failed to unload {cog_name}: {e}")
 
+    # =================================================================
+    # /say, /embed (admin)
+    # =================================================================
+
     @commands.hybrid_command(name="say")
-    @is_operator()
+    @is_admin()
     async def say(self, ctx: commands.Context, *, msg: str):
         if msg:
             await ctx.send(msg)
@@ -96,7 +102,7 @@ class Admin(commands.Cog):
 
     # TODO: Snagged from the internet. May not be the most optimal.
     @commands.hybrid_command(name="embed")
-    @is_operator()
+    @is_admin()
     async def embed(self, ctx: commands.Context, color: str = None, title: str = None, *, description: str = None):
         """Create a simple embed.
 
@@ -105,14 +111,12 @@ class Admin(commands.Cog):
         - For titles with spaces when using the prefix form, wrap the title in quotes: embed #ff0000 "My Title" My description here
         - Slash command usage will populate `color`, `title`, and `description` automatically.
         """
-        # If the command was invoked via slash or explicit args, prefer provided params
         if title is not None:
             if description is None:
                 await ctx.send("You must provide a description for the embed.")
                 return
             color_token = color
         else:
-            # Fallback: parse raw message content for prefix-style invocation
             if not getattr(ctx, "message", None) or not getattr(ctx.message, "content", None):
                 await ctx.send("Usage: embed [colour] [title] [description]. For titles with spaces, quote the title.")
                 return
@@ -130,34 +134,21 @@ class Admin(commands.Cog):
                     t = t[2:]
                 return len(t) == 6 and all(c in "0123456789abcdefABCDEF" for c in t)
 
-            # Check whether first token is a color name/hex; if so, consume it
             first = args_str.split(None, 1)[0]
             color_token = None
             remaining = args_str
             named_tokens = (
-                "default",
-                "blue",
-                "red",
-                "green",
-                "gold",
-                "orange",
-                "purple",
-                "teal",
-                "magenta",
-                "dark_blue",
-                "dark_red",
-                "dark_green",
-                "blurple",
+                "default", "blue", "red", "green", "gold", "orange", "purple",
+                "teal", "magenta", "dark_blue", "dark_red", "dark_green", "blurple",
             )
             if _looks_like_color(first) or first.lower() in named_tokens:
                 color_token = first
-                remaining = args_str[len(first) :].lstrip()
+                remaining = args_str[len(first):].lstrip()
 
             if not remaining:
                 await ctx.send("You must provide a title and description for the embed.")
                 return
 
-            # Title parsing: support quoted titles for spaces
             if remaining[0] in ('"', "'"):
                 q = remaining[0]
                 idx = remaining.find(q, 1)
@@ -165,7 +156,7 @@ class Admin(commands.Cog):
                     await ctx.send("Unterminated quote in title.")
                     return
                 title_parsed = remaining[1:idx]
-                description_parsed = remaining[idx + 1 :].lstrip()
+                description_parsed = remaining[idx + 1:].lstrip()
             else:
                 parts2 = remaining.split(None, 1)
                 title_parsed = parts2[0]
@@ -179,7 +170,6 @@ class Admin(commands.Cog):
                 await ctx.send("You must provide a description for the embed.")
                 return
 
-        # Parse the colour token into a discord.Color
         col = discord.Color.default()
         if color:
             col_str = color.strip()
@@ -193,7 +183,6 @@ class Admin(commands.Cog):
                 except Exception:
                     pass
             else:
-                # Try named color helpers on discord.Color (e.g. blue(), red(), etc.)
                 try:
                     color_func = getattr(discord.Color, col_str.lower())
                     if callable(color_func):
@@ -207,34 +196,43 @@ class Admin(commands.Cog):
         embed = discord.Embed(title=title, description=description, color=col)
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="set_shout_count")
+    # =================================================================
+    # /shouts (operator)  — set raw shout-count value
+    # =================================================================
+
+    @commands.hybrid_group(name="shouts", description="(Operator) Manage raw shout counters")
     @is_operator()
-    async def set_shout_count(
+    async def shouts_group(self, ctx: commands.Context):
+        if ctx.invoked_subcommand is None:
+            await ctx.send("Use subcommands: set")
+
+    @shouts_group.command(name="set", description="Forcefully set a user's shout_count")
+    async def shouts_set(
         self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember], count: int
     ):
-        """Forcefully set a user's shout_count (replaces the existing value)."""
-        discord_acc, _ = await DiscordAccount.get_or_create(
-            disc_uuid=str(user.id),
-        )
-
+        discord_acc, _ = await DiscordAccount.get_or_create(disc_uuid=str(user.id))
         discord_acc.shout_count = count
         await discord_acc.save(update_fields=["shout_count"])
         await ctx.reply(
-            f"Set shout_count for {user.mention} to {count}", allowed_mentions=discord.AllowedMentions.none()
+            f"Set shout_count for {user.mention} to {count}",
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    @commands.hybrid_group(name="link")
-    @is_staff()
-    async def link(self, ctx: commands.Context):
-        """Link/unlink Discord ↔ Minecraft accounts"""
-        if ctx.invoked_subcommand is None:
-            await ctx.send("Use subcommands: set, remove, check")
+    # =================================================================
+    # /link (mixed tiers per subcommand — group itself is ungated)
+    # =================================================================
 
-    @link.command(name="set")
+    @commands.hybrid_group(name="link", description="Link/unlink Discord ↔ Minecraft accounts")
+    async def link(self, ctx: commands.Context):
+        if ctx.invoked_subcommand is None:
+            # Prefix-mode fallback: surface the info embed.
+            await self.link_info.callback(self, ctx)
+
+    @link.command(name="set", description="(Staff) Link a Discord user to a Minecraft account")
+    @is_staff()
     async def link_set(
         self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember], username_or_uuid: str
     ):
-        """Link a Discord user to a Minecraft account"""
         # Defer immediately: ensure_linked_baseline below can issue 1-2
         # role-mutation API calls, which can easily blow past Discord's 3s
         # interaction-ack window and otherwise yield "Unknown interaction".
@@ -246,15 +244,10 @@ class Admin(commands.Cog):
         ).first()
 
         if mc is None:
-            # Not in our DB yet (e.g. player isn't in any tracked guild and has
-            # never self-linked). Fall back to the Wynncraft API and create a
-            # row on the fly, mirroring the /join and /waitlist add behavior.
             try:
                 fs = await get_player_full_stats(username_or_uuid)
             except WynnApiError as e:
-                await ctx.reply(
-                    f"Could not find `{username_or_uuid}` on Wynncraft: {e.message}"
-                )
+                await ctx.reply(f"Could not find `{username_or_uuid}` on Wynncraft: {e.message}")
                 return
             except Exception as e:  # noqa: BLE001 — third-party API
                 logger.exception("/link set: get_player_full_stats failed")
@@ -270,7 +263,6 @@ class Admin(commands.Cog):
                 first_join=fs.firstJoin,
             )
 
-        # Check if the MC account is already claimed by a different discord user
         existing = await DiscordAccount.filter(minecraft_account_id=mc.id).first()
         if existing is not None and existing.disc_uuid != str(user.id):
             other = await self.bot.fetch_user(int(existing.disc_uuid))
@@ -292,8 +284,6 @@ class Admin(commands.Cog):
         disc.minecraft_account = mc
         await disc.save(update_fields=["minecraft_account_id"])
 
-        # Apply the linked-account role invariant: in Returners -> MEMBER,
-        # else REGISTERED. Same logic as the chat-code link path.
         baseline_note = ""
         try:
             blocked = await Blocklist.filter(minecraft_account=mc).exists()
@@ -315,9 +305,9 @@ class Admin(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    @link.command(name="remove")
+    @link.command(name="remove", description="(Staff) Unlink a Discord account from its Minecraft account")
+    @is_staff()
     async def link_remove(self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember]):
-        """Unlink a Discord account from its Minecraft account"""
         disc = await DiscordAccount.filter(disc_uuid=str(user.id)).select_related("minecraft_account").first()
 
         if disc is None or disc.minecraft_account_id is None:
@@ -337,12 +327,9 @@ class Admin(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    # TODO: make this a group such that
-    # - link check mc <mc username or uuid>
-    # - link check disc <disc>
-    @link.command(name="check")
+    @link.command(name="check", description="(Staff) Check a Discord user's linked Minecraft account")
+    @is_staff()
     async def link_check(self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember]):
-        """Check a Discord user's linked Minecraft account"""
         disc = await DiscordAccount.filter(disc_uuid=str(user.id)).select_related("minecraft_account").first()
 
         if disc is None or disc.minecraft_account is None:
@@ -355,7 +342,6 @@ class Admin(commands.Cog):
         mc = disc.minecraft_account
         embed = discord.Embed(title="Linked Account", color=discord.Color.blue())
         embed.add_field(name="Discord", value=user.mention, inline=True)
-        # TODO: idk make clearer distinction between mc_username and wynn_username everywhere, or only display mc_username, maybe with a symbol to notify wynn_username differs, then admins can run a command to fetch both names
         embed.add_field(
             name="Minecraft",
             value=f"`{mc.mc_username}` {f'(`{mc.wynn_username}`)' if mc.wynn_username != mc.mc_username else ''}",
@@ -366,45 +352,194 @@ class Admin(commands.Cog):
             embed.add_field(name="First Join", value=f"<t:{int(mc.first_join.timestamp())}:F>", inline=True)
         await ctx.reply(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
-    @commands.hybrid_group(name="honourary")
-    @is_operator()
-    async def honourary(self, ctx: commands.Context):
-        """Manage honourary bridge access"""
-        if ctx.invoked_subcommand is None:
-            await ctx.send("Use subcommands: set, remove")
+    @link.command(
+        name="request",
+        description="(Registered) Request a manual link to a Minecraft account (alts only post-migration).",
+    )
+    @is_registered()
+    async def link_request(self, ctx: commands.Context, username_or_uuid: str):
+        """Manual, staff-approved link flow. Practically only useful for alt
+        accounts now; the primary link flow is the welcome-channel button or
+        ``/link code``.
+        """
+        existing_disc = (
+            await LinkRequest.filter(discord_account_id=ctx.author.id).prefetch_related("minecraft_account").first()
+        )
+        if existing_disc is not None:
+            await ctx.reply(
+                f"You ({ctx.author.mention}) already have a pending link request to "
+                f"`{existing_disc.minecraft_account.mc_username}` (`{existing_disc.minecraft_account.uuid}`)",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
 
-    @honourary.command(name="set")
-    async def honourary_set(self, ctx: commands.Context, username_or_uuid: str):
-        """Grant honourary bridge access to a MC account"""
-        mc = await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(mc_username__iexact=username_or_uuid)).first()
+        existing_mc = (
+            await LinkRequest.filter(
+                Q(minecraft_account__uuid=username_or_uuid)
+                | Q(minecraft_account__mc_username__iexact=username_or_uuid)
+            )
+            .prefetch_related("minecraft_account", "discord_account")
+            .first()
+        )
+        if existing_mc is not None:
+            await ctx.reply(
+                f"There is already a pending link request to "
+                f"`{existing_mc.minecraft_account.mc_username}` (`{existing_mc.minecraft_account.uuid}`)",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        linked_mc = await MinecraftAccount.filter(discord_account__disc_uuid=str(ctx.author.id)).first()
+        if linked_mc is not None:
+            await ctx.reply(
+                f"You ({ctx.author.mention}) are already linked to `{linked_mc.mc_username}` (`{linked_mc.uuid}`)",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        linked_disc = (
+            await DiscordAccount.filter(
+                Q(minecraft_account__uuid=username_or_uuid)
+                | Q(minecraft_account__mc_username__iexact=username_or_uuid)
+            )
+            .prefetch_related("minecraft_account")
+            .first()
+        )
+        if linked_disc is not None and linked_disc.minecraft_account is not None:
+            await ctx.reply(
+                f"`{linked_disc.minecraft_account.mc_username}` is already linked to another Discord account.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        mc = await MinecraftAccount.filter(
+            Q(uuid=username_or_uuid) | Q(mc_username__iexact=username_or_uuid)
+        ).first()
         if mc is None:
-            await ctx.reply(f"`{username_or_uuid}` not found.")
+            try:
+                fs = await get_player_full_stats(username_or_uuid)
+            except WynnApiError as e:
+                await ctx.reply(f"Could not find `{username_or_uuid}` on Wynncraft: {e.message}")
+                return
+            mc = await MinecraftAccount.create(
+                uuid=fs.uuid,
+                wynn_username=fs.username,
+                mc_username=fs.username,
+                last_online=fs.lastJoin or UNKNOWN_LAST_ONLINE,
+                last_manual_check=UNKNOWN_LAST_ONLINE,
+                first_join=fs.firstJoin,
+            )
+
+        disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
+        await LinkRequest.create(minecraft_account=mc, discord_account=disc)
+
+        await ctx.reply(
+            f"Link request created for {ctx.author.mention} → `{mc.mc_username}` (`{mc.uuid}`). "
+            "A staff member will approve it.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @link.command(name="requests", description="(Staff) List pending link requests")
+    @is_staff()
+    async def link_requests(self, ctx: commands.Context):
+        lrs = await LinkRequest.all().prefetch_related("minecraft_account", "discord_account")
+        lrs.sort(key=lambda e: e.created_at)
+        lines = [
+            f"{lr.id} - <t:{int(lr.created_at.timestamp())}:R> - <@{lr.discord_account.disc_uuid}> - "
+            f"`{lr.minecraft_account.mc_username}` (`{lr.minecraft_account.uuid}`)"
+            for lr in lrs
+        ]
+        if not lines:
+            await ctx.reply("No pending link requests.")
             return
 
-        if mc.is_honourary:
-            await ctx.reply(f"`{mc.mc_username}` is already honourary.")
+        embeds = from_lines(
+            title="Current link requests",
+            lines=lines,
+            lines_per_page=10,
+            logger=logger,
+        )
+        await ctx.send(
+            embed=embeds[0],
+            view=Paginator(embeds),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @link.command(name="approve", description="(Staff) Approve a pending link request by id")
+    @is_staff()
+    async def link_approve(self, ctx: commands.Context, id: str):
+        lr = await LinkRequest.filter(id=id).prefetch_related("minecraft_account", "discord_account").first()
+        if lr is None:
+            await ctx.reply(f"That (`{id}`) id doesn't exist.")
             return
 
-        mc.is_honourary = True
-        await mc.save(update_fields=["is_honourary"])
-        await ctx.reply(f"`{mc.mc_username}` is now honourary.")
+        disc = lr.discord_account
+        mc = lr.minecraft_account
 
-    @honourary.command(name="remove")
-    async def honourary_remove(self, ctx: commands.Context, username_or_uuid: str):
-        """Revoke honourary bridge access"""
-        mc = await MinecraftAccount.filter(Q(uuid=username_or_uuid) | Q(mc_username__iexact=username_or_uuid)).first()
-        if mc is None:
-            await ctx.reply(f"`{username_or_uuid}` not found.")
-            return
+        disc.minecraft_account = mc
+        await disc.save()
+        await lr.delete()
 
-        if not mc.is_honourary:
-            await ctx.reply(f"`{mc.mc_username}` is not honourary.")
-            return
+        user = await self.bot.fetch_user(int(disc.disc_uuid))
+        await ctx.reply(
+            f"Linked {user.mention} to `{mc.mc_username}` (`{mc.uuid}`).",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
-        mc.is_honourary = False
-        mc.token = None
-        await mc.save(update_fields=["is_honourary", "token"])
-        await ctx.reply(f"`{mc.mc_username}` is no longer honourary. Token revoked.")
+    @link.command(name="code", description="Get a one-time link code to claim a Minecraft account")
+    async def link_code(self, ctx: commands.Context, username: str):
+        # Reject if username already linked to anyone.
+        existing_link = await MinecraftAccount.filter(mc_username__iexact=username).first()
+        if existing_link is not None:
+            owner = await DiscordAccount.filter(minecraft_account=existing_link).first()
+            if owner is not None:
+                if owner.disc_uuid == str(ctx.author.id):
+                    await ctx.reply(
+                        f"You are already linked to `{existing_link.mc_username}`.",
+                        ephemeral=True,
+                    )
+                else:
+                    await ctx.reply(
+                        f"`{existing_link.mc_username}` is already linked to another Discord account.",
+                        ephemeral=True,
+                    )
+                return
+
+        row, is_new = await get_or_issue_code(str(ctx.author.id), username)
+
+        body = (
+            f"Your link code for **{username}**:\n\n"
+            f"```\n{row.code}\n```\n"
+            f"1. Connect to `{CurrConfig.MC_PUBLIC_HOST}` in Minecraft.\n"
+            f"2. Type the code above into chat.\n\n"
+            f"The code is persistent — it does not expire and you can re-run "
+            f"`/link code {username}` any time to see it again."
+        )
+
+        dmed = await dm_or_log(ctx.author, body, fallback_logger=logger)
+        if dmed:
+            verb = "issued" if is_new else "re-sent existing"
+            await ctx.reply(f"Code {verb} via DM. Check your messages.", ephemeral=True)
+        else:
+            await ctx.reply(body, ephemeral=True)
+
+    @link.command(name="info", description="How to link your Minecraft account to your Discord")
+    async def link_info(self, ctx: commands.Context):
+        host = getattr(CurrConfig, "MC_PUBLIC_HOST", "(server IP not configured)")
+        embed = discord.Embed(
+            title="Linking your Minecraft account",
+            description=(
+                "There are two ways to link a Minecraft account to your Discord account:\n\n"
+                "**1. Self-link (recommended) — `/link code <username>`**\n"
+                "I'll DM you a one-time code. Connect to "
+                f"`{host}` in Minecraft and type the code into chat. Done.\n\n"
+                "**2. Manual request — `/link request <username>`**\n"
+                "Files a request that staff approve manually. Slower; intended for alt accounts.\n\n"
+                "Staff can also force-link with `/link set`."
+            ),
+            color=discord.Color.blurple(),
+        )
+        await ctx.reply(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def setup(bot: Bot):

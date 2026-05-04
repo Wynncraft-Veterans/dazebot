@@ -2,7 +2,7 @@ import logging
 from typing import Annotated, TypedDict
 import discord
 from discord.ext import commands
-from lib.auth import is_operator
+from lib.auth import is_staff
 from lib.converters import CaseInsensitiveMember
 from lib.discord_paginated_embed import Paginator, from_lines
 from orm import DiscordAccount, Score, WeeklyEvent as WeeklyEventTable
@@ -29,7 +29,7 @@ class WeeklyEvent(commands.Cog):
             await ctx.send("Use: add, set, or leaderboard")
 
     @score.command(name="set")
-    @is_operator()
+    @is_staff()
     async def score_set(
         self,
         ctx: commands.Context,
@@ -52,7 +52,7 @@ class WeeklyEvent(commands.Cog):
         )
 
     @score.command(name="add")
-    @is_operator()
+    @is_staff()
     async def score_add(
         self, ctx, user: Annotated[discord.Member, CaseInsensitiveMember], week: WeekRange, value: ValueRange
     ):
@@ -112,6 +112,7 @@ class WeeklyEvent(commands.Cog):
             await ctx.send(f"No one has any points for week {week}")
 
     @commands.hybrid_command(name="count")
+    @is_staff()
     async def count_reactions(
         self, ctx: commands.Context, channel: discord.ForumChannel, override_emoji: str | None = None
     ):

@@ -19,7 +19,7 @@ from tortoise.expressions import Q
 from bot import Bot
 from config import CurrConfig
 from lib import runtime_config
-from lib.auth import is_admin, is_staff
+from lib.auth import is_admin, is_guild, is_operator, is_registered, is_staff
 from lib.converters import CaseInsensitiveMember
 from lib.role_state import (
     State,
@@ -141,9 +141,9 @@ class Management(commands.Cog):
 
     @commands.hybrid_command(
         name="first_install",
-        description="(Admin) Post the onboarding message with a 'Link Minecraft' button.",
+        description="(Operator) Post the onboarding message with a 'Link Minecraft' button.",
     )
-    @is_admin()
+    @is_operator()
     @app_commands.describe(
         channel="Channel to post the onboarding message in (defaults to here).",
         quote_message_id="Optional: an existing staff-authored message whose text to quote in the embed.",
@@ -257,9 +257,9 @@ class Management(commands.Cog):
 
     @commands.hybrid_group(
         name="script",
-        description="(Admin) One-off maintenance scripts.",
+        description="(Operator) One-off maintenance scripts.",
     )
-    @is_admin()
+    @is_operator()
     async def script_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
             await ctx.reply(
@@ -268,9 +268,9 @@ class Management(commands.Cog):
 
     @script_group.command(
         name="edit_welcome",
-        description="(Admin) Rewrite an onboarding message to the simplified copy, keeping the link button.",
+        description="(Operator) Rewrite an onboarding message to the simplified copy, keeping the link button.",
     )
-    @is_admin()
+    @is_operator()
     @app_commands.describe(
         channel="Channel containing the onboarding message.",
         message_id="ID of the message to edit (must have been posted by this bot).",
@@ -319,17 +319,12 @@ class Management(commands.Cog):
     # BLOCK / UNBLOCK
     # =================================================================
 
-    @commands.hybrid_group(name="block", description="(Staff) Manage the VETS blocklist.")
+    @commands.hybrid_command(name="block", description="(Staff) Add a user to the VETS blocklist.")
     @is_staff()
-    async def block_group(self, ctx: commands.Context):
-        if ctx.invoked_subcommand is None:
-            await ctx.reply("Use `/block add <user>` or `/block remove <user>`.")
-
-    @block_group.command(name="add", description="Add a user to the blocklist.")
-    async def block_add(self, ctx: commands.Context, target: str, *, reason: Optional[str] = None):
+    async def block(self, ctx: commands.Context, target: str, *, reason: Optional[str] = None):
         member, mc = await self._resolve_target(ctx, target)
         if mc is None:
-            await ctx.reply(f"No Minecraft account found for `{target}`. /register them first if needed.")
+            await ctx.reply(f"No Minecraft account found for `{target}`. Use `/link set` to register them first if needed.")
             return
 
         existing = await Blocklist.filter(minecraft_account=mc).first()
@@ -367,8 +362,9 @@ class Management(commands.Cog):
             msg += " (Posted alert to in-game-guild channel.)"
         await ctx.reply(msg)
 
-    @block_group.command(name="remove", description="Remove a user from the blocklist.")
-    async def block_remove(self, ctx: commands.Context, target: str):
+    @commands.hybrid_command(name="unblock", description="(Staff) Remove a user from the blocklist.")
+    @is_staff()
+    async def unblock(self, ctx: commands.Context, target: str):
         _, mc = await self._resolve_target(ctx, target)
         if mc is None:
             await ctx.reply(f"No Minecraft account found for `{target}`.")
@@ -379,26 +375,26 @@ class Management(commands.Cog):
             return
         await ctx.reply(f"\u2705 Removed `{mc.mc_username}` from the blocklist.")
 
-    # Convenience top-level alias for /unblock
-    @commands.hybrid_command(name="unblock", description="(Staff) Remove a user from the blocklist.")
-    @is_staff()
-    async def unblock(self, ctx: commands.Context, target: str):
-        await self.block_remove.callback(self, ctx, target)
-
     # =================================================================
     # FORCE
     # =================================================================
 
-    @commands.hybrid_command(
-        name="force", description="(Staff) Force a state transition that the automation wouldn't normally apply."
+    @commands.hybrid_group(name="force", description="(Admin) Force-apply automation actions.")
+    @is_admin()
+    async def force_group(self, ctx: commands.Context):
+        if ctx.invoked_subcommand is None:
+            await ctx.reply("Use `/force change <target> <transition>` or `/force check`.")
+
+    @force_group.command(
+        name="change",
+        description="Force a state transition that the automation wouldn't normally apply.",
     )
-    @is_staff()
     @app_commands.choices(
         transition=[
             app_commands.Choice(name="registered \u2192 hiatus", value="registered_to_hiatus"),
         ]
     )
-    async def force(self, ctx: commands.Context, target: str, transition: str):
+    async def force_change(self, ctx: commands.Context, target: str, transition: str):
         member, mc = await self._resolve_target(ctx, target)
         if member is None:
             await ctx.reply(f"`{target}` is not in the discord server.")
@@ -418,8 +414,8 @@ class Management(commands.Cog):
             if reg is None or hia is None:
                 await ctx.reply("Configured Registered/Hiatus role not found in this guild.")
                 return
-            await member.remove_roles(reg, reason="staff /force registered\u2192hiatus")
-            await member.add_roles(hia, reason="staff /force registered\u2192hiatus")
+            await member.remove_roles(reg, reason="staff /force change registered\u2192hiatus")
+            await member.add_roles(hia, reason="staff /force change registered\u2192hiatus")
             await ctx.reply(
                 f"\u2705 Forced {member.mention} \u2192 Hiatus.",
                 allowed_mentions=discord.AllowedMentions.none(),
@@ -428,44 +424,24 @@ class Management(commands.Cog):
 
         await ctx.reply(f"Unknown transition: `{transition}`.")
 
-    # =================================================================
-    # REGISTER (force-couple) + ADD (alt)
-    # =================================================================
-
-    @commands.hybrid_command(
-        name="register",
-        description="(Staff) Force-link a Minecraft username to a Discord user.",
+    @force_group.command(
+        name="check",
+        description="Run the periodic guild check immediately.",
     )
-    @is_staff()
-    async def register(
-        self,
-        ctx: commands.Context,
-        username: str,
-        user: Annotated[discord.Member, CaseInsensitiveMember],
-    ):
-        mc = await _ensure_mc_account(username)
-        # If MC is claimed by a different discord, refuse.
-        existing = await DiscordAccount.filter(minecraft_account_id=mc.id).first()
-        if existing is not None and existing.disc_uuid != str(user.id):
-            other = await self.bot.fetch_user(int(existing.disc_uuid))
-            await ctx.reply(
-                f"`{mc.mc_username}` is already linked to {other.mention}. Unlink them first.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+    async def force_check(self, ctx: commands.Context):
+        act = self.bot.get_cog("Activity")
+        if act is None:
+            await ctx.reply("Activity cog is not loaded.")
             return
-        disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(user.id))
-        if disc.minecraft_account_id == mc.id:
-            await ctx.reply(
-                f"{user.mention} is already linked to `{mc.mc_username}`.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-        disc.minecraft_account = mc
-        await disc.save(update_fields=["minecraft_account_id"])
-        await ctx.reply(
-            f"\u2705 Force-linked {user.mention} \u2194 `{mc.mc_username}` (`{mc.uuid}`).",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        await ctx.defer()
+        # ``check_guild`` is a tasks.loop wrapping a coroutine; calling the
+        # Loop instance invokes the underlying coroutine once.
+        await act.check_guild()
+        await ctx.reply("\u2705 Guild check completed.")
+
+    # =================================================================
+    # ADD (alt linking)
+    # =================================================================
 
     @commands.hybrid_command(
         name="add",
@@ -481,7 +457,7 @@ class Management(commands.Cog):
         mc = await _ensure_mc_account(username)
         disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(user.id))
 
-        # If they don't have a primary linked yet, treat /add as /register for the primary.
+        # If they don't have a primary linked yet, treat /add as a primary link.
         if disc.minecraft_account_id is None:
             disc.minecraft_account = mc
             await disc.save(update_fields=["minecraft_account_id"])
@@ -619,6 +595,10 @@ class Management(commands.Cog):
         if to_remove:
             await user.remove_roles(*to_remove, reason="/honour")
         await user.add_roles(hon, reason="/honour")
+        # Also flip the bridge-access flag on their primary linked MC account.
+        if disc and disc.minecraft_account and not disc.minecraft_account.is_honourary:
+            disc.minecraft_account.is_honourary = True
+            await disc.minecraft_account.save(update_fields=["is_honourary"])
         await ctx.reply(
             f"\u2728 {user.mention} is now Honourary.", allowed_mentions=discord.AllowedMentions.none()
         )
@@ -637,6 +617,12 @@ class Management(commands.Cog):
             await user.remove_roles(hon, reason="/unhonour")
         if reg not in user.roles:
             await user.add_roles(reg, reason="/unhonour")
+        # Clear bridge-access flag + token on their primary linked MC account.
+        disc = await DiscordAccount.filter(disc_uuid=str(user.id)).select_related("minecraft_account").first()
+        if disc and disc.minecraft_account and disc.minecraft_account.is_honourary:
+            disc.minecraft_account.is_honourary = False
+            disc.minecraft_account.token = None
+            await disc.minecraft_account.save(update_fields=["is_honourary", "token"])
         await ctx.reply(
             f"\u2705 {user.mention} is no longer Honourary.", allowed_mentions=discord.AllowedMentions.none()
         )
@@ -751,51 +737,104 @@ class Management(commands.Cog):
         )
 
     @commands.hybrid_command(
-        name="username",
-        description="(Staff) Show all Minecraft accounts linked to a Discord user.",
+        name="info",
+        description="(Registered) Show linked Minecraft accounts, Wynncraft join date, and last-online for a user.",
     )
-    @is_staff()
-    async def username(self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember]):
-        disc = await DiscordAccount.filter(disc_uuid=str(user.id)).select_related("minecraft_account").first()
-        if disc is None:
-            await ctx.reply(f"{user.mention} has no Discord account record.", allowed_mentions=discord.AllowedMentions.none())
+    @is_registered()
+    async def info(self, ctx: commands.Context, target: str):
+        """Unified user/account lookup. ``target`` may be a Discord ping/id/
+        username OR a Minecraft username/UUID. Replaces the older
+        ``/username``, ``/last_online`` and ``/joindate`` commands.
+        """
+        member, mc = await self._resolve_target(ctx, target)
+        if member is None and mc is None:
+            await ctx.reply(f"Couldn't resolve `{target}` to a Discord member or Minecraft account.")
             return
-        primary = disc.minecraft_account
-        alts = await MinecraftAlt.filter(discord_account=disc).prefetch_related("minecraft_account")
-        embed = discord.Embed(title=f"Linked accounts for {user.display_name}", color=discord.Color.blue())
-        if primary:
-            embed.add_field(
-                name="Primary",
-                value=f"`{primary.mc_username}` (`{primary.uuid}`)"
-                + (f"  alias: `{primary.wynn_username}`" if primary.wynn_username != primary.mc_username else ""),
-                inline=False,
+
+        embed = discord.Embed(color=discord.Color.blue())
+
+        # Discord side
+        if member is not None:
+            embed.title = f"Linked accounts for {member.display_name}"
+            disc = await DiscordAccount.filter(disc_uuid=str(member.id)).select_related("minecraft_account").first()
+            primary = disc.minecraft_account if disc else None
+            alts = (
+                await MinecraftAlt.filter(discord_account=disc).prefetch_related("minecraft_account")
+                if disc is not None
+                else []
             )
+            embed.add_field(name="Discord", value=member.mention, inline=False)
+            if primary:
+                mc = mc or primary  # prefer the primary for last-online/joindate display below
+                embed.add_field(
+                    name="Primary",
+                    value=f"`{primary.mc_username}` (`{primary.uuid}`)"
+                    + (
+                        f"  alias: `{primary.wynn_username}`"
+                        if primary.wynn_username and primary.wynn_username != primary.mc_username
+                        else ""
+                    ),
+                    inline=False,
+                )
+            else:
+                embed.add_field(name="Primary", value="_(none)_", inline=False)
+            if alts:
+                embed.add_field(
+                    name=f"Alts ({len(alts)})",
+                    value="\n".join(
+                        f"\u2022 `{a.minecraft_account.mc_username}` (`{a.minecraft_account.uuid}`)" for a in alts
+                    ),
+                    inline=False,
+                )
         else:
-            embed.add_field(name="Primary", value="_(none)_", inline=False)
-        if alts:
+            assert mc is not None
+            embed.title = f"Minecraft account `{mc.mc_username}`"
             embed.add_field(
-                name=f"Alts ({len(alts)})",
-                value="\n".join(
-                    f"\u2022 `{a.minecraft_account.mc_username}` (`{a.minecraft_account.uuid}`)" for a in alts
+                name="Minecraft",
+                value=f"`{mc.mc_username}` (`{mc.uuid}`)"
+                + (
+                    f"  alias: `{mc.wynn_username}`"
+                    if mc.wynn_username and mc.wynn_username != mc.mc_username
+                    else ""
                 ),
                 inline=False,
             )
+
+        # Joindate / last-online from the resolved MC account.
+        if mc is not None:
+            if mc.first_join is not None:
+                ts = int(mc.first_join.timestamp())
+                embed.add_field(name="First join", value=f"<t:{ts}:F> (<t:{ts}:R>)", inline=False)
+            from orm import is_last_online_unknown
+
+            if not is_last_online_unknown(mc.last_online):
+                ts = int(mc.last_online.timestamp())
+                embed.add_field(name="Last online", value=f"<t:{ts}:F> (<t:{ts}:R>)", inline=False)
+            else:
+                embed.add_field(name="Last online", value="_(hidden by Wynncraft privacy)_", inline=False)
+            if mc.guild:
+                embed.add_field(name="Guild", value=mc.guild, inline=True)
+
         await ctx.reply(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     # =================================================================
     # WAITLIST (override existing simple stub with the spec'd one)
     # =================================================================
 
-    @commands.hybrid_group(name="waitlist", description="(Staff) Manage the VETS waitlist.")
-    @is_staff()
+    @commands.hybrid_group(name="waitlist", description="Manage the VETS waitlist.")
     async def waitlist_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
-            await ctx.reply("Use `/waitlist add <user> [username]`, `/waitlist view`, or `/waitlist remove <user>`.")
+            await ctx.reply(
+                "Use `/waitlist add <user> [username]` (staff), `/waitlist view` (registered), "
+                "`/waitlist remove <user>` (staff), `/waitlist self` (guild member self-add), "
+                "or `/waitlist leave` (anyone, self-remove)."
+            )
 
     @waitlist_group.command(
         name="add",
-        description="Add a user to the waitlist; `username` is required if they aren't linked yet.",
+        description="(Staff) Add a user to the waitlist; `username` required if they aren't linked.",
     )
+    @is_staff()
     async def waitlist_group_add(
         self,
         ctx: commands.Context,
@@ -862,8 +901,9 @@ class Management(commands.Cog):
 
     @waitlist_group.command(
         name="view",
-        description="View the current waitlist.",
+        description="(Registered) View the current waitlist.",
     )
+    @is_registered()
     async def waitlist_group_view(self, ctx: commands.Context):
         from lib.discord_paginated_embed import Paginator, from_lines
 
@@ -891,8 +931,9 @@ class Management(commands.Cog):
 
     @waitlist_group.command(
         name="remove",
-        description="Remove a player from the waitlist by Minecraft username or UUID.",
+        description="(Staff) Remove a player from the waitlist by Minecraft username or UUID.",
     )
+    @is_staff()
     async def waitlist_group_remove(self, ctx: commands.Context, username_or_uuid: str):
         deleted = await Waitlist.filter(
             Q(minecraft_account__uuid=username_or_uuid)
@@ -902,6 +943,45 @@ class Management(commands.Cog):
             await ctx.reply(f"`{username_or_uuid}` is not on the waitlist.")
             return
         await ctx.reply(f"`{username_or_uuid}` has been removed from the waitlist.")
+
+    @waitlist_group.command(
+        name="self",
+        description="(Guild) Add yourself to the in-game guild waitlist.",
+    )
+    @is_guild()
+    async def waitlist_self(self, ctx: commands.Context):
+        disc_uuid = str(ctx.author.id)
+        mc = await MinecraftAccount.filter(discord_account__disc_uuid=disc_uuid).first()
+        if mc is None:
+            await ctx.reply(
+                "You haven't linked a Minecraft account yet. Use `/link code <username>` to link one."
+            )
+            return
+        if mc.guild == "Returners":
+            await ctx.reply(f"You (`{mc.mc_username}`) are already in the guild.")
+            return
+        if mc.guild is not None:
+            await ctx.reply(f"You (`{mc.mc_username}`) are in a different guild called `{mc.guild}`.")
+            return
+        existing = await Waitlist.filter(minecraft_account__discord_account__disc_uuid=disc_uuid).first()
+        if existing:
+            await ctx.reply(f"You (`{mc.mc_username}`) are already on the waitlist.")
+            return
+        await Waitlist.create(minecraft_account=mc)
+        await ctx.reply(f"You (`{mc.mc_username}`) are now on the waitlist!")
+
+    @waitlist_group.command(
+        name="leave",
+        description="Remove yourself from the in-game guild waitlist.",
+    )
+    async def waitlist_leave(self, ctx: commands.Context):
+        deleted = await Waitlist.filter(
+            minecraft_account__discord_account__disc_uuid=str(ctx.author.id)
+        ).delete()
+        if not deleted:
+            await ctx.reply("You are not on the waitlist.")
+            return
+        await ctx.reply("You have been removed from the waitlist.")
 
     # =================================================================
     # /config

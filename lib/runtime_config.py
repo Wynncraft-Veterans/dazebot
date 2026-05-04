@@ -91,6 +91,7 @@ async def load_overrides() -> None:
     from orm import BotConfigOverride  # local import to avoid circular dep
 
     overrides = await BotConfigOverride.all()
+    logger.info(f"load_overrides: found {len(overrides)} persisted override row(s) in DB")
     applied = 0
     for row in overrides:
         if not hasattr(CurrConfig, row.key):
@@ -102,9 +103,9 @@ async def load_overrides() -> None:
             logger.error(f"Failed to deserialize override {row.key!r}: {e}")
             continue
         setattr(CurrConfig, row.key, value)
+        logger.info(f"load_overrides: applied {row.key} = {value!r}")
         applied += 1
-    if applied:
-        logger.info(f"Applied {applied} persisted config override(s)")
+    logger.info(f"load_overrides: applied {applied}/{len(overrides)} override(s)")
 
 
 async def set_override(key: str, raw_value: str) -> Any:

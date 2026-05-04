@@ -9,6 +9,7 @@ from tortoise.expressions import Q
 from config import CurrConfig
 from lib.discord_paginated_embed import Paginator, from_lines
 from lib.linking import dm_or_log, get_or_issue_code
+from lib.auth import is_guild
 from lib.wynn import check_player_full
 from lib.wynn_api.player import get_player_full_stats
 from lib.wynn_api.requestor import Requestor
@@ -216,6 +217,7 @@ class Join(commands.Cog):
         await LinkRequest.filter(id__in=to_delete).delete()
 
     @commands.hybrid_command(name="join_guild")
+    @is_guild()
     async def join_guild(self, ctx: commands.Context):
         disc_uuid = ctx.author.id
 
@@ -233,20 +235,6 @@ class Join(commands.Cog):
         if mc.guild is not None:
             await ctx.reply(f"You (`{mc.mc_username}`) are already in a different guild called `{mc.guild}`")
             return
-
-        # Self-add to the waitlist is restricted to Hiatus / Honourary members.
-        # Registered (never-been-a-VETS-member) users must be added by staff
-        # via /waitlist add. See instructions1.md §1m + role transition table.
-        if isinstance(ctx.author, discord.Member):
-            role_ids = {r.id for r in ctx.author.roles}
-            allowed = {CurrConfig.ROLE_HIATUS, CurrConfig.ROLE_HONOURARY}
-            if not (role_ids & allowed):
-                await ctx.reply(
-                    "Self-joining the waitlist is restricted to Hiatus and Honourary members. "
-                    "Ask a staff member to add you via `/waitlist add`.",
-                    ephemeral=True,
-                )
-                return
 
         lrq = await Waitlist.filter(minecraft_account__discord_account__disc_uuid=disc_uuid).first()
         if lrq:

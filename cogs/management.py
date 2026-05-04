@@ -19,7 +19,7 @@ from tortoise.expressions import Q
 from bot import Bot
 from config import CurrConfig
 from lib import runtime_config
-from lib.auth import is_server_admin, is_staff
+from lib.auth import is_admin, is_staff
 from lib.converters import CaseInsensitiveMember
 from lib.role_state import (
     State,
@@ -143,7 +143,7 @@ class Management(commands.Cog):
         name="first_install",
         description="(Admin) Post the onboarding message with a 'Link Minecraft' button.",
     )
-    @is_server_admin()
+    @is_admin()
     @app_commands.describe(
         channel="Channel to post the onboarding message in (defaults to here).",
         quote_message_id="Optional: an existing staff-authored message whose text to quote in the embed.",
@@ -259,7 +259,7 @@ class Management(commands.Cog):
         name="script",
         description="(Admin) One-off maintenance scripts.",
     )
-    @is_server_admin()
+    @is_admin()
     async def script_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
             await ctx.reply(
@@ -270,7 +270,7 @@ class Management(commands.Cog):
         name="edit_welcome",
         description="(Admin) Rewrite an onboarding message to the simplified copy, keeping the link button.",
     )
-    @is_server_admin()
+    @is_admin()
     @app_commands.describe(
         channel="Channel containing the onboarding message.",
         message_id="ID of the message to edit (must have been posted by this bot).",
@@ -596,7 +596,7 @@ class Management(commands.Cog):
     # =================================================================
 
     @commands.hybrid_command(name="honour", description="(Admin) Mark a user as Honourary.")
-    @is_server_admin()
+    @is_admin()
     async def honour(self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember]):
         if ctx.guild is None:
             return
@@ -624,7 +624,7 @@ class Management(commands.Cog):
         )
 
     @commands.hybrid_command(name="unhonour", description="(Admin) Revoke Honourary status.")
-    @is_server_admin()
+    @is_admin()
     async def unhonour(self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember]):
         if ctx.guild is None:
             return
@@ -908,7 +908,7 @@ class Management(commands.Cog):
     # =================================================================
 
     @commands.hybrid_group(name="config", description="(Admin) View/modify runtime config.")
-    @is_server_admin()
+    @is_admin()
     async def config_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
             await ctx.reply("Use `/config list`, `/config get <key>`, `/config set <key> <value>`, `/config reset <key>`.")
@@ -967,7 +967,7 @@ class Management(commands.Cog):
     # =================================================================
 
     @commands.hybrid_group(name="alerts", description="(Admin) Mute / unmute / tune guild dead+full alerts.")
-    @is_server_admin()
+    @is_admin()
     async def alerts_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
             await ctx.reply(

@@ -4,6 +4,7 @@ import logging
 import discord
 from discord.ext import commands, tasks
 from lib import mc
+from lib.auth import is_admin, is_shouter
 from lib.discord_paginated_embed import Paginator, from_lines
 from lib.wynn import check_player_full
 from lib.wynn_api.guild import get_guild
@@ -281,7 +282,7 @@ class Activity(commands.Cog):
         await channel.send(embed=embed)
 
     @commands.hybrid_command(name="force_check")
-    @commands.has_permissions(administrator=True)
+    @is_admin()
     async def force_check(self, _ctx: commands.Context):
         await self.check_guild()
 
@@ -390,10 +391,7 @@ class Activity(commands.Cog):
         await ctx.send(embed=embeds[0], view=Paginator(embeds))
 
     @commands.hybrid_command(name="shout")
-    @commands.check_any(
-        commands.has_permissions(manage_messages=True),
-        commands.has_any_role(ROLES_ALLOWED_TO_SHOUT),  # type: ignore[arg-type]
-    )
+    @is_shouter(ROLES_ALLOWED_TO_SHOUT)
     async def shout(self, ctx: commands.Context):
         discord_acc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
         await Shout.create(shouter=discord_acc)

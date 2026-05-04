@@ -2,7 +2,7 @@ import logging
 from typing import Annotated, TypedDict
 import discord
 from discord.ext import commands
-from lib.auth import is_admin
+from lib.auth import is_operator
 from lib.converters import CaseInsensitiveMember
 from lib.discord_paginated_embed import Paginator, from_lines
 from orm import DiscordAccount, Score, WeeklyEvent as WeeklyEventTable
@@ -29,7 +29,7 @@ class WeeklyEvent(commands.Cog):
             await ctx.send("Use: add, set, or leaderboard")
 
     @score.command(name="set")
-    @is_admin()
+    @is_operator()
     async def score_set(
         self,
         ctx: commands.Context,
@@ -52,7 +52,7 @@ class WeeklyEvent(commands.Cog):
         )
 
     @score.command(name="add")
-    @is_admin()
+    @is_operator()
     async def score_add(
         self, ctx, user: Annotated[discord.Member, CaseInsensitiveMember], week: WeekRange, value: ValueRange
     ):

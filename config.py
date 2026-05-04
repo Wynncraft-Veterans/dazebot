@@ -78,11 +78,6 @@ class Config:
         887089019190640640  # @wenweia
     }
 
-    # Player management things
-    MODERATORS = ADMINS | {
-        0,  # Replace with actual mod
-    }
-
     class AnniConfig:
         ROLE_ID = 1457366058951249970
         CHANNEL_ID = 1339393368672702567
@@ -124,13 +119,6 @@ class DevConfig(Config):
     ADMINS = {
         174134334628823041  # @sjourd
     }
-    MODERATORS = (
-        ADMINS
-        | Config.MODERATORS
-        | {
-            0,
-        }
-    )
 
     class AnniConfig(Config.AnniConfig): ...
 

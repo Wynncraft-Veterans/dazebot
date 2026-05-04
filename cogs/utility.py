@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, cast
@@ -6,6 +7,7 @@ import discord
 from discord.ext import commands
 
 from bot import Bot
+from lib import mc
 from lib.discord_paginated_embed import Paginator, from_lines
 from lib.lib import ProfCategory
 from lib.wynn_api.player_models import CharacterProfessionsType
@@ -133,14 +135,38 @@ class ProferSelect(discord.ui.Select):
             )
             return
 
+        # Resolve canonical (current) Minecraft usernames for every row so
+        # legacyName-only entries (e.g. `_Alvin_` -> `sowurf`) display under
+        # their up-to-date name. Falls back to the cached mc_username on
+        # upstream failure.
+        async def _resolve(row: ProfessionCategories) -> str:
+            account = cast(MinecraftAccount, row.minecraft_account)
+            try:
+                return await mc.get_mc_username(account.uuid)
+            except RuntimeError:
+                return account.mc_username
+
+        all_rows = [*online, *offline]
+        resolved_names = await asyncio.gather(*(_resolve(r) for r in all_rows))
+        name_by_uuid: dict[str, str] = {
+            cast(MinecraftAccount, r.minecraft_account).uuid: name
+            for r, name in zip(all_rows, resolved_names)
+        }
+
+        def _display_name(row: ProfessionCategories) -> str:
+            account = cast(MinecraftAccount, row.minecraft_account)
+            name = name_by_uuid.get(account.uuid, account.mc_username)
+            # Escape Discord markdown so usernames like `_Alvin_` don't render
+            # as italics, etc.
+            return discord.utils.escape_markdown(name)
+
         lines: list[str] = []
 
         lines.append("~~==~~ **`ONLINE`** ~~==~~:")
         if online:
             for row in online:
-                mc = cast(MinecraftAccount, row.minecraft_account)
                 emoji = CATEGORY_EMOJI.get(row.category, "❓")
-                lines.append(f"{emoji} {row.category.value} - **{mc.mc_username}**")
+                lines.append(f"{emoji} {row.category.value} - **{_display_name(row)}**")
         else:
             lines.append("*No one online.*")
 
@@ -148,9 +174,8 @@ class ProferSelect(discord.ui.Select):
         lines.append("~~==~~ **`OFFLINE`** ~~==~~:")
         if offline:
             for row in offline:
-                mc = cast(MinecraftAccount, row.minecraft_account)
                 emoji = CATEGORY_EMOJI.get(row.category, "❓")
-                lines.append(f"{emoji} {row.category.value} - **{mc.mc_username}**")
+                lines.append(f"{emoji} {row.category.value} - **{_display_name(row)}**")
         else:
             lines.append("*No offline profers.*")
 

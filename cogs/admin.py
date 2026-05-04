@@ -3,7 +3,7 @@ from typing import Annotated
 import discord
 from discord.ext import commands
 
-from lib.auth import is_admin, is_staff
+from lib.auth import is_operator, is_staff
 from lib.converters import CaseInsensitiveMember
 from lib.role_state import ensure_linked_baseline
 from lib.wynn_api.errors import WynnApiError
@@ -23,7 +23,7 @@ class Admin(commands.Cog):
         logger.info("Admin cog initialized")
 
     @commands.hybrid_command(name="sync", description="Sync slash commands")
-    @is_admin()
+    @is_operator()
     async def sync_commands(self, ctx: commands.Context):
         """Manually sync slash commands"""
         logger.info(f"Sync command initiated by {ctx.author} ({ctx.author.id}) in {ctx.guild}")
@@ -36,7 +36,7 @@ class Admin(commands.Cog):
             await ctx.send(f"Failed to sync commands: {e}")
 
     @commands.hybrid_command(name="reload", description="Reload a specific cog")
-    @is_admin()
+    @is_operator()
     async def reload_cog(self, ctx: commands.Context, cog_name: str):
         """Reload a cog or all cogs"""
         logger.info(f"Reload command initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
@@ -57,7 +57,7 @@ class Admin(commands.Cog):
             await ctx.send(f"Failed to reload {cog_name}: {e}")
 
     @commands.hybrid_command(name="load", description="Load a specific cog")
-    @is_admin()
+    @is_operator()
     async def load_cog(self, ctx: commands.Context, cog_name: str):
         """Load a specific cog"""
         logger.info(f"Load command initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
@@ -72,7 +72,7 @@ class Admin(commands.Cog):
             await ctx.send(f"Failed to load {cog_name}: {e}")
 
     @commands.hybrid_command(name="unload", description="Unload a specific cog")
-    @is_admin()
+    @is_operator()
     async def unload_cog(self, ctx: commands.Context, cog_name: str):
         """Unload a specific cog"""
         logger.info(f"Unload command initiated by {ctx.author} ({ctx.author.id}) for cog '{cog_name}'")
@@ -87,7 +87,7 @@ class Admin(commands.Cog):
             await ctx.send(f"Failed to unload {cog_name}: {e}")
 
     @commands.hybrid_command(name="say")
-    @is_admin()
+    @is_operator()
     async def say(self, ctx: commands.Context, *, msg: str):
         if msg:
             await ctx.send(msg)
@@ -96,7 +96,7 @@ class Admin(commands.Cog):
 
     # TODO: Snagged from the internet. May not be the most optimal.
     @commands.hybrid_command(name="embed")
-    @is_admin()
+    @is_operator()
     async def embed(self, ctx: commands.Context, color: str = None, title: str = None, *, description: str = None):
         """Create a simple embed.
 
@@ -208,7 +208,7 @@ class Admin(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="set_shout_count")
-    @is_admin()
+    @is_operator()
     async def set_shout_count(
         self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember], count: int
     ):
@@ -367,7 +367,7 @@ class Admin(commands.Cog):
         await ctx.reply(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     @commands.hybrid_group(name="honourary")
-    @is_admin()
+    @is_operator()
     async def honourary(self, ctx: commands.Context):
         """Manage honourary bridge access"""
         if ctx.invoked_subcommand is None:

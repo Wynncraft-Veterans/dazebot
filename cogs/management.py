@@ -395,6 +395,7 @@ class Management(commands.Cog):
         ]
     )
     async def force_change(self, ctx: commands.Context, target: str, transition: str):
+        await ctx.defer()
         member, mc = await self._resolve_target(ctx, target)
         if member is None:
             await ctx.reply(f"`{target}` is not in the discord server.")

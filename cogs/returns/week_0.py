@@ -82,6 +82,14 @@ async def _add_to_cult_thread(bot, cult_name: str, discord_id: int) -> None:
         await thread.add_user(discord.Object(id=discord_id))
     except discord.HTTPException as e:
         logger.warning("add_user(%s) on thread %s failed: %s", discord_id, thread_id, e)
+        return
+    try:
+        await thread.send(
+            f"<@{discord_id}> joined {cult_name}",
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+    except discord.HTTPException as e:
+        logger.warning("welcome msg in thread %s failed: %s", thread_id, e)
 
 
 async def _remove_from_cult_thread(bot, cult_name: str, discord_id: int) -> None:

@@ -375,6 +375,34 @@ async def do_force_join_by_name(
     await ctx.reply(f"✅ Force-moved {target.mention} {note}to `{cult_name}`.")
 
 
+async def _do_announce(ctx: commands.Context, message: str) -> None:
+    if not _is_admin_or_higher(ctx.author):
+        await ctx.reply("You need Administrator to broadcast to cult threads.", ephemeral=True)
+        return
+
+    await ctx.defer(ephemeral=True)
+    sent = failed = missing = 0
+    for cult_name, thread_id in CULT_THREADS.items():
+        thread = await _resolve_thread(ctx.bot, thread_id)
+        if thread is None:
+            missing += 1
+            continue
+        try:
+            await thread.send(
+                message,
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            )
+            sent += 1
+        except discord.HTTPException as e:
+            logger.warning("announce: send to thread %s (%s) failed: %s", thread_id, cult_name, e)
+            failed += 1
+
+    await ctx.reply(
+        f"✅ Sent to {sent} thread(s). ({failed} failed, {missing} unresolved)",
+        ephemeral=True,
+    )
+
+
 async def _username_for_disc(bot, disc: DiscordAccount) -> str:
     """In-game username for a cult member, or a best-effort Discord fallback
     if they're not linked.
@@ -447,16 +475,25 @@ async def handle(
     cult: Optional[str] = None,
     owner: Optional[str] = None,
     target: Optional[discord.Member] = None,
+    message: Optional[str] = None,
     **kwargs,
 ) -> None:
     if action is None:
         await ctx.reply(
-            "Usage: `/return 0 <join|add|list|force> <cult> [owner|target]`",
+            "Usage: `/return 0 <join|add|list|force|announce> [cult] [owner|target|message]`",
             ephemeral=True,
         )
         return
 
     action = action.lower()
+
+    if action == "announce":
+        if not message:
+            await ctx.reply("`announce` requires a `message`.", ephemeral=True)
+            return
+        await _do_announce(ctx, message)
+        return
+
     if not cult:
         await ctx.reply(f"`{action}` requires a cult name.", ephemeral=True)
         return
@@ -477,6 +514,6 @@ async def handle(
         await do_force_join_by_name(ctx, target, cult)
     else:
         await ctx.reply(
-            f"Unknown action `{action}`. Use `join`, `add`, `list`, or `force`.",
+            f"Unknown action `{action}`. Use `join`, `add`, `list`, `force`, or `announce`.",
             ephemeral=True,
         )

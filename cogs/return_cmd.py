@@ -40,6 +40,7 @@ class Returns(commands.Cog):
         cult: Optional[str] = None,
         owner: Optional[str] = None,
         target: Optional[discord.Member] = None,
+        message: Optional[str] = None,
         flag: bool = False,
         # Future stubs — append optional params with defaults so existing
         # invocations keep working. Forwarded to per-week handlers as kwargs.
@@ -48,7 +49,9 @@ class Returns(commands.Cog):
     ):
         """Dispatch to the week-`id` `/return` handler."""
         await returns.dispatch(
-            ctx, id, flag=flag, action=action, cult=cult, owner=owner, target=target,
+            ctx, id,
+            flag=flag, action=action, cult=cult, owner=owner,
+            target=target, message=message,
         )
 
     @commands.hybrid_command(

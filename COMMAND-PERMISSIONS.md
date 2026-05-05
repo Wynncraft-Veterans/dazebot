@@ -123,11 +123,12 @@ Special, non-hierarchical:
 
 | Command | Tier | Notes |
 |---|---|---|
-| `/return <id> [action] [cult] [owner] [target] [flag]` | PUBLIC (per-action gates inside the handler) | Dispatches to the week-`id` handler in `cogs/returns/week_<id>.py`. Signature is intentionally expandable — append optional kwargs as features land. |
+| `/return <id> [action] [cult] [owner] [target] [message] [flag]` | PUBLIC (per-action gates inside the handler) | Dispatches to the week-`id` handler in `cogs/returns/week_<id>.py`. Signature is intentionally expandable — append optional kwargs as features land. |
 | `/return 0 join <cult>` | REGISTERED | Switch the caller's active cult (mutually exclusive teams). 6-month self-switch cooldown. |
 | `/return 0 add <cult> <owner>` | ADMIN | Create a cult; `owner` is a Discord mention/id, MC username, or MC UUID. |
 | `/return 0 list <cult>` | REGISTERED | Print figurehead + staff + members for a cult. |
 | `/return 0 force <cult> target:<user>` | STAFF | Staff override: move a user to a cult, ignoring the self-switch cooldown. Figurehead exclusion still enforced. |
+| `/return 0 announce message:<text>` | ADMIN | Broadcast `message` to every cult thread via the bot. User mentions only (no role/@everyone). |
 | `/joincult <cult>` | REGISTERED | Shortcut for `/return 0 join`. Slash autocomplete lists every existing cult. |
 
 ## Background / listener-only cogs (no slash surface)

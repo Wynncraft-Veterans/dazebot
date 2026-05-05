@@ -118,6 +118,12 @@ Special, non-hierarchical:
 |---|---|---|
 | `/randomfact` | PUBLIC | |
 
+### Returns — `cogs/return_cmd.py` (+ `cogs/returns/` package)
+
+| Command | Tier | Notes |
+|---|---|---|
+| `/return <id> [flag]` | PUBLIC | Dispatches to the week-`id` handler in `cogs/returns/week_<id>.py`. Signature is intentionally expandable — append optional kwargs as features land. |
+
 ## Background / listener-only cogs (no slash surface)
 
 * `cogs/api.py` — empty stub (was `/joindate`, merged into `/info`).

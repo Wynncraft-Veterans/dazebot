@@ -37,7 +37,6 @@ class Pointless(commands.Cog):
             logger.exception(f"Random fact is borked: {e}")
             await ctx.send("Random fact broke.")
 
-
 async def setup(bot: Bot):
     await bot.add_cog(Pointless(bot))
     logger.info("Loaded Fun")

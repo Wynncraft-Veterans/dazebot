@@ -93,6 +93,12 @@ class Bot(commands.Bot):
             await ctx.send(f"❌ Invalid argument: {error}")
         elif isinstance(error, commands.MissingRequiredArgument):
             await ctx.send(f"❌ Missing argument: {error.param.name}")
+        elif isinstance(error, commands.ArgumentParsingError):
+            await ctx.send(
+                f"❌ Couldn't parse arguments: {error}\n"
+                "Tip: prefix commands are positional — `name:value` syntax only works "
+                "in the slash form (e.g. `/return action:announce message:hello world`)."
+            )
         elif isinstance(error, commands.CommandNotFound):
             pass
         else:

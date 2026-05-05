@@ -95,6 +95,8 @@ class Admin(commands.Cog):
     @commands.hybrid_command(name="say")
     @is_admin()
     async def say(self, ctx: commands.Context, *, msg: str):
+        # Slash-modal fields can't carry real newlines; allow literal \n.
+        msg = msg.replace("\\n", "\n")
         if msg:
             await ctx.send(msg)
         else:
@@ -193,6 +195,11 @@ class Admin(commands.Cog):
                     await ctx.send("Invalid color. Use hex (e.g., #ff0000) or a named color like 'blue'.")
                     return
 
+        # Slash-modal fields can't carry real newlines; allow literal \n.
+        if title is not None:
+            title = title.replace("\\n", "\n")
+        if description is not None:
+            description = description.replace("\\n", "\n")
         embed = discord.Embed(title=title, description=description, color=col)
         await ctx.send(embed=embed)
 

@@ -381,6 +381,9 @@ async def _do_announce(ctx: commands.Context, message: str) -> None:
         return
 
     await ctx.defer(ephemeral=True)
+    # Slash-modal text fields can't carry actual newlines, so admins can type
+    # the literal two characters \n where they want a line break.
+    text = message.replace("\\n", "\n")
     sent = failed = missing = 0
     for cult_name, thread_id in CULT_THREADS.items():
         thread = await _resolve_thread(ctx.bot, thread_id)
@@ -389,7 +392,7 @@ async def _do_announce(ctx: commands.Context, message: str) -> None:
             continue
         try:
             await thread.send(
-                message,
+                text,
                 allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
             )
             sent += 1

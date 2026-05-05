@@ -39,6 +39,7 @@ class Returns(commands.Cog):
         action: Optional[str] = None,
         cult: Optional[str] = None,
         owner: Optional[str] = None,
+        target: Optional[discord.Member] = None,
         flag: bool = False,
         # Future stubs — append optional params with defaults so existing
         # invocations keep working. Forwarded to per-week handlers as kwargs.
@@ -46,7 +47,9 @@ class Returns(commands.Cog):
         # note: str = "",
     ):
         """Dispatch to the week-`id` `/return` handler."""
-        await returns.dispatch(ctx, id, flag=flag, action=action, cult=cult, owner=owner)
+        await returns.dispatch(
+            ctx, id, flag=flag, action=action, cult=cult, owner=owner, target=target,
+        )
 
     @commands.hybrid_command(
         name="joincult",
@@ -62,17 +65,20 @@ class Returns(commands.Cog):
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        rows = await Cult.all().limit(50)
-        q = current.lower()
-        choices: list[app_commands.Choice[str]] = []
-        for c in rows:
-            if q and q not in c.name:
-                continue
-            label = c.name.capitalize()
-            choices.append(app_commands.Choice(name=label, value=c.name))
-            if len(choices) >= 25:  # Discord caps autocomplete at 25
-                break
-        return choices
+        return await _cult_choices(current)
+
+
+async def _cult_choices(current: str) -> list[app_commands.Choice[str]]:
+    rows = await Cult.all().limit(50)
+    q = current.lower()
+    choices: list[app_commands.Choice[str]] = []
+    for c in rows:
+        if q and q not in c.name:
+            continue
+        choices.append(app_commands.Choice(name=c.name.capitalize(), value=c.name))
+        if len(choices) >= 25:  # Discord caps autocomplete at 25
+            break
+    return choices
 
 
 async def setup(bot: Bot):

@@ -17,6 +17,7 @@ the case-insensitive guard. Mutual exclusivity is enforced by the
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import discord
@@ -260,6 +261,34 @@ async def _do_add(ctx: commands.Context, cult_name: str, owner: str) -> None:
     await ctx.reply(f"✅ Created cult `{cult_name}` with figurehead `{mc.mc_username}`.")
 
 
+# Self-switch gate: a user can move themselves between cults at most once
+# every SELF_SWITCH_COOLDOWN. Force-moves by staff bypass this entirely.
+SELF_SWITCH_COOLDOWN = timedelta(days=180)
+
+
+async def _switch_membership(
+    bot,
+    disc: DiscordAccount,
+    discord_id: int,
+    cult: Cult,
+    existing: Optional[CultMembership],
+) -> Optional[str]:
+    """Apply a cult switch: rewrite the CultMembership row and sync threads.
+    Returns the previous cult's name (or ``None`` if first-time join).
+    """
+    prev_cult_name: Optional[str] = None
+    if existing is not None:
+        prev_cult = await Cult.get(id=existing.cult_id)
+        prev_cult_name = prev_cult.name
+        await existing.delete()
+    await CultMembership.create(cult=cult, discord_account=disc)
+
+    if prev_cult_name and prev_cult_name != cult.name:
+        await _remove_from_cult_thread(bot, prev_cult_name, discord_id)
+    await _add_to_cult_thread(bot, cult.name, discord_id)
+    return prev_cult_name
+
+
 async def do_join_by_name(ctx: commands.Context, cult_name: str) -> None:
     """Public entry-point reused by the `/joincult` shortcut."""
     await _do_join(ctx, cult_name)
@@ -287,21 +316,63 @@ async def _do_join(ctx: commands.Context, cult_name: str) -> None:
             return
 
     existing = await CultMembership.filter(discord_account=disc).first()
-    prev_cult_name: Optional[str] = None
     if existing is not None:
         if existing.cult_id == cult.id:
             await ctx.reply(f"You are already in `{cult_name}`.", ephemeral=True)
             return
-        prev_cult = await Cult.get(id=existing.cult_id)
-        prev_cult_name = prev_cult.name
-        await existing.delete()
-    await CultMembership.create(cult=cult, discord_account=disc)
+        elapsed = datetime.now(timezone.utc) - existing.joined_at
+        if elapsed < SELF_SWITCH_COOLDOWN:
+            remaining = SELF_SWITCH_COOLDOWN - elapsed
+            days = max(1, remaining.days + (1 if remaining.seconds else 0))
+            await ctx.reply(
+                f"You can switch cults again in ~{days} day(s). "
+                "Ask staff for a force-move if you need it sooner.",
+                ephemeral=True,
+            )
+            return
 
-    if prev_cult_name and prev_cult_name != cult.name:
-        await _remove_from_cult_thread(ctx.bot, prev_cult_name, ctx.author.id)
-    await _add_to_cult_thread(ctx.bot, cult.name, ctx.author.id)
-
+    await _switch_membership(ctx.bot, disc, ctx.author.id, cult, existing)
     await ctx.reply(f"✅ Joined `{cult_name}`.")
+
+
+async def do_force_join_by_name(
+    ctx: commands.Context,
+    target: discord.Member,
+    cult_name: str,
+) -> None:
+    """Staff entry-point: move ``target`` to ``cult_name`` regardless of
+    cooldown. Figurehead exclusion is still enforced because that rule is
+    permanent, not a cooldown.
+    """
+    if not (_is_operator(ctx.author) or _has_admin_perm(ctx.author) or _has_staff_role(ctx.author)):
+        await ctx.reply("You need staff to force-move someone's cult.", ephemeral=True)
+        return
+
+    cult = await Cult.filter(name=cult_name.lower()).first()
+    if cult is None:
+        await ctx.reply(f"No cult named `{cult_name}`.", ephemeral=True)
+        return
+
+    disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(target.id))
+
+    if disc.minecraft_account_id is not None:
+        owned = await Cult.filter(owner_id=disc.minecraft_account_id).first()
+        if owned is not None:
+            await ctx.reply(
+                f"{target.mention} is the figurehead of `{owned.name}`; "
+                "figureheads can't be placed in any cult's thread.",
+                ephemeral=True,
+            )
+            return
+
+    existing = await CultMembership.filter(discord_account=disc).first()
+    if existing is not None and existing.cult_id == cult.id:
+        await ctx.reply(f"{target.mention} is already in `{cult_name}`.", ephemeral=True)
+        return
+
+    prev = await _switch_membership(ctx.bot, disc, target.id, cult, existing)
+    note = f"from `{prev}` " if prev else ""
+    await ctx.reply(f"✅ Force-moved {target.mention} {note}to `{cult_name}`.")
 
 
 async def _username_for_disc(bot, disc: DiscordAccount) -> str:
@@ -375,11 +446,12 @@ async def handle(
     action: Optional[str] = None,
     cult: Optional[str] = None,
     owner: Optional[str] = None,
+    target: Optional[discord.Member] = None,
     **kwargs,
 ) -> None:
     if action is None:
         await ctx.reply(
-            "Usage: `/return 0 <join|add|list> <cult> [owner]`",
+            "Usage: `/return 0 <join|add|list|force> <cult> [owner|target]`",
             ephemeral=True,
         )
         return
@@ -398,5 +470,13 @@ async def handle(
         await _do_add(ctx, cult, owner)
     elif action == "list":
         await _do_list(ctx, cult)
+    elif action == "force":
+        if target is None:
+            await ctx.reply("`force` requires a `target` user.", ephemeral=True)
+            return
+        await do_force_join_by_name(ctx, target, cult)
     else:
-        await ctx.reply(f"Unknown action `{action}`. Use `join`, `add`, or `list`.", ephemeral=True)
+        await ctx.reply(
+            f"Unknown action `{action}`. Use `join`, `add`, `list`, or `force`.",
+            ephemeral=True,
+        )

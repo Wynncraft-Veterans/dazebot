@@ -45,6 +45,98 @@ from orm import (
 logger = logging.getLogger("dazebot.cogs.returns.week_0")
 
 
+# Cult name (lowercased) -> private thread id under channel 1313786225735237654.
+# Bot needs Manage Messages (or Manage Threads) on the parent to add/remove
+# non-invited members on private threads.
+CULT_THREADS: dict[str, int] = {
+    "wencult":    1501233308284092546,
+    "dazecult":   1501233117829140480,
+    "nazcult":    1501233190285738115,
+    "fishcult":   1501232813943292026,
+    "brycult":    1501233371802767420,
+    "xandercult": 1501233419135221860,
+}
+
+
+async def _resolve_thread(bot, thread_id: int) -> Optional[discord.Thread]:
+    ch = bot.get_channel(thread_id)
+    if isinstance(ch, discord.Thread):
+        return ch
+    try:
+        ch = await bot.fetch_channel(thread_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+        logger.warning("cult thread %s not fetchable: %s", thread_id, e)
+        return None
+    return ch if isinstance(ch, discord.Thread) else None
+
+
+async def _add_to_cult_thread(bot, cult_name: str, discord_id: int) -> None:
+    thread_id = CULT_THREADS.get(cult_name.lower())
+    if thread_id is None:
+        logger.debug("no thread mapped for cult %r; skipping add", cult_name)
+        return
+    thread = await _resolve_thread(bot, thread_id)
+    if thread is None:
+        return
+    try:
+        await thread.add_user(discord.Object(id=discord_id))
+    except discord.HTTPException as e:
+        logger.warning("add_user(%s) on thread %s failed: %s", discord_id, thread_id, e)
+
+
+async def _remove_from_cult_thread(bot, cult_name: str, discord_id: int) -> None:
+    thread_id = CULT_THREADS.get(cult_name.lower())
+    if thread_id is None:
+        return
+    thread = await _resolve_thread(bot, thread_id)
+    if thread is None:
+        return
+    try:
+        await thread.remove_user(discord.Object(id=discord_id))
+    except discord.HTTPException as e:
+        # 404 here is normal (user wasn't in the thread); log at debug.
+        if isinstance(e, discord.NotFound):
+            logger.debug("remove_user(%s) on thread %s: not a member", discord_id, thread_id)
+        else:
+            logger.warning("remove_user(%s) on thread %s failed: %s", discord_id, thread_id, e)
+
+
+async def backfill_cult_threads(bot) -> None:
+    """Walk every CultMembership row and ensure each member is in their cult's
+    thread. Idempotent: re-adding a member is a no-op on Discord's side.
+    """
+    rows = await CultMembership.all().prefetch_related("cult", "discord_account")
+    added = failed = skipped = 0
+    for m in rows:
+        try:
+            disc_id = int(m.discord_account.disc_uuid)
+        except ValueError:
+            skipped += 1
+            continue
+        cult_name = m.cult.name
+        thread_id = CULT_THREADS.get(cult_name.lower())
+        if thread_id is None:
+            skipped += 1
+            continue
+        thread = await _resolve_thread(bot, thread_id)
+        if thread is None:
+            failed += 1
+            continue
+        try:
+            await thread.add_user(discord.Object(id=disc_id))
+            added += 1
+        except discord.HTTPException as e:
+            logger.warning(
+                "backfill: add_user(%s) on thread %s (%s) failed: %s",
+                disc_id, thread_id, cult_name, e,
+            )
+            failed += 1
+    logger.info(
+        "cult thread backfill: total=%d added=%d failed=%d skipped=%d",
+        len(rows), added, failed, skipped,
+    )
+
+
 def _is_admin_or_higher(user: discord.abc.User) -> bool:
     return _is_operator(user) or _has_admin_perm(user)
 
@@ -149,12 +241,19 @@ async def _do_join(ctx: commands.Context, cult_name: str) -> None:
             return
 
     existing = await CultMembership.filter(discord_account=disc).first()
+    prev_cult_name: Optional[str] = None
     if existing is not None:
         if existing.cult_id == cult.id:
             await ctx.reply(f"You are already in `{cult_name}`.", ephemeral=True)
             return
+        prev_cult = await Cult.get(id=existing.cult_id)
+        prev_cult_name = prev_cult.name
         await existing.delete()
     await CultMembership.create(cult=cult, discord_account=disc)
+
+    if prev_cult_name and prev_cult_name != cult.name:
+        await _remove_from_cult_thread(ctx.bot, prev_cult_name, ctx.author.id)
+    await _add_to_cult_thread(ctx.bot, cult.name, ctx.author.id)
 
     await ctx.reply(f"✅ Joined `{cult_name}`.")
 

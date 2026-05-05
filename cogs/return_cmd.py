@@ -7,7 +7,7 @@ from discord.ext import commands
 
 from bot import Bot
 from cogs import returns
-from cogs.returns.week_0 import do_join_by_name
+from cogs.returns.week_0 import backfill_cult_threads, do_join_by_name
 from orm import Cult
 
 logger = logging.getLogger("dazebot.cogs.return_cmd")
@@ -19,6 +19,17 @@ class Returns(commands.Cog):
     def __init__(self, bot: Bot):
         self.bot = bot
         logger.info("Initialized Returns")
+
+    async def cog_load(self) -> None:
+        # Threads need the gateway-cached parent channel; wait for ready.
+        self.bot.loop.create_task(self._run_thread_backfill())
+
+    async def _run_thread_backfill(self) -> None:
+        await self.bot.wait_until_ready()
+        try:
+            await backfill_cult_threads(self.bot)
+        except Exception:
+            logger.exception("cult thread backfill failed")
 
     @commands.hybrid_command(name="return")
     async def return_cmd(

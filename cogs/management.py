@@ -263,7 +263,8 @@ class Management(commands.Cog):
     async def script_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
             await ctx.reply(
-                "Available scripts: `/script edit_welcome <channel> <message_id>`."
+                "Available scripts: `/script edit_welcome <channel> <message_id>`, "
+                "`/script rename_cult`."
             )
 
     @script_group.command(
@@ -314,6 +315,31 @@ class Management(commands.Cog):
             return
 
         await ctx.reply(f"\u2705 Edited {msg.jump_url}.", ephemeral=True)
+
+    @script_group.command(
+        name="rename_cult",
+        description="(Operator) One-off: rename the `dazecult` row to `deercult`.",
+    )
+    @is_operator()
+    async def script_rename_cult(self, ctx: commands.Context):
+        from orm import Cult
+
+        await ctx.defer(ephemeral=True)
+        old, new = "dazecult", "deercult"
+        if await Cult.filter(name=new).exists():
+            await ctx.reply(f"\u274c `{new}` already exists; aborting.", ephemeral=True)
+            return
+        cult = await Cult.filter(name=old).first()
+        if cult is None:
+            await ctx.reply(f"\u274c No cult named `{old}` to rename.", ephemeral=True)
+            return
+        cult.name = new
+        await cult.save(update_fields=["name"])
+        await ctx.reply(
+            f"\u2705 Renamed `{old}` \u2192 `{new}`. "
+            "Remember to update `CULT_THREADS` in `cogs/returns/week_0.py` to match.",
+            ephemeral=True,
+        )
 
     # =================================================================
     # BLOCK / UNBLOCK

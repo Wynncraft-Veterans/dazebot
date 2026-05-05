@@ -61,6 +61,7 @@ Special, non-hierarchical:
 |---|---|---|
 | `/first_install [channel] [quote_message_id]` | OPERATOR | Posts the welcome embed + “Link Minecraft” button; wipes legacy/vanity roles |
 | `/script edit_welcome <channel> <message_id>` | OPERATOR | Rewrites a previously-posted welcome message |
+| `/script rename_cult` | OPERATOR | One-off: renames the `dazecult` DB row to `deercult` |
 | `/block <target> [reason]` | STAFF | Single command (no subgroup) |
 | `/unblock <target>` | STAFF | |
 | `/force change <target> <transition>` | ADMIN | Currently only `registered → hiatus` |

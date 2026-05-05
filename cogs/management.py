@@ -441,62 +441,6 @@ class Management(commands.Cog):
         await ctx.reply("\u2705 Guild check completed.")
 
     # =================================================================
-    # ADD (alt linking)
-    # =================================================================
-
-    @commands.hybrid_command(
-        name="add",
-        description="(Staff) Register an alt Minecraft account for a Discord user.",
-    )
-    @is_staff()
-    async def add_alt(
-        self,
-        ctx: commands.Context,
-        username: str,
-        user: Annotated[discord.Member, CaseInsensitiveMember],
-    ):
-        mc = await _ensure_mc_account(username)
-        disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(user.id))
-
-        # If they don't have a primary linked yet, treat /add as a primary link.
-        if disc.minecraft_account_id is None:
-            disc.minecraft_account = mc
-            await disc.save(update_fields=["minecraft_account_id"])
-            await ctx.reply(
-                f"\u2139\ufe0f {user.mention} had no primary account; set `{mc.mc_username}` as primary instead.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-
-        if disc.minecraft_account_id == mc.id:
-            await ctx.reply(
-                f"`{mc.mc_username}` is already the primary account for {user.mention}.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-
-        existing_alt = await MinecraftAlt.filter(discord_account=disc, minecraft_account=mc).first()
-        if existing_alt is not None:
-            await ctx.reply(f"`{mc.mc_username}` is already an alt of {user.mention}.")
-            return
-
-        # Refuse if the alt is someone else's primary.
-        other_primary = await DiscordAccount.filter(minecraft_account_id=mc.id).exclude(id=disc.id).first()
-        if other_primary is not None:
-            other = await self.bot.fetch_user(int(other_primary.disc_uuid))
-            await ctx.reply(
-                f"`{mc.mc_username}` is already the primary for {other.mention}. Cannot also be {user.mention}'s alt.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-
-        await MinecraftAlt.create(discord_account=disc, minecraft_account=mc)
-        await ctx.reply(
-            f"\u2705 Added `{mc.mc_username}` as an alt of {user.mention}.",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-
-    # =================================================================
     # VANITY (self + staff)
     # =================================================================
 

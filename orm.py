@@ -268,6 +268,45 @@ class DMSentLog(Model):
         unique_together = (("disc_uuid", "kind"),)
 
 
+class Cult(Model):
+    """A `/return 0` cult: a mutually-exclusive team a Discord user can join.
+
+    The owner ("figurehead") is a MinecraftAccount, identified by an
+    in-game username or UUID at creation time.
+    """
+
+    id = fields.UUIDField(pk=True)
+    # Stored lowercased so unique=True doubles as a case-insensitive guard.
+    name = fields.CharField(max_length=64, unique=True)
+    owner: fields.ForeignKeyRelation[MinecraftAccount] = fields.ForeignKeyField(
+        "models.MinecraftAccount", related_name="owned_cults", on_delete=fields.RESTRICT
+    )
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    memberships: fields.ReverseRelation[CultMembership]
+
+    class Meta:
+        table = "cults"
+
+
+class CultMembership(Model):
+    """A Discord user's active cult. Mutually exclusive: at most one row per
+    DiscordAccount, enforced by ``unique=True`` on ``discord_account``.
+    """
+
+    id = fields.UUIDField(pk=True)
+    cult: fields.ForeignKeyRelation[Cult] = fields.ForeignKeyField(
+        "models.Cult", related_name="memberships", on_delete=fields.CASCADE
+    )
+    discord_account: fields.ForeignKeyRelation[DiscordAccount] = fields.ForeignKeyField(
+        "models.DiscordAccount", related_name="cult_membership", on_delete=fields.CASCADE, unique=True
+    )
+    joined_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "cult_memberships"
+
+
 class LinkCode(Model):
     """A persistent (until consumed) Minecraft<->Discord link code.
 

@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 from discord.ext import commands
 
@@ -20,6 +21,9 @@ class Returns(commands.Cog):
         self,
         ctx: commands.Context,
         id: commands.Range[int, 0, 32767],
+        action: Optional[str] = None,
+        cult: Optional[str] = None,
+        owner: Optional[str] = None,
         flag: bool = False,
         # Future stubs — append optional params with defaults so existing
         # invocations keep working. Forwarded to per-week handlers as kwargs.
@@ -27,7 +31,7 @@ class Returns(commands.Cog):
         # note: str = "",
     ):
         """Dispatch to the week-`id` `/return` handler."""
-        await returns.dispatch(ctx, id, flag=flag)
+        await returns.dispatch(ctx, id, flag=flag, action=action, cult=cult, owner=owner)
 
 
 async def setup(bot: Bot):

@@ -122,7 +122,10 @@ Special, non-hierarchical:
 
 | Command | Tier | Notes |
 |---|---|---|
-| `/return <id> [flag]` | PUBLIC | Dispatches to the week-`id` handler in `cogs/returns/week_<id>.py`. Signature is intentionally expandable — append optional kwargs as features land. |
+| `/return <id> [action] [cult] [owner] [flag]` | PUBLIC (per-action gates inside the handler) | Dispatches to the week-`id` handler in `cogs/returns/week_<id>.py`. Signature is intentionally expandable — append optional kwargs as features land. |
+| `/return 0 join <cult>` | REGISTERED | Switch the caller's active cult (mutually exclusive teams). |
+| `/return 0 add <cult> <owner>` | ADMIN | Create a cult; `owner` is a Discord mention/id, MC username, or MC UUID. |
+| `/return 0 list <cult>` | REGISTERED | Print figurehead + staff + members for a cult. |
 
 ## Background / listener-only cogs (no slash surface)
 

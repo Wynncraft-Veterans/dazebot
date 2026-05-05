@@ -1,10 +1,14 @@
 import logging
 from typing import Optional
 
+import discord
+from discord import app_commands
 from discord.ext import commands
 
 from bot import Bot
 from cogs import returns
+from cogs.returns.week_0 import do_join_by_name
+from orm import Cult
 
 logger = logging.getLogger("dazebot.cogs.return_cmd")
 
@@ -32,6 +36,32 @@ class Returns(commands.Cog):
     ):
         """Dispatch to the week-`id` `/return` handler."""
         await returns.dispatch(ctx, id, flag=flag, action=action, cult=cult, owner=owner)
+
+    @commands.hybrid_command(
+        name="joincult",
+        description="Join a cult (mutually exclusive). Shortcut for /return 0 join.",
+    )
+    @app_commands.describe(cult="The cult to join. Pick from the dropdown.")
+    async def joincult(self, ctx: commands.Context, cult: str):
+        await do_join_by_name(ctx, cult)
+
+    @joincult.autocomplete("cult")
+    async def _joincult_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        rows = await Cult.all().limit(50)
+        q = current.lower()
+        choices: list[app_commands.Choice[str]] = []
+        for c in rows:
+            if q and q not in c.name:
+                continue
+            label = c.name.capitalize()
+            choices.append(app_commands.Choice(name=label, value=c.name))
+            if len(choices) >= 25:  # Discord caps autocomplete at 25
+                break
+        return choices
 
 
 async def setup(bot: Bot):

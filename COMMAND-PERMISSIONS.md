@@ -126,6 +126,7 @@ Special, non-hierarchical:
 | `/return 0 join <cult>` | REGISTERED | Switch the caller's active cult (mutually exclusive teams). |
 | `/return 0 add <cult> <owner>` | ADMIN | Create a cult; `owner` is a Discord mention/id, MC username, or MC UUID. |
 | `/return 0 list <cult>` | REGISTERED | Print figurehead + staff + members for a cult. |
+| `/joincult <cult>` | REGISTERED | Shortcut for `/return 0 join`. Slash autocomplete lists every existing cult. |
 
 ## Background / listener-only cogs (no slash surface)
 

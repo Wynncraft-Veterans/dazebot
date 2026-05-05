@@ -122,6 +122,11 @@ async def _do_add(ctx: commands.Context, cult_name: str, owner: str) -> None:
     await ctx.reply(f"✅ Created cult `{cult_name}` with figurehead `{mc.mc_username}`.")
 
 
+async def do_join_by_name(ctx: commands.Context, cult_name: str) -> None:
+    """Public entry-point reused by the `/joincult` shortcut."""
+    await _do_join(ctx, cult_name)
+
+
 async def _do_join(ctx: commands.Context, cult_name: str) -> None:
     if not _is_registered_or_higher(ctx.author):
         await ctx.reply("You need to be registered to join a cult.", ephemeral=True)

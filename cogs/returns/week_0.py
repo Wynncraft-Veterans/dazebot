@@ -112,10 +112,22 @@ async def _remove_from_cult_thread(bot, cult_name: str, discord_id: int) -> None
 async def backfill_cult_threads(bot) -> None:
     """Walk every CultMembership row and ensure each member is in their cult's
     thread. Idempotent: re-adding a member is a no-op on Discord's side.
+
+    Figureheads are excluded everywhere: any stale CultMembership row whose
+    owner is the figurehead of *any* cult is deleted, and we sweep each
+    figurehead out of every cult thread in case they were added before this
+    rule existed.
     """
+    figurehead_mc_ids = set(await Cult.all().values_list("owner_id", flat=True))
+
     rows = await CultMembership.all().prefetch_related("cult", "discord_account")
-    added = failed = skipped = 0
+    added = failed = skipped = pruned = 0
     for m in rows:
+        mc_id = m.discord_account.minecraft_account_id
+        if mc_id is not None and mc_id in figurehead_mc_ids:
+            await m.delete()
+            pruned += 1
+            continue
         try:
             disc_id = int(m.discord_account.disc_uuid)
         except ValueError:
@@ -139,9 +151,35 @@ async def backfill_cult_threads(bot) -> None:
                 disc_id, thread_id, cult_name, e,
             )
             failed += 1
+
+    swept = 0
+    if figurehead_mc_ids:
+        threads = {cn: await _resolve_thread(bot, tid) for cn, tid in CULT_THREADS.items()}
+        figurehead_discs = await DiscordAccount.filter(
+            minecraft_account_id__in=list(figurehead_mc_ids)
+        )
+        for disc in figurehead_discs:
+            try:
+                fdid = int(disc.disc_uuid)
+            except ValueError:
+                continue
+            for cn, thread in threads.items():
+                if thread is None:
+                    continue
+                try:
+                    await thread.remove_user(discord.Object(id=fdid))
+                    swept += 1
+                except discord.NotFound:
+                    pass  # not in this thread — expected for most
+                except discord.HTTPException as e:
+                    logger.debug(
+                        "figurehead sweep remove(%s, %s) failed: %s", fdid, cn, e,
+                    )
+
     logger.info(
-        "cult thread backfill: total=%d added=%d failed=%d skipped=%d",
-        len(rows), added, failed, skipped,
+        "cult thread backfill: total=%d added=%d failed=%d skipped=%d "
+        "pruned_figureheads=%d swept_figurehead_thread_memberships=%d",
+        len(rows), added, failed, skipped, pruned, swept,
     )
 
 
@@ -241,9 +279,9 @@ async def _do_join(ctx: commands.Context, cult_name: str) -> None:
 
     if disc.minecraft_account_id is not None:
         owned = await Cult.filter(owner_id=disc.minecraft_account_id).first()
-        if owned is not None and owned.id != cult.id:
+        if owned is not None:
             await ctx.reply(
-                f"You are the figurehead of `{owned.name}` and can't join another cult.",
+                f"You are the figurehead of `{owned.name}` — figureheads can't join cult threads.",
                 ephemeral=True,
             )
             return

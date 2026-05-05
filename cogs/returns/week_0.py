@@ -50,7 +50,7 @@ logger = logging.getLogger("dazebot.cogs.returns.week_0")
 # non-invited members on private threads.
 CULT_THREADS: dict[str, int] = {
     "wencult":    1501233308284092546,
-    "dazecult":   1501233117829140480,
+    "deercult":   1501233117829140480,
     "nazcult":    1501233190285738115,
     "fishcult":   1501232813943292026,
     "brycult":    1501233371802767420,

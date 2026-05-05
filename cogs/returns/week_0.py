@@ -139,6 +139,15 @@ async def _do_join(ctx: commands.Context, cult_name: str) -> None:
 
     disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
 
+    if disc.minecraft_account_id is not None:
+        owned = await Cult.filter(owner_id=disc.minecraft_account_id).first()
+        if owned is not None and owned.id != cult.id:
+            await ctx.reply(
+                f"You are the figurehead of `{owned.name}` and can't join another cult.",
+                ephemeral=True,
+            )
+            return
+
     existing = await CultMembership.filter(discord_account=disc).first()
     if existing is not None:
         if existing.cult_id == cult.id:
@@ -183,23 +192,32 @@ async def _do_list(ctx: commands.Context, cult_name: str) -> None:
     for m in memberships:
         disc = m.discord_account
         username = await _username_for_disc(ctx.bot, disc)
-        member_names.append(username)
+        is_staff = False
         if guild is not None:
             try:
                 discord_id = int(disc.disc_uuid)
             except ValueError:
-                continue
-            member = guild.get_member(discord_id)
-            if member is not None and any(r.id == staff_role_id for r in member.roles):
-                staff_names.append(username)
+                discord_id = None
+            if discord_id is not None:
+                member = guild.get_member(discord_id)
+                if member is not None and any(r.id == staff_role_id for r in member.roles):
+                    is_staff = True
+        if is_staff:
+            staff_names.append(username)
+        else:
+            member_names.append(username)
 
     figurehead = cult.owner.mc_username
     title = cult_name.capitalize()
+
+    def fmt(names: list[str]) -> str:
+        return ", ".join(f"`{n}`" for n in names) if names else "(none)"
+
     lines = [
         f"# {title} Members:",
-        f"Figurehead: {figurehead}",
-        f"Staff: {', '.join(staff_names) if staff_names else '(none)'}",
-        f"Members: {', '.join(member_names) if member_names else '(none)'}",
+        f"Figurehead: `{figurehead}`",
+        f"Staff: {fmt(staff_names)}",
+        f"Members: {fmt(member_names)}",
     ]
     await ctx.reply("\n".join(lines))
 

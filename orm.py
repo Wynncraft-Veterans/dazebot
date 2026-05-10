@@ -337,8 +337,9 @@ class VerifyKey(Model):
     dazebot's ``POST /api/auth/introspect``.
 
     One row per Discord user. Re-running ``/vetsmod`` returns the same key
-    (analogous to ``LinkCode`` reuse). Staff can revoke via ``/vetsmod revoke``,
-    which sets ``revoked_at`` and causes future introspections to fail.
+    (analogous to ``LinkCode`` reuse). Staff can revoke via ``/change remove
+    key`` (or rotate via ``/change rotate key``); revocation sets
+    ``revoked_at`` and causes future introspections to fail.
 
     The ``tier`` and ``mc_uuid`` columns are a *snapshot at last refresh*. They
     are re-resolved against current Discord roles + linked MC account on every

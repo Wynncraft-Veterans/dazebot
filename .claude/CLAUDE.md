@@ -53,7 +53,7 @@ dazebot/                 (repo root)
     returns/           Per-week return cogs
     utility.py         Misc utility commands
     vanity_roles.py    Self-assignable year/date roles
-    vetsmod.py         /vetsmod, /vetsmod rotate, /vetsmod revoke + DM-or-fallback view
+    vetsmod.py         /vetsmod (self-issue), /change remove|rotate key (staff), DM-or-fallback view
     weekly_event.py    Weekly event scheduling
   lib/
     auth.py            is_admin, is_staff, is_operator, is_registered, is_guild predicates

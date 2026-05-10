@@ -1,4 +1,4 @@
-"""``/vetsmod`` — issue a vetsmod authentication key.
+"""``/vetsmod`` — issue a vetsmod authentication key (DMed by default).
 
 The user runs ``/vetsmod`` in any channel; we DM them (or, if DMs are closed,
 ping them in ``LINK_FALLBACK_CHANNEL`` with retry/show buttons) the modrinth
@@ -6,19 +6,31 @@ download link plus an ``/unlock <key>`` command they paste into Minecraft.
 
 The key authenticates that user's vetsmod client to ``api.wynnvets.org``.
 See :mod:`lib.verify_keys` for issuance/introspection helpers.
+
+Staff key management lives under ``/change`` (mod-tier ops):
+
+    /change remove key <discordID|key|ign> [reason]
+    /change rotate key <discordID|key|ign> [reason]
+
+Both DM the affected user when possible; a ``reason`` (if supplied) is
+included in that DM. Users themselves can no longer self-rotate — they ask
+a moderator if they think their key has leaked.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+from tortoise.expressions import Q
 
 from bot import Bot
 from config import CurrConfig
+from lib.auth import is_staff
 from lib.linking import dm_or_log
 from lib.verify_keys import (
     TIER_HONOURARY,
@@ -29,7 +41,7 @@ from lib.verify_keys import (
     revoke_key,
     rotate_key,
 )
-from orm import VerifyKey
+from orm import DiscordAccount, MinecraftAccount, VerifyKey
 
 logger = logging.getLogger("dazebot.cogs.vetsmod")
 
@@ -37,6 +49,13 @@ VETSMOD_MODRINTH_URL = "https://modrinth.com/mod/vetsmod/versions"
 
 VETSMOD_FALLBACK_DM_CUSTOM_ID = "vetsmod:fallback_dm"
 VETSMOD_FALLBACK_SHOW_CUSTOM_ID = "vetsmod:fallback_show"
+
+# secrets.token_urlsafe(32) yields 43 chars from [A-Za-z0-9_-]. Allow a
+# little tolerance so a future bump in token bytes doesn't silently break
+# target resolution.
+_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{40,50}$")
+# Discord snowflakes are 17–20 digits in 2026; pad to 22 for headroom.
+_DISC_ID_RE = re.compile(r"^\d{17,22}$")
 
 
 _TIER_BLURB = {
@@ -69,8 +88,7 @@ def _build_dm_body(row: VerifyKey, *, is_new: bool) -> str:
     if not is_new:
         intro = (
             "You already had a vetsmod key on file. Re-sending the same one. "
-            "If you think it leaked, run `/vetsmod rotate` to get a fresh key "
-            "(the old one stops working immediately)."
+            "If you think it leaked, ask a moderator to rotate it for you."
         )
     return (
         f"{intro}\n\n"
@@ -178,6 +196,79 @@ async def _post_fallback_ping(
         return None
 
 
+async def _resolve_key_target(value: str) -> Optional[VerifyKey]:
+    """Find a VerifyKey row from a Discord ID, the key string, or an MC IGN.
+
+    Order of attempts:
+      1. ``value`` looks like a Discord snowflake -> match by ``disc_uuid``
+      2. ``value`` looks like a key (URL-safe base64, ~43 chars) -> match by ``key``
+      3. Treat ``value`` as an MC IGN -> resolve to a MinecraftAccount, walk
+         to its DiscordAccount, then fetch the VerifyKey by that disc_uuid.
+
+    Returns ``None`` if nothing matches at any step. Revoked rows are still
+    returned (callers decide what to do with them).
+    """
+    if _DISC_ID_RE.match(value):
+        row = await VerifyKey.filter(disc_uuid=value).first()
+        if row is not None:
+            return row
+    if _KEY_RE.match(value):
+        row = await VerifyKey.filter(key=value).first()
+        if row is not None:
+            return row
+    mc = await MinecraftAccount.filter(
+        Q(mc_username__iexact=value) | Q(wynn_username__iexact=value)
+    ).first()
+    if mc is None:
+        return None
+    disc = await DiscordAccount.filter(minecraft_account=mc).first()
+    if disc is None:
+        return None
+    return await VerifyKey.filter(disc_uuid=disc.disc_uuid).first()
+
+
+async def _dm_key_change(
+    bot: Bot,
+    disc_uuid: str,
+    *,
+    action: str,  # "rotated" or "removed"
+    reason: Optional[str],
+) -> bool:
+    """DM the affected user about a staff key action. Returns True on delivery."""
+    try:
+        user = bot.get_user(int(disc_uuid)) or await bot.fetch_user(int(disc_uuid))
+    except (discord.NotFound, discord.HTTPException, ValueError):
+        logger.exception("dm_key_change: user lookup failed disc=%s", disc_uuid)
+        return False
+    if action == "rotated":
+        head = (
+            "Your vetsmod key has been **rotated** by staff. The previous "
+            "key has stopped working; run `/vetsmod` to receive the fresh one."
+        )
+    else:
+        head = (
+            "Your vetsmod key has been **removed** by staff. It has stopped "
+            "working; run `/vetsmod` if you want to issue a new one."
+        )
+    body = head
+    if reason:
+        body += f"\n\n**Reason:** {reason}"
+    body += "\n\nIf you didn't expect this, contact a moderator."
+    return await dm_or_log(user, body, fallback_logger=logger)
+
+
+def _find_member_anywhere(bot: Bot, disc_uuid: str) -> Optional[discord.Member]:
+    try:
+        uid = int(disc_uuid)
+    except ValueError:
+        return None
+    for guild in bot.guilds:
+        m = guild.get_member(uid)
+        if m is not None:
+            return m
+    return None
+
+
 class Vetsmod(commands.Cog):
     bot: Bot
 
@@ -185,44 +276,15 @@ class Vetsmod(commands.Cog):
         self.bot = bot
         logger.info("Vetsmod cog initialized")
 
-    @commands.hybrid_group(
+    # =================================================================
+    # /vetsmod  — self-issue (or re-issue) a key
+    # =================================================================
+
+    @commands.hybrid_command(
         name="vetsmod",
-        description="Get your vetsmod authentication key (DMed by default).",
-        invoke_without_command=True,
+        description="Get vetsmod and/or unlock it!",
     )
-    async def vetsmod_group(self, ctx: commands.Context):
-        if ctx.invoked_subcommand is not None:
-            return
-        await self._issue_for_invoker(ctx, force_rotate=False)
-
-    @vetsmod_group.command(
-        name="rotate",
-        description="Invalidate your existing vetsmod key and issue a fresh one.",
-    )
-    async def vetsmod_rotate(self, ctx: commands.Context):
-        await self._issue_for_invoker(ctx, force_rotate=True)
-
-    @vetsmod_group.command(
-        name="revoke",
-        description="(Staff) Revoke another user's vetsmod key.",
-    )
-    @app_commands.describe(user="The Discord user whose key should be invalidated.")
-    @commands.has_permissions(manage_guild=True)
-    async def vetsmod_revoke(self, ctx: commands.Context, user: discord.Member):
-        revoked = await revoke_key(str(user.id), reason=f"staff:{ctx.author.id}")
-        if revoked:
-            await ctx.reply(
-                f"✅ Revoked vetsmod key for {user.mention}. Their client "
-                "will fail authentication on its next reconnect.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        else:
-            await ctx.reply(
-                f"{user.mention} has no active vetsmod key to revoke.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-
-    async def _issue_for_invoker(self, ctx: commands.Context, *, force_rotate: bool):
+    async def vetsmod(self, ctx: commands.Context):
         if not isinstance(ctx.author, discord.Member):
             await ctx.reply(
                 "This command must be used in a server, not a DM.", ephemeral=True
@@ -231,14 +293,9 @@ class Vetsmod(commands.Cog):
 
         await ctx.defer(ephemeral=True)
 
-        if force_rotate:
-            row = await rotate_key(ctx.author)
-            is_new = True
-        else:
-            issued = await get_or_issue_key(ctx.author)
-            row = issued.row
-            is_new = issued.is_new
-
+        issued = await get_or_issue_key(ctx.author)
+        row = issued.row
+        is_new = issued.is_new
         body = _build_dm_body(row, is_new=is_new)
 
         dmed = await dm_or_log(ctx.author, body, fallback_logger=logger)
@@ -248,8 +305,6 @@ class Vetsmod(commands.Cog):
                 if is_new
                 else "ℹ️ You already had a key; I re-DMed it to you."
             )
-            if force_rotate:
-                note = "✅ Issued a fresh vetsmod key and DMed it to you."
             await ctx.reply(note, ephemeral=True)
             return
 
@@ -264,11 +319,136 @@ class Vetsmod(commands.Cog):
             )
             return
 
-        # Last-ditch: reveal in the ephemeral reply itself.
         await ctx.reply(
             "⚠️ Couldn't DM you and the fallback channel is "
             "unavailable. Here's your key, **only visible to you**:\n\n" + body,
             ephemeral=True,
+        )
+
+    # =================================================================
+    # /change  — staff (mod-tier) operations on user state
+    # =================================================================
+
+    @commands.hybrid_group(
+        name="change",
+        description="(Staff) Mod operations.",
+    )
+    @is_staff()
+    async def change_group(self, ctx: commands.Context):
+        if ctx.invoked_subcommand is None:
+            await ctx.reply(
+                "Use `/change remove key <target>` or `/change rotate key <target>`."
+            )
+
+    # ----- /change remove ... -----
+
+    @change_group.group(
+        name="remove",
+        description="(Staff) Remove things from a user.",
+    )
+    async def change_remove(self, ctx: commands.Context):
+        if ctx.invoked_subcommand is None:
+            await ctx.reply("Use `/change remove key <target>`.")
+
+    @change_remove.command(
+        name="key",
+        description="(Staff) Revoke a user's vetsmod key. Target = Discord ID, the key, or MC IGN.",
+    )
+    @app_commands.describe(
+        target="Discord ID, the vetsmod key string, or Minecraft IGN.",
+        reason="Optional reason — included in the DM to the affected user.",
+    )
+    async def change_remove_key(
+        self,
+        ctx: commands.Context,
+        target: str,
+        reason: Optional[str] = None,
+    ):
+        await ctx.defer(ephemeral=True)
+        row = await _resolve_key_target(target)
+        if row is None:
+            await ctx.reply(f"No vetsmod key found for `{target}`.", ephemeral=True)
+            return
+        if row.revoked_at is not None:
+            await ctx.reply(
+                f"<@{row.disc_uuid}>'s key was already revoked at "
+                f"{row.revoked_at.isoformat()}. No change.",
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        log_reason = f"staff:{ctx.author.id}" + (f":{reason}" if reason else "")
+        await revoke_key(row.disc_uuid, reason=log_reason)
+        dmed = await _dm_key_change(
+            self.bot, row.disc_uuid, action="removed", reason=reason
+        )
+        suffix = "" if dmed else " (DM failed — couldn't notify them)."
+        await ctx.reply(
+            f"✅ Removed vetsmod key for <@{row.disc_uuid}>.{suffix}",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    # ----- /change rotate ... -----
+
+    @change_group.group(
+        name="rotate",
+        description="(Staff) Rotate things for a user.",
+    )
+    async def change_rotate(self, ctx: commands.Context):
+        if ctx.invoked_subcommand is None:
+            await ctx.reply("Use `/change rotate key <target>`.")
+
+    @change_rotate.command(
+        name="key",
+        description="(Staff) Issue a fresh vetsmod key (invalidates the old one).",
+    )
+    @app_commands.describe(
+        target="Discord ID, the vetsmod key string, or Minecraft IGN.",
+        reason="Optional reason — included in the DM to the affected user.",
+    )
+    async def change_rotate_key(
+        self,
+        ctx: commands.Context,
+        target: str,
+        reason: Optional[str] = None,
+    ):
+        await ctx.defer(ephemeral=True)
+        row = await _resolve_key_target(target)
+        if row is None:
+            await ctx.reply(f"No vetsmod key found for `{target}`.", ephemeral=True)
+            return
+        # rotate_key(member) needs a live Member to refresh the tier snapshot.
+        # If the user has left every guild we share, rotating is pointless
+        # (they can't /vetsmod to pick up the new key) — tell staff to
+        # /change remove key instead.
+        member = _find_member_anywhere(self.bot, row.disc_uuid)
+        if member is None:
+            await ctx.reply(
+                f"Can't see <@{row.disc_uuid}> in any guild — they've left, "
+                "so rotating won't help (they can't `/vetsmod` to pick up the "
+                "new key). Use `/change remove key` instead.",
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        await rotate_key(member)
+        logger.info(
+            "verify key rotated by staff: target=%s actor=%s reason=%s",
+            row.disc_uuid, ctx.author.id, reason or "unspecified",
+        )
+        dmed = await _dm_key_change(
+            self.bot, row.disc_uuid, action="rotated", reason=reason
+        )
+        suffix = (
+            ""
+            if dmed
+            else " (DM failed — couldn't notify them; they'll need to `/vetsmod` themselves)."
+        )
+        await ctx.reply(
+            f"✅ Rotated vetsmod key for <@{row.disc_uuid}>.{suffix}",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
 

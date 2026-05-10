@@ -121,8 +121,27 @@ async def backfill_cult_threads(bot) -> None:
     """
     figurehead_mc_ids = set(await Cult.all().values_list("owner_id", flat=True))
 
+    # Snapshot each thread's current membership once. The thread-members
+    # rate-limit bucket is per-channel, so blind PUTs/DELETEs for state
+    # that already matches reality were eating 429s. Diff against this set
+    # and only write when something actually changes.
+    thread_state: dict[str, tuple[Optional[discord.Thread], set[int]]] = {}
+    for cn, tid in CULT_THREADS.items():
+        thread = await _resolve_thread(bot, tid)
+        if thread is None:
+            thread_state[cn] = (None, set())
+            continue
+        try:
+            members = await thread.fetch_members()
+            thread_state[cn] = (thread, {tm.id for tm in members})
+        except discord.HTTPException as e:
+            logger.warning(
+                "backfill: fetch_members on thread %s (%s) failed: %s", tid, cn, e,
+            )
+            thread_state[cn] = (thread, set())
+
     rows = await CultMembership.all().prefetch_related("cult", "discord_account")
-    added = failed = skipped = pruned = 0
+    added = failed = skipped = pruned = already = 0
     for m in rows:
         mc_id = m.discord_account.minecraft_account_id
         if mc_id is not None and mc_id in figurehead_mc_ids:
@@ -135,52 +154,58 @@ async def backfill_cult_threads(bot) -> None:
             skipped += 1
             continue
         cult_name = m.cult.name
-        thread_id = CULT_THREADS.get(cult_name.lower())
-        if thread_id is None:
+        state = thread_state.get(cult_name.lower())
+        if state is None:
             skipped += 1
             continue
-        thread = await _resolve_thread(bot, thread_id)
+        thread, members = state
         if thread is None:
             failed += 1
             continue
+        if disc_id in members:
+            already += 1
+            continue
         try:
             await thread.add_user(discord.Object(id=disc_id))
+            members.add(disc_id)
             added += 1
         except discord.HTTPException as e:
             logger.warning(
                 "backfill: add_user(%s) on thread %s (%s) failed: %s",
-                disc_id, thread_id, cult_name, e,
+                disc_id, thread.id, cult_name, e,
             )
             failed += 1
 
     swept = 0
     if figurehead_mc_ids:
-        threads = {cn: await _resolve_thread(bot, tid) for cn, tid in CULT_THREADS.items()}
         figurehead_discs = await DiscordAccount.filter(
             minecraft_account_id__in=list(figurehead_mc_ids)
         )
+        figurehead_disc_ids: set[int] = set()
         for disc in figurehead_discs:
             try:
-                fdid = int(disc.disc_uuid)
+                figurehead_disc_ids.add(int(disc.disc_uuid))
             except ValueError:
                 continue
-            for cn, thread in threads.items():
-                if thread is None:
-                    continue
+        for cn, (thread, members) in thread_state.items():
+            if thread is None:
+                continue
+            for fdid in figurehead_disc_ids & members:
                 try:
                     await thread.remove_user(discord.Object(id=fdid))
+                    members.discard(fdid)
                     swept += 1
                 except discord.NotFound:
-                    pass  # not in this thread — expected for most
+                    pass
                 except discord.HTTPException as e:
                     logger.debug(
                         "figurehead sweep remove(%s, %s) failed: %s", fdid, cn, e,
                     )
 
     logger.info(
-        "cult thread backfill: total=%d added=%d failed=%d skipped=%d "
+        "cult thread backfill: total=%d added=%d already=%d failed=%d skipped=%d "
         "pruned_figureheads=%d swept_figurehead_thread_memberships=%d",
-        len(rows), added, failed, skipped, pruned, swept,
+        len(rows), added, already, failed, skipped, pruned, swept,
     )
 
 

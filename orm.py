@@ -174,6 +174,52 @@ class Blocklist(Model):
         table = "blocklist"
 
 
+class StaffActionEntry(Model):
+    """Audit row for a single caution / warning / eject event recorded by
+    in-game guild staff against a Minecraft player. See
+    ``../.claude/staff_actions.md`` for the full spec.
+
+    Cumulative caution-point total for a target = SUM(points) over all
+    rows for ``target_uuid``. Three caution points = one "warning point";
+    two warning points (= 6 caution points) trips the auto-ban
+    threshold. Decay is not implemented; entries persist forever.
+
+    Read by ``GET /api/internal/staff-actions/{uuid}`` (consumed by
+    vetsmod's ``/wv check``) and by the Discord ``~warnings`` command.
+    Written by ``POST /api/internal/staff-action`` (forwarded by
+    temporary-server when a staff member runs ``/caution``, ``/warn``,
+    or ``/eject`` in the mod).
+
+    The target's MinecraftAccount may or may not exist at write time --
+    cautions can be issued against unlinked players. We key by raw
+    ``target_uuid`` (no FK) so insertion never fails on a missing
+    parent row.
+    """
+
+    id = fields.UUIDField(pk=True)
+
+    target_uuid = fields.CharField(max_length=36, index=True)
+    target_username_at_time = fields.CharField(max_length=64)
+
+    actor_uuid = fields.CharField(max_length=36)
+    actor_username_at_time = fields.CharField(max_length=64)
+
+    # "caution" | "warning" | "eject"
+    kind = fields.CharField(max_length=16)
+    # 1 (caution), 3 (warning), 6 (eject). Stored explicitly so future
+    # tweaks to the conversion ratio don't retroactively rewrite history.
+    points = fields.IntField()
+    # Formal warning text. Required for kind=warning/eject; null for plain
+    # cautions. May also be set on a caution that crossed the warning
+    # threshold (the staff member shaped the warning at /caution time).
+    message: Optional[str] = fields.TextField(null=True)  # type: ignore
+
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "staff_action_entries"
+
+
 class MinecraftAlt(Model):
     """Additional Minecraft accounts attached to a Discord user beyond their
     primary linked one (used by /add). The 'primary' link still lives on

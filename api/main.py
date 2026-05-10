@@ -24,11 +24,12 @@ from typing import TYPE_CHECKING
 
 from fastapi import Body, FastAPI, Header, HTTPException
 
-from lib import mc
+from lib import mc, staff_actions
 from lib.first_install_view import post_fallback_completion
 from lib.linking import dm_or_log, try_consume_code
 from lib.rank_alerts import post_rank_alert
 from lib.verify_keys import introspect
+from lib.wynn_api.errors import WynnApiError
 
 if TYPE_CHECKING:
     from bot import Bot
@@ -190,5 +191,173 @@ def create_app(bot: Bot) -> FastAPI:
             name=f"rank-alert-{classification}",
         )
         return {"status": "scheduled"}
+
+    @app.post("/api/internal/staff-action")
+    async def staff_action(
+        body: dict = Body(...),
+        x_introspect_secret: str | None = Header(default=None),
+    ):
+        """Record one caution / warning / eject and apply its side-effects.
+
+        Forwarded by ``temporary-server`` after a staff-gated WS frame
+        (``caution_add`` / ``warn_add`` / ``eject_add``) lands. Same auth
+        gate as ``/api/internal/rank-alert``.
+
+        Body::
+
+            {
+              "kind": "caution" | "warning" | "eject",
+              "target_username": str,         # mc username or uuid
+              "actor_uuid": str,
+              "actor_username": str,
+              "actor_rank": str | null,       # in-game guild rank
+              "message": str | null,          # formal warning / eject text
+            }
+
+        Response::
+
+            {
+              "status": "ok",
+              "target_uuid": str,
+              "target_username": str,         # canonical (Mojang-resolved)
+              "prior_total": int,
+              "new_total": int,
+              "triggered": "none" | "warning" | "eject",
+              "dm_sent": bool,
+              "blocklisted": bool,
+              "suggested_dispatch": "kick" | "demote" | null,
+            }
+        """
+        expected = os.environ.get("DAZEBOT_INTROSPECT_SECRET")
+        if not expected:
+            logger.error(
+                "staff_action: DAZEBOT_INTROSPECT_SECRET not set; refusing"
+            )
+            raise HTTPException(status_code=503, detail="staff-action disabled")
+        if x_introspect_secret != expected:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+        payload = body or {}
+        kind = str(payload.get("kind", "")).strip().lower()
+        target_username = str(payload.get("target_username", "")).strip()
+        actor_uuid = str(payload.get("actor_uuid", "")).strip()
+        actor_username = str(payload.get("actor_username", "")).strip()
+        actor_rank_raw = payload.get("actor_rank")
+        actor_rank = str(actor_rank_raw).strip() if actor_rank_raw else None
+        message_raw = payload.get("message")
+        message = str(message_raw).strip() if message_raw else None
+
+        if kind not in ("caution", "warning", "eject"):
+            raise HTTPException(
+                status_code=400,
+                detail="kind must be one of caution|warning|eject",
+            )
+        if not target_username or not actor_uuid or not actor_username:
+            raise HTTPException(
+                status_code=400,
+                detail="target_username, actor_uuid, actor_username are required",
+            )
+
+        try:
+            result = await staff_actions.record_action(
+                bot,
+                kind=kind,
+                target_username=target_username,
+                actor_uuid=actor_uuid,
+                actor_username=actor_username,
+                actor_rank=actor_rank,
+                message=message,
+            )
+        except WynnApiError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"could not resolve target {target_username!r}: {exc.message}",
+            )
+        except Exception:  # noqa: BLE001 - third-party API
+            logger.exception("staff_action: record_action failed")
+            raise HTTPException(status_code=500, detail="record_action failed")
+
+        return {
+            "status": "ok",
+            "target_uuid": result.target_uuid,
+            "target_username": result.target_username,
+            "prior_total": result.prior_total,
+            "new_total": result.new_total,
+            "triggered": result.triggered,
+            "dm_sent": result.dm_sent,
+            "blocklisted": result.blocklisted,
+            "suggested_dispatch": result.suggested_dispatch,
+        }
+
+    @app.get("/api/internal/staff-actions/{name_or_uuid}")
+    async def staff_actions_history(
+        name_or_uuid: str,
+        x_introspect_secret: str | None = Header(default=None),
+    ):
+        """Return the cumulative caution-point total + recent action
+        history for ``name_or_uuid`` (a Minecraft username or UUID).
+
+        Reads-only. Used by vetsmod's ``/wv check`` (forwarded via
+        temporary-server) and by the Discord ``~warnings`` cog
+        internally.
+
+        Response::
+
+            {
+              "target_uuid": str,
+              "target_username": str,
+              "total_points": int,
+              "entries": [
+                {
+                  "kind": str,
+                  "points": int,
+                  "actor_username_at_time": str,
+                  "message": str | null,
+                  "created_at": str,  # ISO 8601 UTC
+                },
+                ...
+              ]
+            }
+
+        ``404`` if the target cannot be resolved (no MinecraftAccount,
+        Wynncraft API doesn't recognise them either).
+        """
+        expected = os.environ.get("DAZEBOT_INTROSPECT_SECRET")
+        if not expected:
+            logger.error(
+                "staff_actions_history: DAZEBOT_INTROSPECT_SECRET not set; refusing"
+            )
+            raise HTTPException(status_code=503, detail="staff-actions disabled")
+        if x_introspect_secret != expected:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+        try:
+            target_uuid, canonical, _mc = await staff_actions.resolve_target(name_or_uuid)
+        except WynnApiError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"could not resolve target {name_or_uuid!r}: {exc.message}",
+            )
+        except Exception:  # noqa: BLE001 - third-party API
+            logger.exception("staff_actions_history: resolve failed")
+            raise HTTPException(status_code=502, detail="resolve failed")
+
+        total = await staff_actions.total_points_for(target_uuid)
+        rows = await staff_actions.history_for(target_uuid)
+        return {
+            "target_uuid": target_uuid,
+            "target_username": canonical,
+            "total_points": total,
+            "entries": [
+                {
+                    "kind": r.kind,
+                    "points": r.points,
+                    "actor_username_at_time": r.actor_username_at_time,
+                    "message": r.message,
+                    "created_at": r.created_at.isoformat(),
+                }
+                for r in rows
+            ],
+        }
 
     return app

@@ -32,11 +32,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("dazebot.rank_alerts")
 
-# Channel that receives BAN/KICK notices and the role pinged for BAN events.
-# Both IDs come from the Wynncraft Returners Discord and were chosen by
-# product; if either is renamed, dazebot needs a redeploy.
+# Channel that receives both BAN and KICK notices (the alerts that
+# request admin action -- urgent BAN with a role ping, deferred KICK
+# without one).
 RANK_ALERT_CHANNEL_ID: int = 1313786394929528832
 RANK_ALERT_PING_ROLE_ID: int = 1313778812361904188
+
+# Thread (under any channel; resolved by ID alone) that collects
+# moderation notifications which do NOT request admin action: EJECT
+# notices (the eject already happened or was dispatched by the actor)
+# and admin caution-point overrides (purely audit-trail entries). Any
+# alert that asks an admin to do something belongs in
+# ``RANK_ALERT_CHANNEL_ID`` instead.
+MODERATION_LOG_THREAD_ID: int = 1502977253297098762
 
 # How long to wait before WAPI verification — Wynncraft's guild API has a
 # multi-minute cache TTL, so a quick verify will see stale data. 5 minutes
@@ -63,6 +71,11 @@ async def post_rank_alert(
         logger.warning("post_rank_alert: ignoring classification %r", classification)
         return
 
+    # Both BAN and KICK notices land in the rank-alert channel: BAN is
+    # urgent (pinged, "kick ASAP"); KICK is deferred (no ping, "kick
+    # when convenient") but still requires an admin to act, so it
+    # belongs alongside BAN rather than in the informational
+    # moderation-log thread.
     channel = bot.get_channel(RANK_ALERT_CHANNEL_ID)
     if channel is None:
         try:

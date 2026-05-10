@@ -27,6 +27,7 @@ from fastapi import Body, FastAPI, Header, HTTPException
 from lib import mc
 from lib.first_install_view import post_fallback_completion
 from lib.linking import dm_or_log, try_consume_code
+from lib.rank_alerts import post_rank_alert
 from lib.verify_keys import introspect
 
 if TYPE_CHECKING:
@@ -132,5 +133,62 @@ def create_app(bot: Bot) -> FastAPI:
             "ws_tier": result.ws_tier,
             "reason": result.reason,
         }
+
+    @app.post("/api/internal/rank-alert")
+    async def rank_alert(
+        body: dict = Body(...),
+        x_introspect_secret: str | None = Header(default=None),
+    ):
+        """Post a guild rank-change alert (BAN or KICK) to Discord.
+
+        Called by ``temporary-server`` after it deduplicates rank_change
+        frames from vetsmod clients. Reuses ``DAZEBOT_INTROSPECT_SECRET``
+        for auth — same shared secret already gates the introspection
+        endpoint, and both calls travel the verify docker network.
+
+        Body: ``{actor, target, from_rank, to_rank, classification}``
+        where ``classification`` is ``"ban"`` or ``"kick"``. ``"mote"``
+        events are handled entirely by temporary-server's bridge sender
+        and never reach this endpoint.
+
+        Posting + WAPI verification run in a fire-and-forget background
+        task; this endpoint returns ``{"status": "scheduled"}`` immediately
+        so temporary-server isn't blocked on Discord round-trips.
+        """
+        expected = os.environ.get("DAZEBOT_INTROSPECT_SECRET")
+        if not expected:
+            logger.error(
+                "rank_alert: DAZEBOT_INTROSPECT_SECRET not set; refusing"
+            )
+            raise HTTPException(status_code=503, detail="rank-alert disabled")
+        if x_introspect_secret != expected:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+        payload = body or {}
+        classification = str(payload.get("classification", "")).strip().lower()
+        actor = str(payload.get("actor", "")).strip()
+        target = str(payload.get("target", "")).strip()
+        from_rank = str(payload.get("from_rank", "")).strip()
+        to_rank = str(payload.get("to_rank", "")).strip()
+
+        if classification not in ("ban", "kick"):
+            raise HTTPException(
+                status_code=400,
+                detail="classification must be 'ban' or 'kick'",
+            )
+        if not actor or not target or not from_rank or not to_rank:
+            raise HTTPException(
+                status_code=400,
+                detail="actor, target, from_rank, to_rank are required",
+            )
+
+        # Fire-and-forget: don't keep temporary-server's HTTP call open
+        # while we do Discord/WAPI work.
+        import asyncio as _asyncio  # local import keeps top-level imports tidy
+        _asyncio.create_task(
+            post_rank_alert(bot, classification, actor, target, from_rank, to_rank),
+            name=f"rank-alert-{classification}",
+        )
+        return {"status": "scheduled"}
 
     return app

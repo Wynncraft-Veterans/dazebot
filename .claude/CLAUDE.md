@@ -39,6 +39,7 @@ dazebot/                 (repo root)
                         GET  /health
                         GET  /api/auth/{uuid}/{msg}        — picolimbo link-code probe
                         POST /api/auth/introspect          — vetsmod key introspection (X-Introspect-Secret gated)
+                        POST /api/internal/rank-alert      — temp-server-forwarded guild rank-change alerts (BAN/KICK)
   cogs/
     activity.py        Periodic guild check + role enforcement
     admin.py           Owner/admin commands
@@ -56,6 +57,7 @@ dazebot/                 (repo root)
     vetsmod.py         /vetsmod (self-issue), /change remove|rotate key (staff), DM-or-fallback view
     weekly_event.py    Weekly event scheduling
   lib/
+    rank_alerts.py     post_rank_alert + WAPI verify-and-tag for the rank-alert HTTP endpoint
     auth.py            is_admin, is_staff, is_operator, is_registered, is_guild predicates
     converters.py      CaseInsensitiveMember
     discord_paginated_embed.py  Pagination helper

@@ -8,7 +8,7 @@ class Config:
     GUILD_DEAD_ALERT_CHANNEL = 1401676479300898939
     GUILD_FULL_ALERT_CHANNEL = 1401676479300898939
 
-    # --- VETS membership-state roles (see .vscode/instructions1.md §6) ---
+    # --- VETS membership-state roles (see .claude/membership_spec.md §6) ---
     ROLE_REGISTERED = 1407078577450520637  # Never been a vets member
     ROLE_HIATUS = 1407078148440592444  # Was in vets, currently guildless
     ROLE_MEMBER = 1407078065137254563  # Currently in vets

@@ -55,6 +55,12 @@ class Bot(commands.Bot):
             self.add_view(LinkFallbackView())
         except Exception as e:
             logger.error(f"Failed to register FirstInstallView: {e}")
+        try:
+            from cogs.vetsmod import VetsmodFallbackView
+
+            self.add_view(VetsmodFallbackView())
+        except Exception as e:
+            logger.error(f"Failed to register VetsmodFallbackView: {e}")
         await self._load_cogs()
 
     async def _load_cogs(self):

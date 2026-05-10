@@ -1,29 +1,33 @@
-"""FastAPI app exposed by dazebot to the picolimbo (auth-stack) mini-server.
+"""FastAPI app exposed by dazebot to other VETS services on the verify network.
 
-This API has exactly one job: receive in-game chat lines from picolimbo and,
-if any of them happen to contain a pending account-link code, complete the
-link. It is **not** a Discord <-> in-game chat bridge - that responsibility
-lives in the ``temporary-server`` stack and must not be duplicated here.
+Two responsibilities, one app:
 
-Endpoint: ``GET /api/auth/{uuid}/{msg}``
+1. **picolimbo link flow** — picolimbo POSTs every in-game chat line to
+   ``GET /api/auth/{uuid}/{msg}`` so we can look for link codes. This was the
+   API's original purpose and gives the ``/api/auth`` prefix its name. It
+   is **not** a Discord <-> in-game chat bridge — that lives in
+   ``temporary-server``.
 
-The path was historically named ``/incoming_chat`` which was misleading
-(picolimbo POSTs *every* chat line, not just link codes). It has been
-renamed to ``/api/auth`` to reflect what dazebot actually does with the
-data. The auth-stack default ``REMOTE_API_URL`` already includes this
-suffix, so no per-deployment override is needed.
+2. **vetsmod key introspection** — ``temporary-server`` POSTs to
+   ``/api/auth/introspect`` to validate vetsmod ``/unlock`` keys at WS connect
+   time. See :mod:`lib.verify_keys`.
+
+Both endpoints are reachable only on the docker ``verify`` network (no public
+exposure via traefik).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI
+from fastapi import Body, FastAPI, Header, HTTPException
 
 from lib import mc
 from lib.first_install_view import post_fallback_completion
 from lib.linking import dm_or_log, try_consume_code
+from lib.verify_keys import introspect
 
 if TYPE_CHECKING:
     from bot import Bot
@@ -85,6 +89,48 @@ def create_app(bot: Bot) -> FastAPI:
         return {
             "status": "linked" if outcome.success else "refused",
             "reason": outcome.reason,
+        }
+
+    @app.post("/api/auth/introspect")
+    async def introspect_key(
+        body: dict = Body(...),
+        x_introspect_secret: str | None = Header(default=None),
+    ):
+        """Validate a vetsmod ``/unlock`` key on behalf of ``temporary-server``.
+
+        Defense in depth: even though this endpoint is only reachable on the
+        verify docker network, we also gate it behind a shared secret read
+        from ``DAZEBOT_INTROSPECT_SECRET``. Without the env var set, the
+        endpoint refuses *all* requests — fail closed if misconfigured.
+
+        Request body: ``{"key": "<vetsmod key>"}``
+        Response: ``{"valid": bool, "tier": str|null, "ws_tier": str|null,
+                    "disc_uuid": str|null, "mc_uuid": str|null,
+                    "mc_username": str|null, "reason": str|null}``
+        """
+        expected = os.environ.get("DAZEBOT_INTROSPECT_SECRET")
+        if not expected:
+            logger.error(
+                "introspect: DAZEBOT_INTROSPECT_SECRET not set; refusing all requests"
+            )
+            raise HTTPException(status_code=503, detail="introspection disabled")
+        if x_introspect_secret != expected:
+            # Don't leak whether the secret is wrong vs not present.
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+        key = (body or {}).get("key")
+        if not isinstance(key, str) or not key:
+            raise HTTPException(status_code=400, detail="missing 'key' in body")
+
+        result = await introspect(bot, key)
+        return {
+            "valid": result.valid,
+            "disc_uuid": result.disc_uuid,
+            "mc_uuid": result.mc_uuid,
+            "mc_username": result.mc_username,
+            "tier": result.tier,
+            "ws_tier": result.ws_tier,
+            "reason": result.reason,
         }
 
     return app

@@ -1,7 +1,7 @@
 """Management cog: blocklist, force, register, add, vanity, honour, list,
 username, waitlist, config, and first-install commands.
 
-See ``.vscode/instructions1.md`` for the full requirements.
+See ``../.claude/membership_spec.md`` for the full requirements.
 """
 
 from __future__ import annotations
@@ -154,7 +154,7 @@ class Management(commands.Cog):
         channel: Optional[discord.TextChannel] = None,
         quote_message_id: Optional[str] = None,
     ):
-        """One-shot install command. See instructions1.md \u00a71."""
+        """One-shot install command. See ../.claude/membership_spec.md \u00a71."""
         logger.info(f"first_install: invoked by {ctx.author} (id={ctx.author.id}) in guild={ctx.guild}")
         from lib.first_install_view import FirstInstallView, build_welcome_embed
 

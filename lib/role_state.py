@@ -1,8 +1,8 @@
 """Role-state machine for VETS membership.
 
-Implements the transition table from ``.vscode/instructions1.md`` \u00a76. Pure
-functions where possible; the apply step takes a ``discord.Member`` and the
-desired action enum, computes the role delta, and performs it.
+Implements the transition table from ``../.claude/membership_spec.md`` \u00a76.
+Pure functions where possible; the apply step takes a ``discord.Member`` and
+the desired action enum, computes the role delta, and performs it.
 
 States are derived from which of the five state-roles a member currently has.
 """
@@ -93,8 +93,8 @@ class TransitionResult:
 def compute_transition(state: State, trigger: Trigger) -> TransitionResult:
     """Compute the role delta for a given current state + trigger.
 
-    Mirrors the table in instructions1.md \u00a76 verbatim. Anything not listed
-    explicitly is a no-op (returns empty result, not an error).
+    Mirrors the table in ../.claude/membership_spec.md \u00a76 verbatim. Anything
+    not listed explicitly is a no-op (returns empty result, not an error).
     """
     REG = State.REGISTERED
     HIA = State.HIATUS
@@ -226,7 +226,7 @@ async def apply_transition(
 
 async def force_to_registered_only(member: discord.Member, *, reason: str | None = None) -> None:
     """Strip Hiatus/Member/Honourary/Waitlisted and ensure Registered. Used by
-    ``/block`` per instructions1.md \u00a72b.
+    ``/block`` per ../.claude/membership_spec.md \u00a72b.
     """
     state = state_of(member)
     to_remove_ids = {

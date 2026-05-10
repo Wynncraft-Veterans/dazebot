@@ -1,5 +1,5 @@
 """Runtime overrides for ``Config`` attributes set via the ``/config`` admin
-command. See ``.vscode/instructions1.md`` \u00a73.
+command. See ``../.claude/membership_spec.md`` \u00a73.
 
 Persisted overrides live in the ``bot_config_overrides`` table and are loaded
 into the live ``Config`` object on bot startup. Updates flow through

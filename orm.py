@@ -159,7 +159,7 @@ class Waitlist(Model):
 
 class Blocklist(Model):
     """Users on this list are forced to the Registered role and can never become
-    Honourary / Hiatus / Member / Waitlisted. See instructions1.md §2b.
+    Honourary / Hiatus / Member / Waitlisted. See .claude/membership_spec.md §2b.
     """
 
     id = fields.UUIDField(pk=True)
@@ -197,7 +197,7 @@ class MinecraftAlt(Model):
 class UserVanityChoice(Model):
     """Records that a user has manually picked a vanity role via /vanity. The
     automatic firstJoin-based assignment must NOT override this.
-    See instructions1.md §2g.
+    See .claude/membership_spec.md §2g.
     """
 
     id = fields.UUIDField(pk=True)
@@ -211,7 +211,7 @@ class UserVanityChoice(Model):
 
 
 class MojangNameCache(Model):
-    """Persistent cache of Mojang uuid -> username lookups (instructions1.md §5).
+    """Persistent cache of Mojang uuid -> username lookups (.claude/membership_spec.md §5).
     Refresh after `MAX_AGE` to handle name changes.
     """
 
@@ -225,7 +225,7 @@ class MojangNameCache(Model):
 
 class BotConfigOverride(Model):
     """Persisted overrides for Config attributes set via /config admin command.
-    See instructions1.md §3.
+    See .claude/membership_spec.md §3.
     """
 
     key = fields.CharField(pk=True, max_length=255)
@@ -325,6 +325,43 @@ class LinkCode(Model):
 
     class Meta:
         table = "link_code"
+
+
+class VerifyKey(Model):
+    """A long-lived bearer token that authenticates a Discord user's vetsmod
+    client to ``temporary-server`` (``api.wynnvets.org``).
+
+    Issued by ``/vetsmod``. The user types ``/unlock <key>`` in their Minecraft
+    client, vetsmod stores it, and every subsequent v1 WebSocket connection
+    carries it in an ``auth`` frame. ``temporary-server`` validates by hitting
+    dazebot's ``POST /api/auth/introspect``.
+
+    One row per Discord user. Re-running ``/vetsmod`` returns the same key
+    (analogous to ``LinkCode`` reuse). Staff can revoke via ``/vetsmod revoke``,
+    which sets ``revoked_at`` and causes future introspections to fail.
+
+    The ``tier`` and ``mc_uuid`` columns are a *snapshot at last refresh*. They
+    are re-resolved against current Discord roles + linked MC account on every
+    successful introspection, so a user who changes tier (waitlisted -> member,
+    blocklisted, etc.) gets the right access without re-running ``/vetsmod``.
+    """
+
+    id = fields.UUIDField(pk=True)
+    # The token itself. ``secrets.token_urlsafe(32)`` -> 43 char base64url.
+    # Indexed for O(1) introspection lookup.
+    key = fields.CharField(max_length=64, unique=True)
+    # One key per Discord user; re-running /vetsmod returns the same row.
+    disc_uuid = fields.CharField(max_length=255, unique=True)
+    # Snapshot at last introspection. May be empty if the user is unlinked.
+    mc_uuid: Optional[str] = fields.CharField(max_length=36, null=True)  # type: ignore
+    mc_username: Optional[str] = fields.CharField(max_length=64, null=True)  # type: ignore
+    tier = fields.CharField(max_length=32)
+    created_at = fields.DatetimeField(auto_now_add=True)
+    last_used_at: Optional[datetime] = fields.DatetimeField(null=True)  # type: ignore
+    revoked_at: Optional[datetime] = fields.DatetimeField(null=True)  # type: ignore
+
+    class Meta:
+        table = "verify_keys"
 
 
 # Database initialization helper

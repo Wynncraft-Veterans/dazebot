@@ -78,7 +78,7 @@ class WynncraftPlayer(BaseModel):
 
     The previous behaviour of mapping `None` -> epoch (1970) for `firstJoin` /
     `lastJoin` has been removed: callers MUST explicitly handle `None` (e.g.
-    skip inactivity actions, do not assign vanity role) per instructions1.md §7.
+    skip inactivity actions, do not assign vanity role) per ../../.claude/membership_spec.md §7.
     """
 
     username: str

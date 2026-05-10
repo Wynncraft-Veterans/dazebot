@@ -190,3 +190,15 @@ dev.db*
 
 # Wen helper script for deployment
 start.sh
+
+# --- Claude Code state ---
+# Track curated project docs in .claude/, but skip per-user state and ephemeral
+# task notes. The README inside ephemeral/ is committed so the convention is
+# discoverable; everything else in there is local.
+/.claude/settings.local.json
+/.claude/projects/
+/.claude/ephemeral/*
+!/.claude/ephemeral/README.md
+# user_profile.md is a Claude auto-memory file (type: user) — describes the
+# individual developer, not the codebase. Stays local.
+/.claude/user_profile.md

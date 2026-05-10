@@ -61,7 +61,7 @@ class VanityRoles(commands.Cog):
     async def handle_member(self, member: discord.Member):
         # If the user has explicitly chosen a vanity role via /vanity, honour it
         # and do not let firstJoin-based assignment override their choice.
-        # See instructions1.md \u00a72g.
+        # See ../.claude/membership_spec.md \u00a72g.
         from orm import UserVanityChoice  # local import to avoid early import cycles
 
         choice = await UserVanityChoice.filter(disc_uuid=str(member.id)).first()
@@ -77,7 +77,7 @@ class VanityRoles(commands.Cog):
 
         mc = disc.minecraft_account
         if mc.first_join is None:
-            # Wynncraft privacy: firstJoin can be None. Per instructions1.md \u00a77,
+            # Wynncraft privacy: firstJoin can be None. Per ../.claude/membership_spec.md \u00a77,
             # do NOT assign or strip a vanity role in this case.
             logger.info(
                 f"{member} ({member.id}) has no first_join (privacy opt-out or unknown). "

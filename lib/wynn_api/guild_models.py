@@ -46,7 +46,7 @@ class BaseMember(BaseModel):
     # present, is an OLDER username that some other parts of the Wynncraft API
     # may still report (i.e. the desynced cached name). Use it as an additional
     # candidate when matching API rows to local records by name; treat
-    # `username` as canonical. (instructions1.md \u00a74)
+    # `username` as canonical. (../../.claude/membership_spec.md \u00a74)
     legacyName: Optional[str] = None
 
     def name_candidates(self) -> tuple[str, ...]:

@@ -115,7 +115,7 @@ class Activity(commands.Cog):
         tasks = []
 
         # Detect newly-joined and newly-left members of *Returners* and fire the
-        # role-state machine accordingly. (instructions1.md \u00a76)
+        # role-state machine accordingly. (../.claude/membership_spec.md \u00a76)
         if guild_name_full == "Returners":
             api_uuids = {m.uuid for m in members}
             previously_in: list[MinecraftAccount] = await MinecraftAccount.filter(guild=guild_name_full).all()

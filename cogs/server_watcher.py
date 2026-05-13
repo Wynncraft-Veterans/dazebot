@@ -36,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from discord.ext import commands, tasks
 
 from bot import Bot
-from lib.wynn_api.player import get_player_main_stats
+from lib.wynn_api.player import get_player_stats
 from orm import UNKNOWN_LAST_ONLINE, MinecraftAccount, is_last_online_unknown
 
 logger = logging.getLogger("dazebot.cogs.server_watcher")
@@ -68,7 +68,7 @@ class ServerWatcher(commands.Cog):
 
     async def _check_one(self, account: MinecraftAccount):
         try:
-            player = await get_player_main_stats(account.uuid)
+            player = await get_player_stats(account.uuid)
         except Exception:
             logger.exception(f"lookup failed for {account.mc_username}")
             return

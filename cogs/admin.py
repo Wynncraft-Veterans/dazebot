@@ -10,10 +10,10 @@ from lib.auth import is_admin, is_operator, is_staff, is_registered
 from lib.converters import CaseInsensitiveMember
 from lib.discord_paginated_embed import Paginator, from_lines
 from lib.linking import dm_or_log, get_or_issue_code
+from lib.resolve import ensure_mc_account
 from lib.role_state import ensure_linked_baseline
 from lib.wynn_api.errors import WynnApiError
-from lib.wynn_api.player import get_player_full_stats
-from orm import Blocklist, DiscordAccount, LinkRequest, MinecraftAccount, MinecraftAlt, UNKNOWN_LAST_ONLINE
+from orm import Blocklist, DiscordAccount, LinkRequest, MinecraftAccount, MinecraftAlt
 
 logger = logging.getLogger("dazebot.cogs.admin")
 
@@ -244,31 +244,15 @@ class Admin(commands.Cog):
         # role-mutation API calls, which can easily blow past Discord's 3s
         # interaction-ack window and otherwise yield "Unknown interaction".
         await ctx.defer()
-        mc = await MinecraftAccount.filter(
-            Q(uuid=username_or_uuid)
-            | Q(mc_username__iexact=username_or_uuid)
-            | Q(wynn_username__iexact=username_or_uuid)
-        ).first()
-
-        if mc is None:
-            try:
-                fs = await get_player_full_stats(username_or_uuid)
-            except WynnApiError as e:
-                await ctx.reply(f"Could not find `{username_or_uuid}` on Wynncraft: {e.message}")
-                return
-            except Exception as e:  # noqa: BLE001 — third-party API
-                logger.exception("/link set: get_player_full_stats failed")
-                await ctx.reply(f"Failed to fetch Wynncraft stats for `{username_or_uuid}`: {e}")
-                return
-            mc = await MinecraftAccount.create(
-                uuid=fs.uuid,
-                wynn_username=fs.username,
-                mc_username=fs.username,
-                guild=fs.guild.name if fs.guild else None,
-                last_online=fs.lastJoin or UNKNOWN_LAST_ONLINE,
-                last_manual_check=UNKNOWN_LAST_ONLINE,
-                first_join=fs.firstJoin,
-            )
+        try:
+            mc = await ensure_mc_account(username_or_uuid)
+        except WynnApiError as e:
+            await ctx.reply(f"Could not find `{username_or_uuid}` on Wynncraft: {e.message}")
+            return
+        except Exception as e:  # noqa: BLE001 — third-party API
+            logger.exception("/link set: ensure_mc_account failed")
+            await ctx.reply(f"Failed to fetch Wynncraft stats for `{username_or_uuid}`: {e}")
+            return
 
         existing = await DiscordAccount.filter(minecraft_account_id=mc.id).first()
         if existing is not None and existing.disc_uuid != str(user.id):
@@ -367,9 +351,15 @@ class Admin(commands.Cog):
         username: str,
         user: Annotated[discord.Member, CaseInsensitiveMember],
     ):
-        from cogs.management import _ensure_mc_account
-
-        mc = await _ensure_mc_account(username)
+        try:
+            mc = await ensure_mc_account(username)
+        except WynnApiError as e:
+            await ctx.reply(f"Could not find `{username}` on Wynncraft: {e.message}")
+            return
+        except Exception as e:  # noqa: BLE001 — third-party API
+            logger.exception("/link alt: ensure_mc_account failed")
+            await ctx.reply(f"Failed to fetch Wynncraft stats for `{username}`: {e}")
+            return
         disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(user.id))
 
         # If they don't have a primary linked yet, treat /link alt as a primary link.
@@ -470,23 +460,11 @@ class Admin(commands.Cog):
             )
             return
 
-        mc = await MinecraftAccount.filter(
-            Q(uuid=username_or_uuid) | Q(mc_username__iexact=username_or_uuid)
-        ).first()
-        if mc is None:
-            try:
-                fs = await get_player_full_stats(username_or_uuid)
-            except WynnApiError as e:
-                await ctx.reply(f"Could not find `{username_or_uuid}` on Wynncraft: {e.message}")
-                return
-            mc = await MinecraftAccount.create(
-                uuid=fs.uuid,
-                wynn_username=fs.username,
-                mc_username=fs.username,
-                last_online=fs.lastJoin or UNKNOWN_LAST_ONLINE,
-                last_manual_check=UNKNOWN_LAST_ONLINE,
-                first_join=fs.firstJoin,
-            )
+        try:
+            mc = await ensure_mc_account(username_or_uuid)
+        except WynnApiError as e:
+            await ctx.reply(f"Could not find `{username_or_uuid}` on Wynncraft: {e.message}")
+            return
 
         disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
         await LinkRequest.create(minecraft_account=mc, discord_account=disc)

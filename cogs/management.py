@@ -6,9 +6,8 @@ See ``../.claude/membership_spec.md`` for the full requirements.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 import logging
-import re
 from typing import Annotated, Optional
 
 import discord
@@ -21,6 +20,12 @@ from config import CurrConfig
 from lib import runtime_config
 from lib.auth import is_admin, is_guild, is_operator, is_registered, is_staff
 from lib.converters import CaseInsensitiveMember
+from lib.resolve import (
+    ensure_mc_account,
+    parse_vanity_date,
+    resolve_target,
+    vanity_role_for_date,
+)
 from lib.role_state import (
     State,
     Trigger,
@@ -30,7 +35,6 @@ from lib.role_state import (
 )
 from lib.wynn_api.guild import get_guild
 from lib.wynn_api.errors import WynnApiError
-from lib.wynn_api.player import get_player_full_stats
 from orm import (
     Blocklist,
     DiscordAccount,
@@ -39,79 +43,11 @@ from orm import (
     LinkRequest,
     MinecraftAccount,
     MinecraftAlt,
-    UNKNOWN_LAST_ONLINE,
     UserVanityChoice,
     Waitlist,
 )
 
 logger = logging.getLogger("dazebot.cogs.management")
-
-VANITY_DATE_RE = re.compile(r"^(?P<year>\d{4})(?:[-/](?P<month>\d{1,2})(?:[-/](?P<day>\d{1,2}))?)?$")
-
-
-# ---------- helpers ----------
-
-
-async def _resolve_target_member(
-    ctx: commands.Context, value: str
-) -> Optional[discord.Member]:
-    """Try to resolve `value` (a ping, id, username, or display name) to a
-    Member of the guild context.
-    """
-    if ctx.guild is None:
-        return None
-    try:
-        return await CaseInsensitiveMember().convert(ctx, value)
-    except commands.MemberNotFound:
-        return None
-
-
-async def _resolve_mc_account_loose(value: str) -> Optional[MinecraftAccount]:
-    return await MinecraftAccount.filter(
-        Q(uuid=value)
-        | Q(mc_username__iexact=value)
-        | Q(wynn_username__iexact=value)
-    ).first()
-
-
-async def _ensure_mc_account(value: str) -> MinecraftAccount:
-    """Find or create a MinecraftAccount for the given username/uuid."""
-    mc = await _resolve_mc_account_loose(value)
-    if mc is not None:
-        return mc
-    fs = await get_player_full_stats(value)
-    return await MinecraftAccount.create(
-        uuid=fs.uuid,
-        wynn_username=fs.username,
-        mc_username=fs.username,
-        # fs.lastJoin / firstJoin can be None per Wynncraft privacy opt-out;
-        # use UNKNOWN_LAST_ONLINE as the in-band "unknown" marker.
-        last_online=fs.lastJoin or UNKNOWN_LAST_ONLINE,
-        last_manual_check=UNKNOWN_LAST_ONLINE,
-        first_join=fs.firstJoin,
-    )
-
-
-def _parse_vanity_date(value: str) -> date:
-    """Accept '2014', '2014-03', '2014-03-12', '2014/3/12'. Default missing
-    parts to Jan 1 / day 1.
-    """
-    m = VANITY_DATE_RE.match(value.strip())
-    if not m:
-        raise ValueError(
-            "Could not parse date. Use a year (2014), year-month (2014-03), or year-month-day (2014-03-12)."
-        )
-    year = int(m.group("year"))
-    month = int(m.group("month") or 1)
-    day = int(m.group("day") or 1)
-    return date(year, month, day)
-
-
-def _vanity_role_for_date(value: date) -> Optional[str]:
-    from lib.vanity_roles import get_vanity_role_id
-
-    dt = datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
-    return get_vanity_role_id(dt, CurrConfig)
 
 
 # ---------- the cog ----------
@@ -348,7 +284,7 @@ class Management(commands.Cog):
     @commands.hybrid_command(name="block", description="(Staff) Add a user to the VETS blocklist.")
     @is_staff()
     async def block(self, ctx: commands.Context, target: str, *, reason: Optional[str] = None):
-        member, mc = await self._resolve_target(ctx, target)
+        member, mc = await resolve_target(ctx, target)
         if mc is None:
             await ctx.reply(f"No Minecraft account found for `{target}`. Use `/link set` to register them first if needed.")
             return
@@ -391,7 +327,7 @@ class Management(commands.Cog):
     @commands.hybrid_command(name="unblock", description="(Staff) Remove a user from the blocklist.")
     @is_staff()
     async def unblock(self, ctx: commands.Context, target: str):
-        _, mc = await self._resolve_target(ctx, target)
+        _, mc = await resolve_target(ctx, target)
         if mc is None:
             await ctx.reply(f"No Minecraft account found for `{target}`.")
             return
@@ -422,7 +358,7 @@ class Management(commands.Cog):
     )
     async def force_change(self, ctx: commands.Context, target: str, transition: str):
         await ctx.defer()
-        member, mc = await self._resolve_target(ctx, target)
+        member, mc = await resolve_target(ctx, target)
         if member is None:
             await ctx.reply(f"`{target}` is not in the discord server.")
             return
@@ -481,11 +417,11 @@ class Management(commands.Cog):
     @vanity.command(name="set", description="Self-assign your vanity role for a given year/date.")
     async def vanity_set(self, ctx: commands.Context, year_or_date: str):
         try:
-            d = _parse_vanity_date(year_or_date)
+            d = parse_vanity_date(year_or_date)
         except ValueError as e:
             await ctx.reply(str(e))
             return
-        role_id_str = _vanity_role_for_date(d)
+        role_id_str = vanity_role_for_date(d)
         if role_id_str is None:
             await ctx.reply("No vanity role exists for that date (it's later than the most recent cutoff).")
             return
@@ -516,11 +452,11 @@ class Management(commands.Cog):
         self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember], year_or_date: str
     ):
         try:
-            d = _parse_vanity_date(year_or_date)
+            d = parse_vanity_date(year_or_date)
         except ValueError as e:
             await ctx.reply(str(e))
             return
-        role_id_str = _vanity_role_for_date(d)
+        role_id_str = vanity_role_for_date(d)
         if role_id_str is None:
             await ctx.reply("No vanity role for that date.")
             return
@@ -717,7 +653,7 @@ class Management(commands.Cog):
         username OR a Minecraft username/UUID. Replaces the older
         ``/username``, ``/last_online`` and ``/joindate`` commands.
         """
-        member, mc = await self._resolve_target(ctx, target)
+        member, mc = await resolve_target(ctx, target)
         if member is None and mc is None:
             await ctx.reply(f"Couldn't resolve `{target}` to a Discord member or Minecraft account.")
             return
@@ -826,7 +762,7 @@ class Management(commands.Cog):
                 return
             # Functional /register
             try:
-                mc = await _ensure_mc_account(username)
+                mc = await ensure_mc_account(username)
             except WynnApiError as e:
                 await ctx.reply(f"Could not find `{username}` on Wynncraft: {e.message}")
                 return
@@ -1167,37 +1103,6 @@ class Management(commands.Cog):
                         await DMSentLog.create(disc_uuid=str(member.id), kind="member_inactivity")
                     except discord.Forbidden:
                         logger.info(f"inactivity DM blocked for {member}")
-
-    # =================================================================
-    # internal target resolver
-    # =================================================================
-
-    async def _resolve_target(
-        self, ctx: commands.Context, target: str
-    ) -> tuple[Optional[discord.Member], Optional[MinecraftAccount]]:
-        """Resolve a target string that may be a discord ping/id/username OR a
-        Minecraft username/uuid. Returns (member_or_none, mc_account_or_none).
-        """
-        member: Optional[discord.Member] = None
-        # Try discord first
-        try:
-            member = await CaseInsensitiveMember().convert(ctx, target)
-        except commands.MemberNotFound:
-            pass
-        # Try MC account
-        mc: Optional[MinecraftAccount] = None
-        if member is not None:
-            disc = await DiscordAccount.filter(disc_uuid=str(member.id)).select_related("minecraft_account").first()
-            if disc and disc.minecraft_account:
-                mc = disc.minecraft_account
-        if mc is None:
-            mc = await _resolve_mc_account_loose(target)
-            if mc is not None and member is None:
-                # Find a discord member linked to this MC.
-                disc = await DiscordAccount.filter(minecraft_account_id=mc.id).first()
-                if disc is not None and ctx.guild is not None:
-                    member = ctx.guild.get_member(int(disc.disc_uuid))
-        return member, mc
 
 
 async def setup(bot: Bot):

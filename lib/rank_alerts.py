@@ -149,9 +149,9 @@ async def _verify_and_tag(
     try:
         # Imported lazily so a WAPI module-load failure doesn't take down
         # the whole rank-alert path at import time.
-        from lib.wynn_api.player import get_player_main_stats
+        from lib.wynn_api.player import get_player_stats
 
-        player = await get_player_main_stats(target)
+        player = await get_player_stats(target)
         if player.guild is not None:
             actual_rank = player.guild.rank
     except Exception as exc:  # noqa: BLE001 — WAPI is third-party

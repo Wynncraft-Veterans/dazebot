@@ -27,8 +27,8 @@ from typing import TYPE_CHECKING
 import discord
 
 from lib.role_state import ensure_linked_baseline
-from lib.wynn_api.player import get_player_full_stats
-from orm import Blocklist, DiscordAccount, LinkCode, MinecraftAccount, UNKNOWN_LAST_ONLINE
+from lib.wynn_api.player import get_player_stats
+from orm import Blocklist, DiscordAccount, LinkCode, MinecraftAccount
 
 if TYPE_CHECKING:
     from bot import Bot
@@ -199,29 +199,19 @@ async def try_consume_code(
             discord_user=discord_user,
         )
 
-    mc = await MinecraftAccount.filter(uuid=mc_uuid).first()
-    if mc is None:
-        try:
-            fs = await get_player_full_stats(mc_uuid)
-            mc = await MinecraftAccount.create(
-                uuid=mc_uuid,
-                wynn_username=fs.username,
-                mc_username=mc_username,
-                # Populate guild from the live API so ensure_linked_baseline
-                # below can correctly grant MEMBER instead of REGISTERED for
-                # users who joined Returners between activity-loop ticks.
-                guild=fs.guild.name if fs.guild else None,
-                last_online=fs.lastJoin or UNKNOWN_LAST_ONLINE,
-                last_manual_check=UNKNOWN_LAST_ONLINE,
-                first_join=fs.firstJoin,  # may be None per Wynncraft privacy opt-out
-            )
-        except Exception as e:  # noqa: BLE001  \u2014 third-party API
-            logger.exception("try_consume_code: failed to fetch player stats")
-            return LinkCompletion(
-                success=False,
-                reason=f"Failed to fetch Wynncraft stats for `{mc_username}`: {e}",
-                discord_user=discord_user,
-            )
+    # ensure_mc_account: creates the row (populating guild from the live API)
+    # if we've never seen this UUID, otherwise returns the existing row.
+    from lib.resolve import ensure_mc_account
+
+    try:
+        mc = await ensure_mc_account(mc_uuid)
+    except Exception as e:  # noqa: BLE001  \u2014 third-party API
+        logger.exception("try_consume_code: failed to fetch player stats")
+        return LinkCompletion(
+            success=False,
+            reason=f"Failed to fetch Wynncraft stats for `{mc_username}`: {e}",
+            discord_user=discord_user,
+        )
 
     disc.minecraft_account = mc
     await disc.save()
@@ -231,7 +221,7 @@ async def try_consume_code(
     # whatever the activity loop happened to cache last. Best-effort: if the
     # API call fails, we fall back to whatever is stored.
     try:
-        fs = await get_player_full_stats(mc_uuid)
+        fs = await get_player_stats(mc_uuid, full=True)
         live_guild = fs.guild.name if fs.guild else None
         if mc.guild != live_guild:
             mc.guild = live_guild

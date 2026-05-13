@@ -2,14 +2,14 @@ from datetime import datetime, timezone
 
 from lib import mc
 from lib.lib import ProfCategory
-from lib.wynn_api.player import get_player_full_stats
+from lib.wynn_api.player import get_player_stats
 from lib.wynn_api.player_models import WynncraftPlayer
 from orm import MinecraftAccount, ProfessionCategories
 
 
 async def check_player_full(uuid: str) -> tuple[str, WynncraftPlayer, MinecraftAccount]:
     mc_username = await mc.get_mc_username(uuid)
-    player = await get_player_full_stats(uuid)
+    player = await get_player_stats(uuid, full=True)
     account = await MinecraftAccount.get(uuid=player.uuid)
     # if player.guild is None:
     #     account.guild = None

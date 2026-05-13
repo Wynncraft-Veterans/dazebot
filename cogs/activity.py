@@ -9,7 +9,7 @@ from lib.discord_paginated_embed import Paginator, from_lines
 from lib.wynn import check_player_full
 from lib.wynn_api.guild import get_guild
 from lib.wynn_api.guild_models import BaseMember, Guild
-from lib.wynn_api.player import get_player_full_stats
+from lib.wynn_api.player import get_player_stats
 from lib.wynn_api.requestor import Requestor
 from orm import (
     DeadGuildAlert,
@@ -335,7 +335,7 @@ class Activity(commands.Cog):
 
         async def _verify(m: MinecraftAccount):
             try:
-                player = await get_player_full_stats(m.uuid)
+                player = await get_player_stats(m.uuid, full=True)
             except Exception:
                 logger.exception(f"purgelist verify failed for {m.mc_username}; trusting DB")
                 confirmed.append((m, m.last_online))

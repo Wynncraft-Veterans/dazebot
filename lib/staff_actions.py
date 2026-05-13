@@ -27,16 +27,14 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 import discord
-from tortoise.expressions import Q
 
 from lib.linking import dm_or_log
-from lib.wynn_api.player import get_player_full_stats
+from lib.resolve import ensure_mc_account
 from orm import (
     Blocklist,
     DiscordAccount,
     MinecraftAccount,
     StaffActionEntry,
-    UNKNOWN_LAST_ONLINE,
 )
 
 if TYPE_CHECKING:
@@ -94,30 +92,12 @@ class ActionResult:
 async def resolve_target(name_or_uuid: str) -> tuple[str, str, MinecraftAccount]:
     """Return ``(uuid, canonical_username, mc_account)`` for ``name_or_uuid``.
 
-    Looks the value up in the local ``MinecraftAccount`` table first
-    (matching uuid / mc_username / wynn_username case-insensitively); on
-    miss, falls back to the Wynncraft API (which accepts either a UUID or
-    a username) and creates a row so subsequent lookups are cheap. Raises
-    :class:`WynnApiError` (or ``Exception`` for non-WAPI failures) if the
-    name cannot be resolved.
+    Thin wrapper over :func:`lib.resolve.ensure_mc_account` -- exists to
+    preserve the tuple shape this module's callers expect. Raises
+    :class:`WynnApiError` (or other Exceptions for non-WAPI failures) if
+    the name cannot be resolved.
     """
-    existing = await MinecraftAccount.filter(
-        Q(uuid=name_or_uuid)
-        | Q(mc_username__iexact=name_or_uuid)
-        | Q(wynn_username__iexact=name_or_uuid)
-    ).first()
-    if existing is not None:
-        return existing.uuid, existing.mc_username, existing
-    fs = await get_player_full_stats(name_or_uuid)
-    mc = await MinecraftAccount.create(
-        uuid=fs.uuid,
-        wynn_username=fs.username,
-        mc_username=fs.username,
-        guild=fs.guild.name if fs.guild else None,
-        last_online=fs.lastJoin or UNKNOWN_LAST_ONLINE,
-        last_manual_check=UNKNOWN_LAST_ONLINE,
-        first_join=fs.firstJoin,
-    )
+    mc = await ensure_mc_account(name_or_uuid)
     return mc.uuid, mc.mc_username, mc
 
 

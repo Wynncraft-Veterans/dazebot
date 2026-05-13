@@ -34,7 +34,7 @@ from lib.auth import (
 )
 from lib.converters import CaseInsensitiveMember
 from lib.wynn_api.errors import WynnApiError
-from lib.wynn_api.player import get_player_full_stats
+from lib.wynn_api.player import get_player_stats
 from orm import (
     Cult,
     CultMembership,
@@ -249,7 +249,7 @@ async def _resolve_owner_mc(ctx: commands.Context, owner: str) -> Optional[Minec
         return mc
 
     try:
-        fs = await get_player_full_stats(owner)
+        fs = await get_player_stats(owner, full=True)
     except WynnApiError as e:
         logger.info("week_0 add: Wynn API lookup failed for %r: %s", owner, e)
         return None

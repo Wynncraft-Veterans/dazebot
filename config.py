@@ -95,6 +95,13 @@ class Config:
 
         SECTIONS = ["guides", "guild", "major-changes"]
 
+    class BuildLibraryConfig:
+        # Forum channels for /promote and /demote (see cogs/build_library.py).
+        # Both must be forum channels; the bot needs Manage Webhooks + Manage Threads + Manage Messages on each.
+        # Set to None to disable the cog (e.g. in DevConfig).
+        WORKSHOP_FORUM_ID: int | None = 1359223973208002931  # #build-workshop
+        LIBRARY_FORUM_ID: int | None = 1504188786794565753  # #build-library
+
     class VanityRolesConfig:
         CUTOFFS = [
             (dt.replace(tzinfo=timezone.utc), role_id)
@@ -132,6 +139,11 @@ class DevConfig(Config):
     class DocumentationConfig(Config.DocumentationConfig): ...
 
     class VanityRolesConfig(Config.VanityRolesConfig): ...
+
+    class BuildLibraryConfig(Config.BuildLibraryConfig):
+        # No dev forum channels configured; /promote and /demote refuse to run on this deployment.
+        WORKSHOP_FORUM_ID = None
+        LIBRARY_FORUM_ID = None
 
 
 if os.environ.get("DAZEBOT_DEPLOYMENT") == "production":

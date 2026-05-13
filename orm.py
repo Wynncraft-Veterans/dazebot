@@ -411,6 +411,33 @@ class VerifyKey(Model):
         table = "verify_keys"
 
 
+class BuildPromotion(Model):
+    """A workshop->library forum-thread promotion performed by /promote.
+
+    Used by /demote to find the original workshop thread (so demotion can
+    sync new comments into it and unlock it, instead of creating a fresh
+    one). Rows are deleted on successful /demote. Stale rows (library
+    thread manually deleted, workshop thread gone, etc.) are cleaned up
+    on the next /promote of the same workshop thread.
+
+    ``sync_complete_at`` marks when the last reposted message landed in
+    the library thread. /demote uses it as the ``after=`` cutoff to find
+    *genuinely new* library messages (everything before it is either the
+    bot's metadata header or a webhook-impersonated repost of original
+    workshop content).
+    """
+
+    id = fields.UUIDField(pk=True)
+    library_thread_id = fields.CharField(max_length=64, unique=True)
+    workshop_thread_id = fields.CharField(max_length=64, unique=True)
+    promoted_by_disc_uuid = fields.CharField(max_length=255)
+    promoted_at = fields.DatetimeField(auto_now_add=True)
+    sync_complete_at = fields.DatetimeField(use_tz=True)
+
+    class Meta:
+        table = "build_promotions"
+
+
 # Database initialization helper
 async def init_db():
     """Initialise the Tortoise ORM connection.

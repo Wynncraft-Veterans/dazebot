@@ -43,6 +43,13 @@ class MinecraftAccount(Model):
     mc_username = fields.CharField(max_length=255)
     last_online = fields.DatetimeField(use_tz=True)
     last_manual_check = fields.DatetimeField(use_tz=True)
+    # Most recent observed value of the Wynncraft /v3/player `server` field
+    # (e.g. ``EU37``). Privacy-hidden players who hide ``lastJoin`` typically
+    # still expose ``server``; the watcher in ``cogs/server_watcher.py``
+    # treats a between-tick change in this value as proof of activity and
+    # bumps ``last_online``. NULL = never observed.
+    last_seen_server: Optional[str] = fields.CharField(max_length=16, null=True, default=None)  # type: ignore
+    server_observed_at: datetime | None = fields.DatetimeField(use_tz=True, null=True)  # type: ignore
     first_join: datetime | None = fields.DatetimeField(use_tz=True, null=True)  # type: ignore
     token: Optional[str] = fields.CharField(max_length=6, null=True, default=None)  # type: ignore
     is_honourary = fields.BooleanField(default=False)

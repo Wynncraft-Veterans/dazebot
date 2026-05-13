@@ -8,7 +8,7 @@ DB engine: SQLite at `/app/data/dazebot.db` (production) or `dev.db` at the repo
 
 | Table | Owner | Purpose |
 |---|---|---|
-| `MinecraftAccount` | `lib/linking.py`, activity loop | UUID-keyed MC profile. Holds `wynn_username` (cached from API, stale-tolerant) + `mc_username` + `guild` + `last_online` + `first_join`. |
+| `MinecraftAccount` | `lib/linking.py`, activity loop | UUID-keyed MC profile. Holds `wynn_username` (cached from API, stale-tolerant) + `mc_username` + `guild` + `last_online` + `first_join`. Also carries `last_seen_server` + `server_observed_at`, written by `cogs/server_watcher.py` to infer activity for privacy-hidden players (see [cogs.md](cogs.md)). |
 | `DiscordAccount` | `lib/linking.py` | `disc_uuid` + nullable FK to the *primary* `MinecraftAccount`. One row per Discord user. |
 | `MinecraftAlt` | `cogs/management.py` (`/add`) | Additional MC accounts beyond the primary. The primary lives on `DiscordAccount.minecraft_account`; the alts live here. |
 | `MojangNameCache` | `lib/mc.py` | Persistent UUID → username cache. Refreshed after `MAX_AGE` to handle name changes. Distinct from the per-account `MinecraftAccount.mc_username` snapshot. |

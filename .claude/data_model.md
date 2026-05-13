@@ -2,7 +2,7 @@
 
 Reference for [orm.py](../orm.py) — every table, its purpose, and which subsystem owns it.
 
-DB engine: SQLite at `/app/data/dazebot.db` (production) or `dev.db` at the repo root (local). WAL mode. **No migrations** — `Tortoise.generate_schemas()` runs in `init_db()` and only ever *adds* tables/columns. To remove a field, drop the table or wire in Aerich.
+DB engine: SQLite at `/app/data/dazebot.db` (production) or `dev.db` at the repo root (local). WAL mode. **No migrations** — `Tortoise.generate_schemas(safe=True)` runs in `init_db()` and only ever emits `CREATE TABLE IF NOT EXISTS`. It does **not** alter existing tables. New tables work automatically; new columns require a one-shot manual `ALTER TABLE`. To remove a field, drop the table or wire in Aerich.
 
 ## Identity
 
@@ -89,10 +89,10 @@ LinkCode (no FK; matched by mc_username + code at consume time)
 
 ## When to add a new table
 
-`init_db()` calls `Tortoise.generate_schemas(safe=True)` which only *adds* — existing tables are untouched. So:
+`init_db()` calls `Tortoise.generate_schemas(safe=True)` which only emits `CREATE TABLE IF NOT EXISTS`. Existing tables are completely untouched — no `ALTER TABLE` is ever issued. So:
 
-- **Adding a column?** It works automatically on next boot. Old rows have `NULL` (or the field default).
 - **Adding a table?** Add the model, restart the bot, you're done.
+- **Adding a column?** Tortoise will *not* add it for you. The model will reference a column that doesn't exist, every query that selects it will fail (`OperationalError: no such column`), and every `.save()` on that table will then fail with `IncompleteInstanceError` because Tortoise falls back to partial-loading. You MUST run `ALTER TABLE <table> ADD COLUMN <name> <type>;` on every DB (production + every dev DB) before deploying the model change. Use the canonical type Tortoise would have generated — inspect via `Tortoise.get_connection('default').schema_generator(conn).get_create_schema_sql(safe=True)`.
 - **Renaming a column?** Doesn't work via `generate_schemas`. Either drop the table or write a one-shot migration script. Aerich is in the dependency tree but not wired up.
 - **Removing a column?** Same — either ignore it (the column lingers) or do a manual schema bump.
 

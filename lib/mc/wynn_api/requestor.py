@@ -1,3 +1,11 @@
+"""Singleton aiohttp client for the Wynncraft v3 API.
+
+Maintains two priority queues (normal + priority) and respects the
+upstream ``RateLimit-*`` headers, falling back to a defensive 1s sleep
+when they're missing. ``get0`` pushes a request to the front of the
+priority queue.
+"""
+
 import asyncio
 import collections
 import logging
@@ -7,7 +15,7 @@ import aiohttp
 from aiohttp import ClientResponse
 from uuid import UUID, uuid4
 
-logger = logging.getLogger("dazebot.lib.requestor")
+logger = logging.getLogger("dazebot.lib.mc.wynn_api.requestor")
 
 
 class SingletonMeta(type):

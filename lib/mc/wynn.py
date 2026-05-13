@@ -1,3 +1,8 @@
+"""Full-stats Wynncraft refresh: pulls a player envelope, syncs the
+MinecraftAccount row (last_online / first_join / usernames), and writes
+per-profession category buckets to ProfessionCategories.
+"""
+
 from datetime import datetime, timezone
 
 from lib.mc import mojang as mc

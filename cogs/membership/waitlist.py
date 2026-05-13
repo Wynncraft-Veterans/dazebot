@@ -17,7 +17,7 @@ from lib.mc.wynn_api.errors import WynnApiError
 from lib.role_state import Trigger, apply_transition
 from orm import Blocklist, DiscordAccount, MinecraftAccount, Waitlist
 
-logger = logging.getLogger("dazebot.cogs.waitlist")
+logger = logging.getLogger("dazebot.cogs.membership.waitlist")
 
 
 class WaitlistCog(commands.Cog):

@@ -4,7 +4,7 @@ Single-source-of-truth audit of every slash/prefix command exposed by the
 bot, with its permission gate. Update this file whenever a command is added,
 removed, renamed, or has its tier changed.
 
-The decorators live in [`lib/auth.py`](lib/auth.py).
+The decorators live in [`lib/auth.py`](lib/auth.py). Cogs live under domain subfolders (`membership/`, `moderation/`, `events/`, `activity/`, `integrations/`, `meta/`).
 
 ## Tiers
 
@@ -30,7 +30,7 @@ Special, non-hierarchical:
 
 ## Slash command surface
 
-### Bot maintenance — `cogs/admin.py`
+### Bot maintenance — `cogs/moderation/admin.py`
 
 | Command | Tier | Notes |
 |---|---|---|
@@ -42,7 +42,7 @@ Special, non-hierarchical:
 | `/embed [color] [title] <description>` | ADMIN | |
 | `/shouts set <user> <count>` | OPERATOR | Forcefully overwrites `shout_count` |
 
-### Linking — `cogs/admin.py` (`/link` group)
+### Linking — `cogs/moderation/admin.py` (`/link` group)
 
 | Command | Tier | Notes |
 |---|---|---|
@@ -55,7 +55,7 @@ Special, non-hierarchical:
 | `/link code <username>` | PUBLIC | DMs a one-time code; consumed by chatting it on the MC server |
 | `/link info` | PUBLIC | Pretty embed explaining the linking flow |
 
-### Management — `cogs/management.py`
+### Membership — `cogs/membership/` (split from former `cogs/management.py`)
 
 | Command | Tier | Notes |
 |---|---|---|
@@ -82,7 +82,7 @@ Special, non-hierarchical:
 | `/config list \| get \| set \| reset` | ADMIN | Runtime-config overrides |
 | `/alerts status \| mute \| unmute \| thresholds` | ADMIN | Shortcut wrappers around `/config` for guild dead/full alerts |
 
-### Activity / shouts — `cogs/activity.py`
+### Activity / shouts — `cogs/activity/activity.py`
 
 | Command | Tier | Notes |
 |---|---|---|
@@ -91,7 +91,7 @@ Special, non-hierarchical:
 | `/shout last` | STAFF \| SHOUTER | Three most recent shouts |
 | `/shout board` | STAFF \| SHOUTER | Per-shouter shout-count leaderboard |
 
-### Weekly event — `cogs/weekly_event.py`
+### Weekly event — `cogs/events/weekly_event.py`
 
 | Command | Tier | Notes |
 |---|---|---|
@@ -101,29 +101,29 @@ Special, non-hierarchical:
 | `/score leaderboard <week> [amount]` | PUBLIC | |
 | `/count <channel> [override_emoji]` | STAFF | Forum-channel reaction tally |
 
-### Utility — `cogs/utility.py`
+### Utility — `cogs/meta/utility.py`
 
 | Command | Tier | Notes |
 |---|---|---|
 | `/findprofer [include_non_members]` | GUILD | Profession matchmaking |
 
-### Documentation — `cogs/documentation.py`
+### Documentation — `cogs/meta/documentation.py`
 
 | Command | Tier | Notes |
 |---|---|---|
 | `/docs ...` | PUBLIC | |
 
-### Miscellaneous — `cogs/pointless.py`
+### Miscellaneous — `cogs/meta/pointless.py`
 
 | Command | Tier | Notes |
 |---|---|---|
 | `/randomfact` | PUBLIC | |
 
-### Returns — `cogs/return_cmd.py` (+ `cogs/returns/` package)
+### Returns — `cogs/events/return_cmd.py` (+ `cogs/events/returns/` package)
 
 | Command | Tier | Notes |
 |---|---|---|
-| `/return <id> [action] [cult] [owner] [target] [message] [flag]` | PUBLIC (per-action gates inside the handler) | Dispatches to the week-`id` handler in `cogs/returns/week_<id>.py`. Signature is intentionally expandable — append optional kwargs as features land. |
+| `/return <id> [action] [cult] [owner] [target] [message] [flag]` | PUBLIC (per-action gates inside the handler) | Dispatches to the week-`id` handler in `cogs/events/returns/week_<id>.py`. Signature is intentionally expandable — append optional kwargs as features land. |
 | `/return 0 join <cult>` | REGISTERED | Switch the caller's active cult (mutually exclusive teams). 6-month self-switch cooldown. |
 | `/return 0 add <cult> <owner>` | ADMIN | Create a cult; `owner` is a Discord mention/id, MC username, or MC UUID. |
 | `/return 0 list <cult>` | REGISTERED | Print figurehead + staff + members for a cult. |
@@ -133,9 +133,8 @@ Special, non-hierarchical:
 
 ## Background / listener-only cogs (no slash surface)
 
-* `cogs/api.py` — empty stub (was `/joindate`, merged into `/info`).
-* `cogs/join.py` — only janitor tasks: `clear_old_requests`, `waitlist_cleanup`.
-* `cogs/anni.py`, `cogs/vanity_roles.py`, `cogs/api_server.py` — listeners only.
+* `cogs/membership/join.py` — janitor tasks: `clear_old_requests`, `waitlist_cleanup`.
+* `cogs/moderation/anni.py`, `cogs/membership/vanity_roles.py`, `cogs/integrations/api_server.py` — listeners only.
 
 ## Notes & migration log (phase 7)
 

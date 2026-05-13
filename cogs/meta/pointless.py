@@ -8,7 +8,7 @@ from discord.ext import commands
 
 from bot import Bot
 
-logger = logging.getLogger("dazebot.cogs.pointless")
+logger = logging.getLogger("dazebot.cogs.meta.pointless")
 
 
 class Pointless(commands.Cog):

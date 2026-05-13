@@ -22,7 +22,7 @@ from typing import Awaitable, Callable
 
 from discord.ext import commands
 
-logger = logging.getLogger("dazebot.cogs.returns")
+logger = logging.getLogger("dazebot.cogs.events.returns")
 
 Handler = Callable[..., Awaitable[None]]
 REGISTRY: dict[int, Handler] = {}

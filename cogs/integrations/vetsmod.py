@@ -43,7 +43,7 @@ from lib.staff.verify_keys import (
 )
 from orm import DiscordAccount, MinecraftAccount, VerifyKey
 
-logger = logging.getLogger("dazebot.cogs.vetsmod")
+logger = logging.getLogger("dazebot.cogs.integrations.vetsmod")
 
 VETSMOD_MODRINTH_URL = "https://modrinth.com/mod/vetsmod/versions"
 

@@ -1,3 +1,10 @@
+"""Custom discord.py converters.
+
+``CaseInsensitiveMember`` matches a member by mention/id first, then
+falls back to a case-insensitive sweep across ``name``, ``display_name``,
+``global_name``, and ``nick``.
+"""
+
 import discord
 from discord.ext import commands
 

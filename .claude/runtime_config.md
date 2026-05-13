@@ -33,7 +33,7 @@ Values are JSON-encoded so any of `int`/`bool`/`str` round-trips cleanly. `timed
 
 ## `/config` command flow
 
-Defined in `cogs/management.py` under `commands.hybrid_group(name="config")`. Subcommands:
+Defined in `cogs/membership/runtime_config_cog.py` under `commands.hybrid_group(name="config")`. Subcommands:
 
 - `/config list [prefix]` — `keys_filtered(prefix)` to filter, then show key=value for each
 - `/config get <key>` — `get_value(key)` — show current live value

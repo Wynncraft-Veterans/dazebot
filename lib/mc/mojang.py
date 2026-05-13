@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 import aiohttp
 
-logger = logging.getLogger("dazebot.lib.mc")
+logger = logging.getLogger("dazebot.lib.mc.mojang")
 
 _session: aiohttp.ClientSession | None = None
 _lookup_lock: dict[str, asyncio.Lock] = {}

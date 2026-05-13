@@ -27,7 +27,7 @@ from lib.auth import is_admin, is_staff
 from lib.mc.wynn_api.errors import WynnApiError
 from lib.staff import staff_actions
 
-logger = logging.getLogger("dazebot.cogs.staff_actions")
+logger = logging.getLogger("dazebot.cogs.moderation.staff_actions")
 
 
 def _kind_label(kind: str) -> str:

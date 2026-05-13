@@ -33,7 +33,7 @@ from orm import Blocklist, DiscordAccount, LinkCode, MinecraftAccount
 if TYPE_CHECKING:
     from bot import Bot
 
-logger = logging.getLogger("dazebot.lib.linking")
+logger = logging.getLogger("dazebot.lib.mc.linking")
 
 
 @dataclass

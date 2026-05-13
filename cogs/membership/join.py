@@ -1,8 +1,9 @@
 """Background-task cog for the linking/waitlist subsystem.
 
-User-facing linking commands moved to ``cogs/admin.py`` under the ``/link``
-group. Self-waitlist commands moved to ``cogs/management.py`` under the
-``/waitlist`` group. This cog keeps only the periodic janitor loops:
+User-facing linking commands live in ``cogs/moderation/admin.py`` under
+the ``/link`` group. Self-waitlist commands live in
+``cogs/membership/waitlist.py`` under the ``/waitlist`` group. This cog
+keeps only the periodic janitor loops:
 
 * ``clear_old_requests`` — drop ``LinkRequest`` rows whose MC or Discord side
   has since been linked through some other channel.
@@ -20,7 +21,7 @@ from bot import Bot
 from lib.mc.wynn import check_player_full
 from orm import LinkRequest, MinecraftAccount, Waitlist
 
-logger = logging.getLogger("dazebot.cogs.join")
+logger = logging.getLogger("dazebot.cogs.membership.join")
 
 
 class Join(commands.Cog):

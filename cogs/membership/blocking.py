@@ -15,7 +15,7 @@ from lib.mc.resolve import resolve_target
 from lib.role_state import force_to_registered_only
 from orm import Blocklist
 
-logger = logging.getLogger("dazebot.cogs.blocking")
+logger = logging.getLogger("dazebot.cogs.membership.blocking")
 
 
 class Blocking(commands.Cog):

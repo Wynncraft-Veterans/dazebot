@@ -1,3 +1,12 @@
+"""Vanity-role auto-assignment listener.
+
+When a Minecraft account's ``first_join`` becomes known (via the
+Wynncraft API), this cog grants the corresponding cosmetic year-tier
+role on the linked Discord member. Holds a module-level ``_cog_instance``
+singleton so ``/vanity set``/``/vanity force`` in the membership_state
+cog can reuse the same role-mutation helper.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -10,7 +19,7 @@ from config import CurrConfig
 from lib.discord_utils.vanity_roles import get_vanity_role_id
 from orm import MinecraftAccount, DiscordAccount
 
-logger = logging.getLogger("dazebot.cogs.vanity_roles")
+logger = logging.getLogger("dazebot.cogs.membership.vanity_roles")
 
 VANITY_ROLE_IDS = set(int(role_id) for _, role_id in CurrConfig.VanityRolesConfig.CUTOFFS)
 

@@ -1,3 +1,9 @@
+"""Pydantic models for the Wynncraft v3 player-endpoint envelope.
+
+``CharacterProfessionsType`` is referenced from ``orm.py`` for the
+profession-category DB column; keep additions in sync.
+"""
+
 from datetime import datetime
 from enum import Enum
 from pydantic import BaseModel, Field

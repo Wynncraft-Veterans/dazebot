@@ -1,10 +1,13 @@
+"""Anniversary listener: schedules and posts year-anniversary messages
+for tracked Discord members."""
+
 import logging
 import discord
 from discord.ext import commands
 from bot import Bot
 
 
-logger = logging.getLogger("dazebot.cogs.anni")
+logger = logging.getLogger("dazebot.cogs.moderation.anni")
 
 from config import CurrConfig
 

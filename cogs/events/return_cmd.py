@@ -1,3 +1,10 @@
+"""``/return <id>`` dispatcher cog.
+
+Looks up the week handler in ``cogs/events/returns/REGISTRY`` (populated
+at import time by the ``@register(N)`` decorator on each ``week_N.py``)
+and forwards the call.
+"""
+
 import logging
 from typing import Optional
 
@@ -10,7 +17,7 @@ from cogs.events import returns
 from cogs.events.returns.week_0 import backfill_cult_threads, do_join_by_name
 from orm import Cult
 
-logger = logging.getLogger("dazebot.cogs.return_cmd")
+logger = logging.getLogger("dazebot.cogs.events.return_cmd")
 
 
 class Returns(commands.Cog):

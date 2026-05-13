@@ -1,6 +1,6 @@
 # VerifyKey: bearer-key auth for vetsmod
 
-Reference for [lib/verify_keys.py](../lib/verify_keys.py) and the `VerifyKey` ORM table — the bearer-token auth flow that vetsmod uses to authenticate WS connections to `temporary-server`.
+Reference for [lib/staff/verify_keys.py](../lib/staff/verify_keys.py) and the `VerifyKey` ORM table — the bearer-token auth flow that vetsmod uses to authenticate WS connections to `temporary-server`.
 
 For the high-level cross-repo wiring, see [`../CLAUDE.md`](CLAUDE.md) §"Two related auth flows on the same FastAPI app". This doc is the dazebot-internal reference.
 

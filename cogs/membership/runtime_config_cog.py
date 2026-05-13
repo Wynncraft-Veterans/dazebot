@@ -21,7 +21,7 @@ from lib import runtime_config
 from lib.auth import is_admin
 
 
-logger = logging.getLogger("dazebot.cogs.runtime_config")
+logger = logging.getLogger("dazebot.cogs.membership.runtime_config_cog")
 
 
 # Long enough that the throttle effectively silences the alert, while

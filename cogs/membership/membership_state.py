@@ -36,7 +36,7 @@ from orm import (
     Waitlist,
 )
 
-logger = logging.getLogger("dazebot.cogs.membership_state")
+logger = logging.getLogger("dazebot.cogs.membership.membership_state")
 
 
 class MembershipState(commands.Cog):

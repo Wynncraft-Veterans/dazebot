@@ -40,7 +40,7 @@ from orm import (
 if TYPE_CHECKING:
     from bot import Bot
 
-logger = logging.getLogger("dazebot.staff_actions")
+logger = logging.getLogger("dazebot.lib.staff.staff_actions")
 
 
 # Point values per action. Keep these in sync with the server-side wire

@@ -48,7 +48,7 @@ from lib.discord_utils.thread_clone import (
 )
 from orm import BuildPromotion
 
-logger = logging.getLogger("dazebot.cogs.build_library")
+logger = logging.getLogger("dazebot.cogs.meta.build_library")
 
 # Pinned in the source workshop thread on /promote so users browsing the
 # workshop can find the promoted version. Destination threads carry no

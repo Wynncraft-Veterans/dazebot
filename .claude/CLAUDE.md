@@ -94,7 +94,7 @@ dazebot/                 (repo root)
 
 Two unrelated flows live under `/api/auth/` on dazebot's FastAPI sidecar — link-code consumption from PicoLimbo and `/unlock`-key introspection from temporary-server. They share a URL prefix and nothing else. **Detail in [auth.md](auth.md).**
 
-The Discord-side commands are in [`cogs/vetsmod.py`](../cogs/vetsmod.py) and the `/first_install` view in [`lib/first_install_view.py`](../lib/first_install_view.py).
+The Discord-side commands are in [`cogs/integrations/vetsmod.py`](../cogs/integrations/vetsmod.py) and the `/first_install` view in [`lib/discord_utils/first_install_view.py`](../lib/discord_utils/first_install_view.py).
 
 ## Required env vars (production)
 

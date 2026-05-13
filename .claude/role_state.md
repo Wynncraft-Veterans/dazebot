@@ -59,9 +59,9 @@ Used by `/block` ([`membership_spec.md` §2b](membership_spec.md#2--manual-overr
 
 ### `ensure_linked_baseline(member, *, in_returners, blocked, reason=None)`
 The **invariant-enforcing** helper. Any linked Discord user must hold either MEMBER or REGISTERED — never both, never neither, never HIATUS or HONOURARY as their primary state. Called from:
-- `lib/linking.py:try_consume_code` after a successful link
-- `cogs/join.py` periodic janitor (catches stale states from prior failures)
-- `cogs/activity.py` whenever guild membership changes
+- `lib/mc/linking.py:try_consume_code` after a successful link
+- `cogs/membership/join.py` periodic janitor (catches stale states from prior failures)
+- `cogs/activity/activity.py` whenever guild membership changes
 
 Idempotent: if the member already has the correct primary role and no conflicting ones, it's a no-op (no API calls). Safe to retry.
 

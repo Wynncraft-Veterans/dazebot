@@ -28,7 +28,7 @@ from orm import Blocklist, DiscordAccount, MinecraftAccount, VerifyKey, Waitlist
 if TYPE_CHECKING:
     from bot import Bot
 
-logger = logging.getLogger("dazebot.lib.verify_keys")
+logger = logging.getLogger("dazebot.lib.staff.verify_keys")
 
 
 # ---------------------------------------------------------------------------

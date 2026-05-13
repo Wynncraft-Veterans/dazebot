@@ -30,7 +30,7 @@ import discord
 if TYPE_CHECKING:
     from bot import Bot
 
-logger = logging.getLogger("dazebot.rank_alerts")
+logger = logging.getLogger("dazebot.lib.staff.rank_alerts")
 
 # Channel that receives both BAN and KICK notices (the alerts that
 # request admin action -- urgent BAN with a role ping, deferred KICK

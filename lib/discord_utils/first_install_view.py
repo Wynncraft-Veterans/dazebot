@@ -22,7 +22,7 @@ from orm import DMSentLog, DiscordAccount, LinkCode
 if TYPE_CHECKING:
     from bot import Bot
 
-logger = logging.getLogger("dazebot.lib.first_install_view")
+logger = logging.getLogger("dazebot.lib.discord_utils.first_install_view")
 
 LINK_BUTTON_CUSTOM_ID = "first_install:link_button"
 LINK_MODAL_CUSTOM_ID = "first_install:link_modal"

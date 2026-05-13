@@ -1,3 +1,6 @@
+"""Activity cog: periodic Returners guild scan, dead/full guild alerts,
+``/purgelist`` for inactive members, and the ``/shout`` group."""
+
 import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
@@ -21,7 +24,7 @@ from orm import (
     is_last_online_unknown,
 )
 
-logger = logging.getLogger("dazebot.cogs.activity")
+logger = logging.getLogger("dazebot.cogs.activity.activity")
 from bot import Bot
 from tortoise.expressions import Q
 

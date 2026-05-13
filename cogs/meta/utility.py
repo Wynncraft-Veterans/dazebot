@@ -1,3 +1,5 @@
+"""Utility cog: ``/findprofer`` (profession matchmaking among Returners)."""
+
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
@@ -14,7 +16,7 @@ from lib.mc.wynn_api.player_models import CharacterProfessionsType
 from lib.util import ProfCategory
 from orm import MinecraftAccount, ProfessionCategories
 
-logger = logging.getLogger("dazebot.cogs.utility")
+logger = logging.getLogger("dazebot.cogs.meta.utility")
 
 PROF_LABEL_TO_TYPE: dict[str, CharacterProfessionsType] = {
     "armouring": CharacterProfessionsType.ARMOURING,

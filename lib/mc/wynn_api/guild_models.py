@@ -1,3 +1,5 @@
+"""Pydantic models for the Wynncraft v3 guild-endpoint envelope."""
+
 import itertools
 from datetime import datetime
 from pydantic import BaseModel, Field

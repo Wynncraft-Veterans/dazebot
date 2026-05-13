@@ -1,3 +1,7 @@
+"""Admin cog: bot-maintenance (``/admin sync|reload|load|unload``),
+``/say``/``/embed``, the ``/link`` group (set/remove/check/alt/request/
+requests/approve/code/info), and ``/shouts set``."""
+
 import logging
 from typing import Annotated
 import discord
@@ -15,7 +19,7 @@ from lib.mc.wynn_api.errors import WynnApiError
 from lib.role_state import ensure_linked_baseline
 from orm import Blocklist, DiscordAccount, LinkRequest, MinecraftAccount, MinecraftAlt
 
-logger = logging.getLogger("dazebot.cogs.admin")
+logger = logging.getLogger("dazebot.cogs.moderation.admin")
 
 
 class Admin(commands.Cog):

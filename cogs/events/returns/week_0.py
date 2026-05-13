@@ -43,7 +43,7 @@ from orm import (
     UNKNOWN_LAST_ONLINE,
 )
 
-logger = logging.getLogger("dazebot.cogs.returns.week_0")
+logger = logging.getLogger("dazebot.cogs.events.returns.week_0")
 
 
 # Cult name (lowercased) -> private thread id under channel 1313786225735237654.

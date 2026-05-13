@@ -1,3 +1,9 @@
+"""Reusable paginator for long embed listings.
+
+``from_lines`` chunks a flat list of strings into one embed per page;
+``Paginator`` is the discord.py View with the prev/next buttons.
+"""
+
 import logging
 from math import ceil
 import discord

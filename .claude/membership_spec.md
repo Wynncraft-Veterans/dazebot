@@ -19,7 +19,7 @@ The cutover behaviour is tied to the bootstrap; it is not a general-purpose "res
 
 ## §2 — Manual override commands
 
-Staff and admin commands provided by [`cogs/management.py`](../cogs/management.py). See also [`cogs.md`](cogs.md) for the full cog map.
+Staff and admin commands provided by the [`cogs/membership/`](../cogs/membership/) cogs (and `/link` group in [`cogs/moderation/admin.py`](../cogs/moderation/admin.py)). See also [`cogs.md`](cogs.md) for the full cog map.
 
 **Permission model.** The "staff" role ID gates the staff-tagged commands below; admin-tagged commands additionally require Discord's server-administrator permission. Both role IDs and the permission requirement are sourced from `config.py` and runtime-overridable via `/config` ([§3](#3--runtime-configuration)).
 

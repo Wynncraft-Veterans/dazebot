@@ -1,3 +1,10 @@
+"""Background uvicorn host for the internal FastAPI app in ``api/main.py``.
+
+Loaded as a cog so it shares the bot's lifecycle. Endpoints are only
+reachable on the docker ``verify`` network, never on the public traefik
+edge.
+"""
+
 import logging
 import os
 
@@ -7,7 +14,7 @@ from discord.ext import commands
 from api.main import create_app
 from bot import Bot
 
-logger = logging.getLogger("dazebot.cogs.api_server")
+logger = logging.getLogger("dazebot.cogs.integrations.api_server")
 
 PORT = int(os.environ["DAZEBOT_PORT"])
 

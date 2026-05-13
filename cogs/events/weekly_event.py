@@ -1,3 +1,6 @@
+"""Weekly-event cog: ``/score`` group (set/add/print/leaderboard) and
+``/count`` for forum-channel reaction tallies."""
+
 import logging
 from typing import Annotated, TypedDict
 import discord
@@ -8,7 +11,7 @@ from lib.discord_utils.paginated_embed import Paginator, from_lines
 from orm import DiscordAccount, Score, WeeklyEvent as WeeklyEventTable
 
 # logger = Logger()
-logger = logging.getLogger("dazebot.cogs.weeklyevent")
+logger = logging.getLogger("dazebot.cogs.events.weekly_event")
 from bot import Bot
 
 WeekRange = commands.Range[int, 0]

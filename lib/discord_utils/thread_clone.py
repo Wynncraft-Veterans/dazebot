@@ -35,7 +35,7 @@ from typing import Awaitable, Callable, Optional
 
 import discord
 
-logger = logging.getLogger("dazebot.lib.thread_clone")
+logger = logging.getLogger("dazebot.lib.discord_utils.thread_clone")
 
 # Level 3 boost = 100 MB upload limit. Conservative to leave headroom for
 # multipart overhead.

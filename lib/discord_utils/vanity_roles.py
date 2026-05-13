@@ -1,3 +1,9 @@
+"""Vanity-role-id lookup by Wynncraft first-join date.
+
+Walks ``CurrConfig.VanityRolesConfig.CUTOFFS`` in order and returns the
+first role whose cutoff exceeds the timestamp.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, date, timezone

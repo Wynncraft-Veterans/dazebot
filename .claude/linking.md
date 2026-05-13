@@ -1,12 +1,12 @@
 # Account linking (Discord ↔ Minecraft)
 
-Reference for [lib/linking.py](../lib/linking.py) and the `LinkCode` ORM table — the Discord-↔-Minecraft account-linking flow that runs over the auth-stack PicoLimbo chat-line forwarding.
+Reference for [lib/mc/linking.py](../lib/mc/linking.py) and the `LinkCode` ORM table — the Discord-↔-Minecraft account-linking flow that runs over the auth-stack PicoLimbo chat-line forwarding.
 
 This is the **link-code** flow, distinct from the **vetsmod /unlock key** flow ([verify_keys.md](verify_keys.md)). Both reach `dazebot/api/main.py` under `/api/auth/...`, but they have nothing else in common.
 
 ## The flow
 
-1. Discord user clicks the "Link my Minecraft account" button in `#welcome` (or runs `/link_code <mc_username>`). This is the [`first_install_view.py`](../lib/first_install_view.py) entry point.
+1. Discord user clicks the "Link my Minecraft account" button in `#welcome` (or runs `/link_code <mc_username>`). This is the [`first_install_view.py`](../lib/discord_utils/first_install_view.py) entry point.
 2. `get_or_issue_code(disc_uuid, mc_username)` persists or reuses a `LinkCode` row keyed on `lower(mc_username)`.
 3. Bot DMs the user the 6-char code + `verify.wynnvets.org` IP. (Or, if DMs are closed, posts to `LINK_FALLBACK_CHANNEL` with a "show me the code" button.)
 4. User joins `verify.wynnvets.org:25565` (auth-stack PicoLimbo) and types the code in chat.

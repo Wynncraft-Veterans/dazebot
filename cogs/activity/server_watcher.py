@@ -39,7 +39,7 @@ from bot import Bot
 from lib.mc.wynn_api.player import get_player_stats
 from orm import UNKNOWN_LAST_ONLINE, MinecraftAccount, is_last_online_unknown
 
-logger = logging.getLogger("dazebot.cogs.server_watcher")
+logger = logging.getLogger("dazebot.cogs.activity.server_watcher")
 
 
 class ServerWatcher(commands.Cog):
@@ -79,7 +79,7 @@ class ServerWatcher(commands.Cog):
         # Free-win path: player un-hid lastJoin between ticks. Adopt the
         # real timestamp directly so they clear out of the Unknown bucket
         # without needing to wait for a server transition. Same monotonic
-        # discipline as ``lib/wynn.py:17-18``: never roll back.
+        # discipline as ``lib/mc/wynn.py``: never roll back.
         if player.lastJoin is not None:
             if is_last_online_unknown(account.last_online) or account.last_online < player.lastJoin:
                 account.last_online = player.lastJoin

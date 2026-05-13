@@ -12,19 +12,19 @@ Both flows hit dazebot's HTTP sidecar under `/api/auth/...`. They share that pre
 - **Endpoint:** `GET /api/auth/{uuid}/{msg}` (defined in [api/main.py](../api/main.py))
 - **Caller:** PicoLimbo (auth-stack), forwards every in-game chat line on `verify.wynnvets.org`
 - **Purpose:** Look for a 6-char `LinkCode` in the message; if found, couple the MC UUID to the Discord user. See [linking.md](linking.md).
-- **Issued via:** the `/first_install` button ([lib/first_install_view.py](../lib/first_install_view.py)) — DMs the user a code.
+- **Issued via:** the `/first_install` button ([lib/discord_utils/first_install_view.py](../lib/discord_utils/first_install_view.py)) — DMs the user a code.
 - **Auth on the endpoint:** none. It's only reachable on the `verify` docker network and on `127.0.0.1:${DAZEBOT_PORT}` — *don't re-expose publicly*.
 
 ### B. Vetsmod `/unlock` key introspection (chat *authentication*)
 - **Endpoint:** `POST /api/auth/introspect`
 - **Caller:** temporary-server, on every WS `auth` frame (60s LRU cache, serve-stale-on-error).
 - **Purpose:** Validate a 43-char bearer key; return `{valid, disc_uuid, mc_uuid, mc_username, tier, ws_tier, reason}`. See [verify_keys.md](verify_keys.md).
-- **Issued via:** the `/vetsmod` slash command ([cogs/vetsmod.py](../cogs/vetsmod.py)) — DMs the user the modrinth link + `/unlock <key>` body, with a `LINK_FALLBACK_CHANNEL` ping fallback for closed DMs.
+- **Issued via:** the `/vetsmod` slash command ([cogs/integrations/vetsmod.py](../cogs/integrations/vetsmod.py)) — DMs the user the modrinth link + `/unlock <key>` body, with a `LINK_FALLBACK_CHANNEL` ping fallback for closed DMs.
 - **Auth on the endpoint:** `X-Introspect-Secret` header must match `$DAZEBOT_INTROSPECT_SECRET`. Missing env → 503 (fail-closed); mismatch → 401.
 
 ## Tier resolution
 
-`lib/verify_keys.py:resolve_tier(member)` is the single source of truth for mapping Discord roles + DB state to a tier. Called both at `/vetsmod` issuance and on every introspection, so tier changes propagate without re-issuing keys (worst case 60s — temporary-server's cache TTL).
+`lib/staff/verify_keys.py:resolve_tier(member)` is the single source of truth for mapping Discord roles + DB state to a tier. Called both at `/vetsmod` issuance and on every introspection, so tier changes propagate without re-issuing keys (worst case 60s — temporary-server's cache TTL).
 
 | Tier | Granted by | `ws_tier` (wire protocol) |
 |---|---|---|

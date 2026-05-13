@@ -360,7 +360,7 @@ class MembershipState(commands.Cog):
         )
 
         if isinstance(ctx.author, discord.Member):
-            from cogs.vanity_roles import _cog_instance as vr_cog
+            from cogs.membership.vanity_roles import _cog_instance as vr_cog
 
             if vr_cog is not None:
                 await vr_cog._set_role_exclusive(ctx.author, role_id)
@@ -388,7 +388,7 @@ class MembershipState(commands.Cog):
             disc_uuid=str(user.id),
             defaults={"role_id": str(role_id), "chosen_by_staff": True},
         )
-        from cogs.vanity_roles import _cog_instance as vr_cog
+        from cogs.membership.vanity_roles import _cog_instance as vr_cog
 
         if vr_cog is not None:
             await vr_cog._set_role_exclusive(user, role_id)

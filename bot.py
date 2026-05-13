@@ -66,7 +66,7 @@ class Bot(commands.Bot):
         except Exception as e:
             logger.error(f"Failed to register FirstInstallView: {e}")
         try:
-            from cogs.vetsmod import VetsmodFallbackView
+            from cogs.integrations.vetsmod import VetsmodFallbackView
 
             self.add_view(VetsmodFallbackView())
         except Exception as e:

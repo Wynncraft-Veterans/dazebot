@@ -25,7 +25,7 @@ from discord.ext import commands
 from tortoise.expressions import Q
 
 from config import CurrConfig
-from cogs.returns import register
+from cogs.events.returns import register
 from lib.auth import (
     _has_admin_perm,
     _has_registered_role,

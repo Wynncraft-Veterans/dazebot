@@ -6,8 +6,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot import Bot
-from cogs import returns
-from cogs.returns.week_0 import backfill_cult_threads, do_join_by_name
+from cogs.events import returns
+from cogs.events.returns.week_0 import backfill_cult_threads, do_join_by_name
 from orm import Cult
 
 logger = logging.getLogger("dazebot.cogs.return_cmd")

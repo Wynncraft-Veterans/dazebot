@@ -154,12 +154,96 @@ def _compose_content(message: discord.Message, oversize_urls: list[str]) -> str:
     return "\n".join(parts)
 
 
+async def clone_into_new_thread(
+    src: discord.Thread,
+    *,
+    forum: discord.ForumChannel,
+    webhook: discord.Webhook,
+    new_thread_name: str,
+    progress_cb: Optional[Callable[[int], Awaitable[None]]] = None,
+    progress_every: int = 10,
+) -> tuple[Optional[discord.Thread], CloneStats]:
+    """Create a new forum post whose starter message is the source's first
+    content message (webhook-impersonated), then clone the rest.
+
+    Forum posts always need a starter message; ``forum.create_thread()``
+    would make that starter bot-authored. Using ``webhook.send(thread_name=...)``
+    lets the starter carry the original author's display name and avatar
+    instead. Returns ``(thread, stats)`` — ``thread`` is ``None`` if the
+    source had no copyable content messages.
+    """
+    first_msg: Optional[discord.Message] = None
+    async for m in src.history(limit=None, oldest_first=True):
+        if not _should_skip_message(m):
+            first_msg = m
+            break
+
+    if first_msg is None:
+        return None, CloneStats()
+
+    files, oversize = await _materialize_attachments(list(first_msg.attachments))
+    try:
+        posted = await webhook.send(
+            thread_name=new_thread_name,
+            content=_compose_content(first_msg, oversize),
+            username=_sanitize_username(first_msg.author.display_name),
+            avatar_url=first_msg.author.display_avatar.url,
+            embeds=list(first_msg.embeds),
+            files=files,
+            wait=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except discord.HTTPException:
+        logger.exception("webhook thread-create failed src=%s", src.id)
+        return None, CloneStats()
+
+    new_thread_id = posted.channel.id
+    new_thread = forum.guild.get_thread(new_thread_id)
+    if new_thread is None:
+        try:
+            fetched = await forum.guild.fetch_channel(new_thread_id)
+        except (discord.NotFound, discord.HTTPException):
+            logger.exception("post-create thread fetch failed id=%s", new_thread_id)
+            return None, CloneStats()
+        if not isinstance(fetched, discord.Thread):
+            logger.error("created channel %s is not a thread", new_thread_id)
+            return None, CloneStats()
+        new_thread = fetched
+
+    stats = CloneStats(messages_copied=1, oversize_skipped=len(oversize))
+    stats.oversize_urls.extend(oversize)
+    if first_msg.pinned:
+        try:
+            await posted.pin(reason="mirror source-thread pin")
+            stats.pinned += 1
+        except discord.HTTPException:
+            stats.pin_failures += 1
+            logger.exception("pin failed on starter message=%s", posted.id)
+        await asyncio.sleep(0.5)
+
+    rest = await clone_messages(
+        src,
+        dest_thread=new_thread,
+        webhook=webhook,
+        after=first_msg,
+        progress_cb=progress_cb,
+        progress_every=progress_every,
+    )
+    stats.messages_copied += rest.messages_copied
+    stats.pinned += rest.pinned
+    stats.pin_failures += rest.pin_failures
+    stats.oversize_skipped += rest.oversize_skipped
+    stats.oversize_urls.extend(rest.oversize_urls)
+
+    return new_thread, stats
+
+
 async def clone_messages(
     src: discord.Thread,
     *,
     dest_thread: discord.Thread,
     webhook: discord.Webhook,
-    after: Optional[datetime] = None,
+    after: Optional[discord.abc.Snowflake | datetime] = None,
     progress_cb: Optional[Callable[[int], Awaitable[None]]] = None,
     progress_every: int = 10,
 ) -> CloneStats:

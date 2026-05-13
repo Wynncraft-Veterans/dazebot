@@ -35,29 +35,26 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from bot import Bot
 from config import CurrConfig
 from lib.auth import is_staff
-from lib.thread_clone import CloneStats, clone_messages, get_clone_webhook
+from lib.thread_clone import (
+    CloneStats,
+    clone_into_new_thread,
+    clone_messages,
+    get_clone_webhook,
+)
 from orm import BuildPromotion
 
 logger = logging.getLogger("dazebot.cogs.build_library")
 
-# Inserted as the forum post's starter (bot-authored, unavoidable on forum
-# create_thread) and pinned in the source on promote. Both serve as visible
-# provenance for humans; programmatic linkage is via the BuildPromotion row.
-_LIBRARY_HEADER_FMT = (
-    "📚 **Cloned from** {src_url}\n"
-    "_Promoted by {actor_mention} at <t:{ts}:F>_"
-)
+# Pinned in the source workshop thread on /promote so users browsing the
+# workshop can find the promoted version. Destination threads carry no
+# bot-authored header — their starter message is the original first
+# message of the source, webhook-impersonated.
 _WORKSHOP_MARKER_FMT = "🏛️ Promoted to {dest_url}"
-_DEMOTE_HEADER_FMT = (
-    "↩️ **Demoted from** {src_url}\n"
-    "_Demoted by {actor_mention} at <t:{ts}:F>_"
-)
 
 
 class BuildLibrary(commands.Cog):
@@ -100,11 +97,10 @@ class BuildLibrary(commands.Cog):
 
     @commands.hybrid_command(
         name="promote",
-        description="(Staff) Promote a workshop thread to the build library.",
+        description="(Staff) Promote the current workshop thread to the build library.",
     )
-    @app_commands.describe(thread="The workshop forum thread to promote.")
     @is_staff()
-    async def promote(self, ctx: commands.Context, thread: discord.Thread):
+    async def promote(self, ctx: commands.Context):
         await ctx.defer(ephemeral=True)
 
         workshop_id, library_id = self._config()
@@ -115,9 +111,10 @@ class BuildLibrary(commands.Cog):
             )
             return
 
-        if thread.parent_id != workshop_id:
+        thread = ctx.channel
+        if not isinstance(thread, discord.Thread) or thread.parent_id != workshop_id:
             await ctx.reply(
-                f"That thread isn't in <#{workshop_id}>.",
+                f"Run `/promote` inside a thread in <#{workshop_id}>.",
                 ephemeral=True,
             )
             return
@@ -165,48 +162,32 @@ class BuildLibrary(commands.Cog):
                 )
                 return
 
-            header = _LIBRARY_HEADER_FMT.format(
-                src_url=thread.jump_url,
-                actor_mention=ctx.author.mention,
-                ts=int(datetime.now(timezone.utc).timestamp()),
+            await ctx.reply(
+                "📚 Cloning to the build library — this may take a moment.",
+                ephemeral=True,
             )
-            try:
-                created = await library_forum.create_thread(
-                    name=thread.name,
-                    content=header,
-                    reason=f"promote by {ctx.author.id}",
-                )
-            except discord.HTTPException:
-                logger.exception("dest thread create failed")
+
+            async def report(n: int) -> None:
+                try:
+                    await ctx.interaction.edit_original_response(
+                        content=f"📚 Cloning to the build library — {n} messages copied…"
+                    )
+                except (discord.HTTPException, AttributeError):
+                    pass
+
+            dest_thread, stats = await clone_into_new_thread(
+                thread,
+                forum=library_forum,
+                webhook=webhook,
+                new_thread_name=thread.name,
+                progress_cb=report,
+            )
+            if dest_thread is None:
                 await ctx.reply(
-                    "Couldn't create the destination thread in the library forum.",
+                    "Couldn't clone — the source thread had no copyable messages.",
                     ephemeral=True,
                 )
                 return
-            dest_thread = created.thread
-
-            await ctx.reply(
-                f"📚 Cloning into {dest_thread.jump_url} — this may take a moment.",
-                ephemeral=True,
-            )
-            progress_msg_token = ctx.interaction.token if ctx.interaction else None
-
-            async def report(n: int) -> None:
-                if progress_msg_token is None:
-                    return
-                try:
-                    await ctx.interaction.edit_original_response(
-                        content=f"📚 Cloning into {dest_thread.jump_url} — {n} messages copied…"
-                    )
-                except discord.HTTPException:
-                    pass
-
-            stats = await clone_messages(
-                thread,
-                dest_thread=dest_thread,
-                webhook=webhook,
-                progress_cb=report,
-            )
 
             sync_complete_at = datetime.now(timezone.utc)
             await BuildPromotion.create(
@@ -227,11 +208,10 @@ class BuildLibrary(commands.Cog):
 
     @commands.hybrid_command(
         name="demote",
-        description="(Staff) Demote a library thread back to the build workshop.",
+        description="(Staff) Demote the current library thread back to the build workshop.",
     )
-    @app_commands.describe(thread="The library forum thread to demote.")
     @is_staff()
-    async def demote(self, ctx: commands.Context, thread: discord.Thread):
+    async def demote(self, ctx: commands.Context):
         await ctx.defer(ephemeral=True)
 
         workshop_id, library_id = self._config()
@@ -242,9 +222,10 @@ class BuildLibrary(commands.Cog):
             )
             return
 
-        if thread.parent_id != library_id:
+        thread = ctx.channel
+        if not isinstance(thread, discord.Thread) or thread.parent_id != library_id:
             await ctx.reply(
-                f"That thread isn't in <#{library_id}>.",
+                f"Run `/demote` inside a thread in <#{library_id}>.",
                 ephemeral=True,
             )
             return
@@ -300,24 +281,26 @@ class BuildLibrary(commands.Cog):
                     return
                 action = "Demoted (created new workshop thread)"
 
-            # Library thread is replaced — delete it (and any promotion row).
+            # Deliver the final summary BEFORE deleting the library thread —
+            # the interaction's original response lives inside the library
+            # thread, so once we delete it edit_original_response/followup
+            # both 404 with Unknown Message / Unknown Channel.
+            await self._report_final(ctx, dest_thread, stats, action=action)
+
             try:
                 await thread.delete(reason=f"demoted by {ctx.author.id}")
             except discord.HTTPException:
                 logger.exception("library thread delete failed id=%s", thread.id)
-                await ctx.reply(
-                    f"⚠️ Cloned into {dest_thread.jump_url} but couldn't delete "
-                    f"the library thread — please remove it manually.",
-                    ephemeral=True,
-                )
-                if promotion is not None:
-                    await promotion.delete()
-                return
+                try:
+                    await ctx.interaction.followup.send(
+                        f"⚠️ Couldn't delete the library thread — please remove it manually.",
+                        ephemeral=True,
+                    )
+                except (discord.HTTPException, AttributeError):
+                    logger.exception("delete-failed followup send failed")
 
             if promotion is not None:
                 await promotion.delete()
-
-            await self._report_final(ctx, dest_thread, stats, action=action)
 
     async def _demote_into_existing(
         self,
@@ -348,22 +331,8 @@ class BuildLibrary(commands.Cog):
                 await ctx.interaction.edit_original_response(
                     content=f"↩️ Syncing into {original_thread.jump_url} — {n} messages copied…"
                 )
-            except discord.HTTPException:
+            except (discord.HTTPException, AttributeError):
                 pass
-
-        # Drop a separator into the original thread so the seam is obvious
-        # to humans reading the history later.
-        try:
-            await original_thread.send(
-                _DEMOTE_HEADER_FMT.format(
-                    src_url=library_thread.jump_url,
-                    actor_mention=ctx.author.mention,
-                    ts=int(datetime.now(timezone.utc).timestamp()),
-                ),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except discord.HTTPException:
-            logger.exception("failed to post demote header in original thread")
 
         return await clone_messages(
             library_thread,
@@ -380,45 +349,31 @@ class BuildLibrary(commands.Cog):
         workshop_forum: discord.ForumChannel,
         webhook: discord.Webhook,
     ) -> tuple[CloneStats, Optional[discord.Thread]]:
-        header = _DEMOTE_HEADER_FMT.format(
-            src_url=library_thread.jump_url,
-            actor_mention=ctx.author.mention,
-            ts=int(datetime.now(timezone.utc).timestamp()),
-        )
-        try:
-            created = await workshop_forum.create_thread(
-                name=library_thread.name,
-                content=header,
-                reason=f"demote by {ctx.author.id}",
-            )
-        except discord.HTTPException:
-            logger.exception("workshop thread create failed")
-            await ctx.reply(
-                "Couldn't create a new workshop thread for the demoted build.",
-                ephemeral=True,
-            )
-            return CloneStats(), None
-        dest_thread = created.thread
-
         await ctx.reply(
-            f"↩️ Cloning into new workshop thread {dest_thread.jump_url} — this may take a moment.",
+            "↩️ Cloning to a new workshop thread — this may take a moment.",
             ephemeral=True,
         )
 
         async def report(n: int) -> None:
             try:
                 await ctx.interaction.edit_original_response(
-                    content=f"↩️ Cloning into {dest_thread.jump_url} — {n} messages copied…"
+                    content=f"↩️ Cloning to the workshop — {n} messages copied…"
                 )
-            except discord.HTTPException:
+            except (discord.HTTPException, AttributeError):
                 pass
 
-        stats = await clone_messages(
+        dest_thread, stats = await clone_into_new_thread(
             library_thread,
-            dest_thread=dest_thread,
+            forum=workshop_forum,
             webhook=webhook,
+            new_thread_name=library_thread.name,
             progress_cb=report,
         )
+        if dest_thread is None:
+            await ctx.reply(
+                "Couldn't clone — the source thread had no copyable messages.",
+                ephemeral=True,
+            )
         return stats, dest_thread
 
     # -- shared utilities -----------------------------------------------

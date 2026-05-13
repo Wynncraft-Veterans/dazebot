@@ -84,14 +84,22 @@ async def get_clone_webhook(forum: discord.ForumChannel) -> discord.Webhook:
 def _should_skip_message(message: discord.Message) -> bool:
     """Filter out system messages and the bot's own non-content posts.
 
-    Webhook-authored messages from a *previous* clone are not skipped —
-    those are valid content from the source thread's perspective. The cog
-    is responsible for using ``after=`` to avoid re-cloning its own output.
+    Webhook-authored messages from a *previous* clone are NOT skipped — those
+    carry impersonated human content (display name + avatar) and are valid
+    content from the source thread's perspective. Within a single clone
+    operation the cog uses ``after=`` to avoid re-cloning the webhook messages
+    we just wrote.
+
+    Regular bot-authored messages (e.g. the workshop "Promoted to …"
+    marker pin) ARE skipped so they don't propagate into the destination
+    on re-promote / re-demote cycles.
     """
     if message.type not in (
         discord.MessageType.default,
         discord.MessageType.reply,
     ):
+        return True
+    if message.author.bot and message.webhook_id is None:
         return True
     return False
 

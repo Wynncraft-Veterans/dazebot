@@ -54,7 +54,8 @@ logger = logging.getLogger("dazebot.cogs.build_library")
 # workshop can find the promoted version. Destination threads carry no
 # bot-authored header — their starter message is the original first
 # message of the source, webhook-impersonated.
-_WORKSHOP_MARKER_FMT = "🏛️ Promoted to {dest_url}"
+_WORKSHOP_MARKER_PREFIX = "🏛️ Promoted to"
+_WORKSHOP_MARKER_FMT = _WORKSHOP_MARKER_PREFIX + " {dest_url}"
 
 
 class BuildLibrary(commands.Cog):
@@ -396,6 +397,26 @@ class BuildLibrary(commands.Cog):
         return fetched if isinstance(fetched, discord.Thread) else None
 
     async def _pin_marker_in_source(self, thread: discord.Thread, body: str) -> None:
+        # Tear down any prior promotion markers so only one ever exists at a
+        # time — re-promote/re-demote cycles otherwise pile them up in the
+        # workshop's pin list, including stale ones pointing at deleted
+        # library threads.
+        me = self.bot.user
+        if me is not None:
+            try:
+                async for pin in thread.pins():
+                    if pin.author.id == me.id and pin.content.startswith(
+                        _WORKSHOP_MARKER_PREFIX
+                    ):
+                        try:
+                            await pin.delete()
+                        except discord.HTTPException:
+                            logger.exception(
+                                "failed to delete prior promotion marker %s", pin.id
+                            )
+            except discord.HTTPException:
+                logger.exception("failed to enumerate pins in %s", thread.id)
+
         try:
             msg = await thread.send(body, allowed_mentions=discord.AllowedMentions.none())
             await msg.pin(reason="promotion marker")

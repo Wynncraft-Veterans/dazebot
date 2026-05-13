@@ -24,12 +24,13 @@ from typing import TYPE_CHECKING
 
 from fastapi import Body, FastAPI, Header, HTTPException
 
-from lib import mc, staff_actions
-from lib.first_install_view import post_fallback_completion
-from lib.linking import dm_or_log, try_consume_code
-from lib.rank_alerts import post_rank_alert
-from lib.verify_keys import introspect
-from lib.wynn_api.errors import WynnApiError
+from lib.discord_utils.first_install_view import post_fallback_completion
+from lib.mc import mojang as mc
+from lib.mc.linking import dm_or_log, try_consume_code
+from lib.mc.wynn_api.errors import WynnApiError
+from lib.staff import staff_actions
+from lib.staff.rank_alerts import post_rank_alert
+from lib.staff.verify_keys import introspect
 
 if TYPE_CHECKING:
     from bot import Bot

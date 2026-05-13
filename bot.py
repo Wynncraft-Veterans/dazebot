@@ -6,7 +6,7 @@ from discord.ext import commands
 import os
 
 from config import Config, CurrConfig
-from lib.wynn_api.requestor import Requestor
+from lib.mc.wynn_api.requestor import Requestor
 from orm import close_db, init_db
 
 
@@ -59,7 +59,7 @@ class Bot(commands.Bot):
             logger.error(f"Failed to load runtime config overrides: {e}")
         # Register persistent views so buttons survive restarts.
         try:
-            from lib.first_install_view import FirstInstallView, LinkFallbackView
+            from lib.discord_utils.first_install_view import FirstInstallView, LinkFallbackView
 
             self.add_view(FirstInstallView())
             self.add_view(LinkFallbackView())

@@ -20,6 +20,7 @@ from config import CurrConfig
 from lib import runtime_config
 from lib.auth import is_admin
 
+
 logger = logging.getLogger("dazebot.cogs.runtime_config")
 
 

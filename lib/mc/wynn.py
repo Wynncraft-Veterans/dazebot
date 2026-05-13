@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
 
-from lib import mc
-from lib.lib import ProfCategory
-from lib.wynn_api.player import get_player_stats
-from lib.wynn_api.player_models import WynncraftPlayer
+from lib.mc import mojang as mc
+from lib.mc.wynn_api.player import get_player_stats
+from lib.mc.wynn_api.player_models import WynncraftPlayer
+from lib.util import ProfCategory
 from orm import MinecraftAccount, ProfessionCategories
 
 

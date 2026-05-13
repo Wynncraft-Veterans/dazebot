@@ -7,12 +7,12 @@ from tortoise.expressions import Q
 from bot import Bot
 from config import CurrConfig
 from lib.auth import is_admin, is_operator, is_staff, is_registered
-from lib.converters import CaseInsensitiveMember
-from lib.discord_paginated_embed import Paginator, from_lines
-from lib.linking import dm_or_log, get_or_issue_code
-from lib.resolve import ensure_mc_account
+from lib.discord_utils.converters import CaseInsensitiveMember
+from lib.discord_utils.paginated_embed import Paginator, from_lines
+from lib.mc.linking import dm_or_log, get_or_issue_code
+from lib.mc.resolve import ensure_mc_account
+from lib.mc.wynn_api.errors import WynnApiError
 from lib.role_state import ensure_linked_baseline
-from lib.wynn_api.errors import WynnApiError
 from orm import Blocklist, DiscordAccount, LinkRequest, MinecraftAccount, MinecraftAlt
 
 logger = logging.getLogger("dazebot.cogs.admin")

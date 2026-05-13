@@ -3,8 +3,8 @@ from typing import Annotated, TypedDict
 import discord
 from discord.ext import commands
 from lib.auth import is_staff
-from lib.converters import CaseInsensitiveMember
-from lib.discord_paginated_embed import Paginator, from_lines
+from lib.discord_utils.converters import CaseInsensitiveMember
+from lib.discord_utils.paginated_embed import Paginator, from_lines
 from orm import DiscordAccount, Score, WeeklyEvent as WeeklyEventTable
 
 # logger = Logger()

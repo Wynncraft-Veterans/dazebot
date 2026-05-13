@@ -7,7 +7,7 @@ from tortoise.signals import Signals
 
 from bot import Bot
 from config import CurrConfig
-from lib.vanity_roles import get_vanity_role_id
+from lib.discord_utils.vanity_roles import get_vanity_role_id
 from orm import MinecraftAccount, DiscordAccount
 
 logger = logging.getLogger("dazebot.cogs.vanity_roles")

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Optional
 
 import discord
 
-from lib.role_state import State, state_of
+from lib.role_state import RoleState, state_of
 from orm import Blocklist, DiscordAccount, MinecraftAccount, VerifyKey, Waitlist
 
 if TYPE_CHECKING:
@@ -96,15 +96,15 @@ async def resolve_tier(member: discord.Member) -> ResolvedTier:
                 tier=TIER_OTHER, mc_uuid=mc_uuid, mc_username=mc_username, blocked=True
             )
 
-    if State.HONOURARY in state:
+    if RoleState.HONOURARY in state:
         return ResolvedTier(
             tier=TIER_HONOURARY, mc_uuid=mc_uuid, mc_username=mc_username, blocked=False
         )
-    if State.MEMBER in state:
+    if RoleState.MEMBER in state:
         return ResolvedTier(
             tier=TIER_MEMBER, mc_uuid=mc_uuid, mc_username=mc_username, blocked=False
         )
-    if State.WAITLISTED in state:
+    if RoleState.WAITLISTED in state:
         return ResolvedTier(
             tier=TIER_WAITLIST, mc_uuid=mc_uuid, mc_username=mc_username, blocked=False
         )

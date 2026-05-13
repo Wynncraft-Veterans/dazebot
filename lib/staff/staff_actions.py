@@ -28,8 +28,8 @@ from typing import TYPE_CHECKING, Optional
 
 import discord
 
-from lib.linking import dm_or_log
-from lib.resolve import ensure_mc_account
+from lib.mc.linking import dm_or_log
+from lib.mc.resolve import ensure_mc_account
 from orm import (
     Blocklist,
     DiscordAccount,
@@ -471,7 +471,7 @@ async def _post_to_moderation_thread(
     informational moderation logs, not for urgent attention. ``label``
     is used only in error logs so failures are diagnosable.
     """
-    from lib.rank_alerts import MODERATION_LOG_THREAD_ID
+    from lib.staff.rank_alerts import MODERATION_LOG_THREAD_ID
 
     channel = bot.get_channel(MODERATION_LOG_THREAD_ID)
     if channel is None:

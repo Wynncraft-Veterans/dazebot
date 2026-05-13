@@ -1,8 +1,8 @@
 """Wynncraft v3 player-endpoint wrappers."""
 
-from lib.wynn_api.errors import raise_for_error_envelope
-from lib.wynn_api.requestor import Requestor
-from lib.wynn_api.player_models import WynncraftPlayer
+from lib.mc.wynn_api.errors import raise_for_error_envelope
+from lib.mc.wynn_api.player_models import WynncraftPlayer
+from lib.mc.wynn_api.requestor import Requestor
 
 requestor = Requestor()
 

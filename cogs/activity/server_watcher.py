@@ -36,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from discord.ext import commands, tasks
 
 from bot import Bot
-from lib.wynn_api.player import get_player_stats
+from lib.mc.wynn_api.player import get_player_stats
 from orm import UNKNOWN_LAST_ONLINE, MinecraftAccount, is_last_online_unknown
 
 logger = logging.getLogger("dazebot.cogs.server_watcher")

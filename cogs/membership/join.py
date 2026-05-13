@@ -17,7 +17,7 @@ from discord.ext import commands, tasks
 from tortoise.expressions import Q
 
 from bot import Bot
-from lib.wynn import check_player_full
+from lib.mc.wynn import check_player_full
 from orm import LinkRequest, MinecraftAccount, Waitlist
 
 logger = logging.getLogger("dazebot.cogs.join")

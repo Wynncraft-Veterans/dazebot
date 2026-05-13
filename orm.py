@@ -6,8 +6,8 @@ from typing import Optional
 from tortoise import fields
 from tortoise.models import Model
 
-from lib.lib import ProfCategory
-from lib.wynn_api.player_models import CharacterProfessionsType
+from lib.util import ProfCategory
+from lib.mc.wynn_api.player_models import CharacterProfessionsType
 
 import uuid
 

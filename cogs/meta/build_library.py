@@ -40,7 +40,7 @@ from discord.ext import commands
 from bot import Bot
 from config import CurrConfig
 from lib.auth import is_staff
-from lib.thread_clone import (
+from lib.discord_utils.thread_clone import (
     CloneStats,
     clone_into_new_thread,
     clone_messages,

@@ -7,11 +7,11 @@ import discord
 from discord.ext import commands
 
 from bot import Bot
-from lib import mc
 from lib.auth import is_guild
-from lib.discord_paginated_embed import Paginator, from_lines
-from lib.lib import ProfCategory
-from lib.wynn_api.player_models import CharacterProfessionsType
+from lib.discord_utils.paginated_embed import Paginator, from_lines
+from lib.mc import mojang as mc
+from lib.mc.wynn_api.player_models import CharacterProfessionsType
+from lib.util import ProfCategory
 from orm import MinecraftAccount, ProfessionCategories
 
 logger = logging.getLogger("dazebot.cogs.utility")

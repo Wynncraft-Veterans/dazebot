@@ -31,8 +31,8 @@ from tortoise.expressions import Q
 from bot import Bot
 from config import CurrConfig
 from lib.auth import is_staff
-from lib.linking import dm_or_log
-from lib.verify_keys import (
+from lib.mc.linking import dm_or_log
+from lib.staff.verify_keys import (
     TIER_HONOURARY,
     TIER_MEMBER,
     TIER_OTHER,

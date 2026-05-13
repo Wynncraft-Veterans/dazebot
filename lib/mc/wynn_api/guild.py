@@ -1,6 +1,6 @@
-from lib.wynn_api.errors import raise_for_error_envelope
-from lib.wynn_api.requestor import Requestor
-from lib.wynn_api.guild_models import Guild
+from lib.mc.wynn_api.errors import raise_for_error_envelope
+from lib.mc.wynn_api.guild_models import Guild
+from lib.mc.wynn_api.requestor import Requestor
 
 requestor = Requestor()
 

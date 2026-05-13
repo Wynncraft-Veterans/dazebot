@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from config import CurrConfig
-from lib.linking import dm_or_log, get_or_issue_code
+from lib.mc.linking import dm_or_log, get_or_issue_code
 from orm import DMSentLog, DiscordAccount, LinkCode
 
 if TYPE_CHECKING:

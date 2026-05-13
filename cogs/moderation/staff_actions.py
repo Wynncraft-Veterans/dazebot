@@ -23,9 +23,9 @@ import discord
 from discord.ext import commands
 
 from bot import Bot
-from lib import staff_actions
 from lib.auth import is_admin, is_staff
-from lib.wynn_api.errors import WynnApiError
+from lib.mc.wynn_api.errors import WynnApiError
+from lib.staff import staff_actions
 
 logger = logging.getLogger("dazebot.cogs.staff_actions")
 

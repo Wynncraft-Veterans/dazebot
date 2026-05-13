@@ -21,10 +21,10 @@ from discord.ext import commands, tasks
 from bot import Bot
 from config import CurrConfig
 from lib.auth import is_admin, is_operator, is_registered, is_staff
-from lib.converters import CaseInsensitiveMember
-from lib.resolve import parse_vanity_date, resolve_target, vanity_role_for_date
-from lib.role_state import State, Trigger, apply_transition, state_of
-from lib.wynn_api.guild import get_guild
+from lib.discord_utils.converters import CaseInsensitiveMember
+from lib.mc.resolve import parse_vanity_date, resolve_target, vanity_role_for_date
+from lib.mc.wynn_api.guild import get_guild
+from lib.role_state import RoleState, Trigger, apply_transition, state_of
 from orm import (
     Blocklist,
     DiscordAccount,
@@ -78,7 +78,7 @@ class MembershipState(commands.Cog):
     ):
         """One-shot install command. See ../.claude/membership_spec.md §1."""
         logger.info(f"first_install: invoked by {ctx.author} (id={ctx.author.id}) in guild={ctx.guild}")
-        from lib.first_install_view import FirstInstallView, build_welcome_embed
+        from lib.discord_utils.first_install_view import FirstInstallView, build_welcome_embed
 
         if ctx.guild is None:
             await ctx.reply("This command must be used in a guild.")
@@ -202,7 +202,7 @@ class MembershipState(commands.Cog):
         channel: discord.TextChannel,
         message_id: str,
     ):
-        from lib.first_install_view import FirstInstallView
+        from lib.discord_utils.first_install_view import FirstInstallView
 
         await ctx.defer(ephemeral=True)
         try:
@@ -287,7 +287,7 @@ class MembershipState(commands.Cog):
 
         if transition == "registered_to_hiatus":
             state = state_of(member)
-            if State.REGISTERED not in state:
+            if RoleState.REGISTERED not in state:
                 await ctx.reply(
                     f"{member.mention} is not currently Registered (state: {state}). "
                     "Refusing to apply registered→hiatus.",
@@ -467,7 +467,7 @@ class MembershipState(commands.Cog):
 
     @list_group.command(name="unlinked", description="List in-game VETS members not linked to a Discord account.")
     async def list_unlinked(self, ctx: commands.Context):
-        from lib.discord_paginated_embed import Paginator, from_lines
+        from lib.discord_utils.paginated_embed import Paginator, from_lines
 
         guild_data = await get_guild("Returners")
         api_members = list(guild_data.members.all_members())
@@ -506,7 +506,7 @@ class MembershipState(commands.Cog):
         description="List every Discord<->Minecraft link the bot knows about.",
     )
     async def list_linked(self, ctx: commands.Context):
-        from lib.discord_paginated_embed import Paginator, from_lines
+        from lib.discord_utils.paginated_embed import Paginator, from_lines
 
         await ctx.defer()
 

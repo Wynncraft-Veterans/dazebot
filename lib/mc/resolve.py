@@ -29,8 +29,8 @@ from discord.ext import commands
 from tortoise.expressions import Q
 
 from config import CurrConfig
-from lib.converters import CaseInsensitiveMember
-from lib.wynn_api.player import get_player_stats
+from lib.discord_utils.converters import CaseInsensitiveMember
+from lib.mc.wynn_api.player import get_player_stats
 from orm import DiscordAccount, MinecraftAccount, UNKNOWN_LAST_ONLINE
 
 
@@ -148,7 +148,7 @@ def vanity_role_for_date(value: date) -> Optional[str]:
     """Return the configured vanity-role id for the given date, or ``None``
     if the date is later than the most recent cutoff.
     """
-    from lib.vanity_roles import get_vanity_role_id
+    from lib.discord_utils.vanity_roles import get_vanity_role_id
 
     dt = datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
     return get_vanity_role_id(dt, CurrConfig)

@@ -20,7 +20,7 @@ from config import CurrConfig
 logger = logging.getLogger("dazebot.lib.role_state")
 
 
-class State(enum.Flag):
+class RoleState(enum.Flag):
     NONE = 0
     REGISTERED = enum.auto()
     HIATUS = enum.auto()
@@ -39,11 +39,11 @@ class Trigger(enum.Enum):
 
 
 _STATE_ROLE_MAP = {
-    State.REGISTERED: lambda: CurrConfig.ROLE_REGISTERED,
-    State.HIATUS: lambda: CurrConfig.ROLE_HIATUS,
-    State.MEMBER: lambda: CurrConfig.ROLE_MEMBER,
-    State.HONOURARY: lambda: CurrConfig.ROLE_HONOURARY,
-    State.WAITLISTED: lambda: CurrConfig.ROLE_WAITLISTED,
+    RoleState.REGISTERED: lambda: CurrConfig.ROLE_REGISTERED,
+    RoleState.HIATUS: lambda: CurrConfig.ROLE_HIATUS,
+    RoleState.MEMBER: lambda: CurrConfig.ROLE_MEMBER,
+    RoleState.HONOURARY: lambda: CurrConfig.ROLE_HONOURARY,
+    RoleState.WAITLISTED: lambda: CurrConfig.ROLE_WAITLISTED,
 }
 
 
@@ -51,17 +51,17 @@ def _all_state_role_ids() -> set[int]:
     return {fn() for fn in _STATE_ROLE_MAP.values()}
 
 
-def state_of(member: discord.Member) -> State:
-    """Compute the current ``State`` of a guild member from their roles."""
+def state_of(member: discord.Member) -> RoleState:
+    """Compute the current ``RoleState`` of a guild member from their roles."""
     held_role_ids = {r.id for r in member.roles}
-    state = State.NONE
+    state = RoleState.NONE
     for s, fn in _STATE_ROLE_MAP.items():
         if fn() in held_role_ids:
             state |= s
     return state
 
 
-def _state_to_role_ids(state: State) -> set[int]:
+def _state_to_role_ids(state: RoleState) -> set[int]:
     return {fn() for s, fn in _STATE_ROLE_MAP.items() if s in state}
 
 
@@ -90,17 +90,17 @@ class TransitionResult:
         return not self.to_add and not self.to_remove and not self.error
 
 
-def compute_transition(state: State, trigger: Trigger) -> TransitionResult:
+def compute_transition(state: RoleState, trigger: Trigger) -> TransitionResult:
     """Compute the role delta for a given current state + trigger.
 
     Mirrors the table in ../.claude/membership_spec.md \u00a76 verbatim. Anything
     not listed explicitly is a no-op (returns empty result, not an error).
     """
-    REG = State.REGISTERED
-    HIA = State.HIATUS
-    MEM = State.MEMBER
-    HON = State.HONOURARY
-    WL = State.WAITLISTED
+    REG = RoleState.REGISTERED
+    HIA = RoleState.HIATUS
+    MEM = RoleState.MEMBER
+    HON = RoleState.HONOURARY
+    WL = RoleState.WAITLISTED
 
     has = lambda *flags: all(f in state for f in flags)
 
@@ -203,7 +203,7 @@ async def apply_transition(
 
     if result.is_error:
         logger.warning(
-            f"State transition error for {member} ({member.id}): {result.error} "
+            f"RoleState transition error for {member} ({member.id}): {result.error} "
             f"[trigger={trigger.value} state={state}]"
         )
         return result
@@ -232,11 +232,11 @@ async def force_to_registered_only(member: discord.Member, *, reason: str | None
     to_remove_ids = {
         rid
         for s, fn in _STATE_ROLE_MAP.items()
-        if s != State.REGISTERED and s in state
+        if s != RoleState.REGISTERED and s in state
         and (rid := fn())
     }
     to_add_ids = set()
-    if State.REGISTERED not in state:
+    if RoleState.REGISTERED not in state:
         to_add_ids.add(CurrConfig.ROLE_REGISTERED)
 
     guild = member.guild
@@ -271,10 +271,10 @@ async def ensure_linked_baseline(
     HONOURARY is intentionally cleared \u2014 honourary status is mutually
     exclusive with the linked-account baseline; staff can re-grant it.
     """
-    REG = State.REGISTERED
-    MEM = State.MEMBER
-    HIA = State.HIATUS
-    HON = State.HONOURARY
+    REG = RoleState.REGISTERED
+    MEM = RoleState.MEMBER
+    HIA = RoleState.HIATUS
+    HON = RoleState.HONOURARY
 
     state = state_of(member)
     target = REG if (blocked or not in_returners) else MEM

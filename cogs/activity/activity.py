@@ -3,14 +3,14 @@ from datetime import datetime, timedelta, timezone
 import logging
 import discord
 from discord.ext import commands, tasks
-from lib import mc
 from lib.auth import is_shouter, is_staff
-from lib.discord_paginated_embed import Paginator, from_lines
-from lib.wynn import check_player_full
-from lib.wynn_api.guild import get_guild
-from lib.wynn_api.guild_models import BaseMember, Guild
-from lib.wynn_api.player import get_player_stats
-from lib.wynn_api.requestor import Requestor
+from lib.discord_utils.paginated_embed import Paginator, from_lines
+from lib.mc import mojang as mc
+from lib.mc.wynn import check_player_full
+from lib.mc.wynn_api.guild import get_guild
+from lib.mc.wynn_api.guild_models import BaseMember, Guild
+from lib.mc.wynn_api.player import get_player_stats
+from lib.mc.wynn_api.requestor import Requestor
 from orm import (
     DeadGuildAlert,
     DiscordAccount,

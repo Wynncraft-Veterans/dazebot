@@ -11,7 +11,7 @@ from discord.ext import commands
 from bot import Bot
 from config import CurrConfig
 from lib.auth import is_staff
-from lib.resolve import resolve_target
+from lib.mc.resolve import resolve_target
 from lib.role_state import force_to_registered_only
 from orm import Blocklist
 

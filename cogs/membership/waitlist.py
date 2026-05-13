@@ -11,10 +11,10 @@ from tortoise.expressions import Q
 
 from bot import Bot
 from lib.auth import is_guild, is_registered, is_staff
-from lib.converters import CaseInsensitiveMember
-from lib.resolve import ensure_mc_account
+from lib.discord_utils.converters import CaseInsensitiveMember
+from lib.mc.resolve import ensure_mc_account
+from lib.mc.wynn_api.errors import WynnApiError
 from lib.role_state import Trigger, apply_transition
-from lib.wynn_api.errors import WynnApiError
 from orm import Blocklist, DiscordAccount, MinecraftAccount, Waitlist
 
 logger = logging.getLogger("dazebot.cogs.waitlist")
@@ -117,7 +117,7 @@ class WaitlistCog(commands.Cog):
     )
     @is_registered()
     async def waitlist_view(self, ctx: commands.Context):
-        from lib.discord_paginated_embed import Paginator, from_lines
+        from lib.discord_utils.paginated_embed import Paginator, from_lines
 
         entries = await Waitlist.all().prefetch_related("minecraft_account").order_by("created_at")
         lines = [

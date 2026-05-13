@@ -26,8 +26,8 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from lib.mc.wynn_api.player import get_player_stats
 from lib.role_state import ensure_linked_baseline
-from lib.wynn_api.player import get_player_stats
 from orm import Blocklist, DiscordAccount, LinkCode, MinecraftAccount
 
 if TYPE_CHECKING:
@@ -201,7 +201,7 @@ async def try_consume_code(
 
     # ensure_mc_account: creates the row (populating guild from the live API)
     # if we've never seen this UUID, otherwise returns the existing row.
-    from lib.resolve import ensure_mc_account
+    from lib.mc.resolve import ensure_mc_account
 
     try:
         mc = await ensure_mc_account(mc_uuid)

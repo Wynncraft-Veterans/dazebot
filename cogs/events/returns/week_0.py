@@ -32,9 +32,9 @@ from lib.auth import (
     _has_staff_role,
     _is_operator,
 )
-from lib.converters import CaseInsensitiveMember
-from lib.wynn_api.errors import WynnApiError
-from lib.wynn_api.player import get_player_stats
+from lib.discord_utils.converters import CaseInsensitiveMember
+from lib.mc.wynn_api.errors import WynnApiError
+from lib.mc.wynn_api.player import get_player_stats
 from orm import (
     Cult,
     CultMembership,

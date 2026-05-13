@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import logging
+from pathlib import Path
 import discord
 from discord.ext import commands
 import os
@@ -7,6 +8,15 @@ import os
 from config import Config, CurrConfig
 from lib.wynn_api.requestor import Requestor
 from orm import close_db, init_db
+
+
+# Subdirectories under cogs/ that are *not* cog extensions but rather
+# helper packages imported transitively by a host cog (e.g. cogs.returns'
+# week_*.py modules registered via the @register decorator). Recursively
+# loading their .py files as discord.py extensions would fail with
+# NoEntryPointError -- the catch in _load_cogs would also handle it, but
+# explicit skipping keeps the log clean and the intent obvious.
+COG_SKIP_DIRS: set[str] = {"returns"}
 
 logger = logging.getLogger("dazebot.bot")
 from dotenv import load_dotenv
@@ -64,15 +74,28 @@ class Bot(commands.Bot):
         await self._load_cogs()
 
     async def _load_cogs(self):
-        """Load all cogs from the cogs directory"""
-        for filename in os.listdir("./cogs"):
-            if filename.endswith(".py") and not filename.startswith("__"):
-                cog_name = filename[:-3]
-                try:
-                    await self.load_extension(f"cogs.{cog_name}")
-                    logger.info(f"Loaded cog: {cog_name}")
-                except Exception as e:
-                    logger.error(f"Failed to load cog {cog_name}: {e}")
+        """Load every .py file under cogs/ as a discord.py extension.
+
+        Walks subdirectories so cogs can be organized by domain. Skips
+        ``__*`` files (dunder modules / pycache), any directory in
+        ``COG_SKIP_DIRS``, and modules without a ``setup()`` entry point
+        (caught via :class:`commands.NoEntryPointError`).
+        """
+        root = Path("./cogs")
+        for path in root.rglob("*.py"):
+            if path.name.startswith("__"):
+                continue
+            rel = path.relative_to(root)
+            if any(part in COG_SKIP_DIRS for part in rel.parts):
+                continue
+            module = ".".join(("cogs", *rel.with_suffix("").parts))
+            try:
+                await self.load_extension(module)
+                logger.info(f"Loaded cog: {module}")
+            except commands.NoEntryPointError:
+                logger.debug(f"Skipping non-extension module: {module}")
+            except Exception as e:
+                logger.error(f"Failed to load cog {module}: {e}")
 
     async def on_ready(self):
         logger.info(f"{self.user} has connected to Discord!")

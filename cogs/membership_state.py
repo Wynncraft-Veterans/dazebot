@@ -1,7 +1,11 @@
-"""Management cog: blocklist, force, register, add, vanity, honour, list,
-username, waitlist, config, and first-install commands.
+"""Membership-state cog: role-state transitions and surrounding commands.
 
-See ``../.claude/membership_spec.md`` for the full requirements.
+Owns the ``/first_install``, ``/script``, ``/force``, ``/vanity``,
+``/honour``/``/unhonour``, ``/list``, and ``/info`` slash surfaces, plus
+the periodic ``inactivity_loop`` that decays stale waitlist entries and
+DM-warns inactive members.
+
+The full requirements live in ``../.claude/membership_spec.md``.
 """
 
 from __future__ import annotations
@@ -13,47 +17,31 @@ from typing import Annotated, Optional
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from tortoise.expressions import Q
 
 from bot import Bot
 from config import CurrConfig
-from lib import runtime_config
-from lib.auth import is_admin, is_guild, is_operator, is_registered, is_staff
+from lib.auth import is_admin, is_operator, is_registered, is_staff
 from lib.converters import CaseInsensitiveMember
-from lib.resolve import (
-    ensure_mc_account,
-    parse_vanity_date,
-    resolve_target,
-    vanity_role_for_date,
-)
-from lib.role_state import (
-    State,
-    Trigger,
-    apply_transition,
-    force_to_registered_only,
-    state_of,
-)
+from lib.resolve import parse_vanity_date, resolve_target, vanity_role_for_date
+from lib.role_state import State, Trigger, apply_transition, state_of
 from lib.wynn_api.guild import get_guild
-from lib.wynn_api.errors import WynnApiError
 from orm import (
     Blocklist,
     DiscordAccount,
     DMSentLog,
     FirstInstallMonitor,
-    LinkRequest,
     MinecraftAccount,
     MinecraftAlt,
     UserVanityChoice,
     Waitlist,
 )
 
-logger = logging.getLogger("dazebot.cogs.management")
+logger = logging.getLogger("dazebot.cogs.membership_state")
 
 
-# ---------- the cog ----------
+class MembershipState(commands.Cog):
+    """Role-state machine, vanity, honour, and listings."""
 
-
-class Management(commands.Cog):
     bot: Bot
 
     def __init__(self, bot: Bot):
@@ -63,7 +51,7 @@ class Management(commands.Cog):
             or getattr(CurrConfig, "INACTIVITY_WAITLIST_ENABLED", True)
         ):
             self.inactivity_loop.start()
-        logger.info("Management cog initialized")
+        logger.info("MembershipState cog initialized")
 
     def cog_unload(self):
         try:
@@ -71,9 +59,7 @@ class Management(commands.Cog):
         except RuntimeError:
             pass
 
-    # =================================================================
-    # FIRST INSTALL
-    # =================================================================
+    # ---------- /first_install ----------
 
     @commands.hybrid_command(
         name="first_install",
@@ -90,7 +76,7 @@ class Management(commands.Cog):
         channel: Optional[discord.TextChannel] = None,
         quote_message_id: Optional[str] = None,
     ):
-        """One-shot install command. See ../.claude/membership_spec.md \u00a71."""
+        """One-shot install command. See ../.claude/membership_spec.md §1."""
         logger.info(f"first_install: invoked by {ctx.author} (id={ctx.author.id}) in guild={ctx.guild}")
         from lib.first_install_view import FirstInstallView, build_welcome_embed
 
@@ -169,7 +155,7 @@ class Management(commands.Cog):
             try:
                 posted = await target_channel.send(embed=embed, view=FirstInstallView())
             except discord.HTTPException as e:
-                await ctx.reply(f"\u274c Failed to post onboarding message: {e}")
+                await ctx.reply(f"❌ Failed to post onboarding message: {e}")
                 return
 
         await FirstInstallMonitor.create(
@@ -180,16 +166,14 @@ class Management(commands.Cog):
         logger.info(f"first-install: posted onboarding view at {posted.jump_url}")
 
         await ctx.reply(
-            f"\u2705 First install complete.\n"
-            f"\u2022 Onboarding message: {posted.jump_url}\n"
-            f"\u2022 Stripped {wiped_legacy} legacy role assignment(s)\n"
-            f"\u2022 Stripped {wiped_vanity} vanity role assignment(s)\n"
-            f"\u2022 Cleared stored vanity choices."
+            f"✅ First install complete.\n"
+            f"• Onboarding message: {posted.jump_url}\n"
+            f"• Stripped {wiped_legacy} legacy role assignment(s)\n"
+            f"• Stripped {wiped_vanity} vanity role assignment(s)\n"
+            f"• Cleared stored vanity choices."
         )
 
-    # =================================================================
-    # SCRIPT (one-off admin maintenance scripts)
-    # =================================================================
+    # ---------- /script (one-off admin maintenance scripts) ----------
 
     @commands.hybrid_group(
         name="script",
@@ -230,12 +214,12 @@ class Management(commands.Cog):
         try:
             msg = await channel.fetch_message(mid)
         except (discord.NotFound, discord.Forbidden) as e:
-            await ctx.reply(f"\u274c Couldn't fetch that message: {e}", ephemeral=True)
+            await ctx.reply(f"❌ Couldn't fetch that message: {e}", ephemeral=True)
             return
 
         if msg.author.id != self.bot.user.id:
             await ctx.reply(
-                "\u274c That message wasn't posted by me, so I can't edit it.",
+                "❌ That message wasn't posted by me, so I can't edit it.",
                 ephemeral=True,
             )
             return
@@ -247,10 +231,10 @@ class Management(commands.Cog):
         try:
             await msg.edit(content=new_content, embed=None, view=FirstInstallView())
         except discord.HTTPException as e:
-            await ctx.reply(f"\u274c Edit failed: {e}", ephemeral=True)
+            await ctx.reply(f"❌ Edit failed: {e}", ephemeral=True)
             return
 
-        await ctx.reply(f"\u2705 Edited {msg.jump_url}.", ephemeral=True)
+        await ctx.reply(f"✅ Edited {msg.jump_url}.", ephemeral=True)
 
     @script_group.command(
         name="rename_cult",
@@ -263,83 +247,21 @@ class Management(commands.Cog):
         await ctx.defer(ephemeral=True)
         old, new = "dazecult", "deercult"
         if await Cult.filter(name=new).exists():
-            await ctx.reply(f"\u274c `{new}` already exists; aborting.", ephemeral=True)
+            await ctx.reply(f"❌ `{new}` already exists; aborting.", ephemeral=True)
             return
         cult = await Cult.filter(name=old).first()
         if cult is None:
-            await ctx.reply(f"\u274c No cult named `{old}` to rename.", ephemeral=True)
+            await ctx.reply(f"❌ No cult named `{old}` to rename.", ephemeral=True)
             return
         cult.name = new
         await cult.save(update_fields=["name"])
         await ctx.reply(
-            f"\u2705 Renamed `{old}` \u2192 `{new}`. "
+            f"✅ Renamed `{old}` → `{new}`. "
             "Remember to update `CULT_THREADS` in `cogs/returns/week_0.py` to match.",
             ephemeral=True,
         )
 
-    # =================================================================
-    # BLOCK / UNBLOCK
-    # =================================================================
-
-    @commands.hybrid_command(name="block", description="(Staff) Add a user to the VETS blocklist.")
-    @is_staff()
-    async def block(self, ctx: commands.Context, target: str, *, reason: Optional[str] = None):
-        member, mc = await resolve_target(ctx, target)
-        if mc is None:
-            await ctx.reply(f"No Minecraft account found for `{target}`. Use `/link set` to register them first if needed.")
-            return
-
-        existing = await Blocklist.filter(minecraft_account=mc).first()
-        if existing is not None:
-            await ctx.reply(f"`{mc.mc_username}` is already on the blocklist.")
-            return
-
-        await Blocklist.create(
-            minecraft_account=mc,
-            reason=reason,
-            blocked_by_disc_uuid=str(ctx.author.id),
-        )
-
-        # Force role state to Registered if member is in the guild.
-        if member is not None:
-            try:
-                await force_to_registered_only(member, reason="blocked")
-            except discord.HTTPException as e:
-                logger.warning(f"/block: role enforcement failed for {member}: {e}")
-
-        # If the MC account is currently in the in-game guild, alert staff.
-        in_game_alert_sent = False
-        if mc.guild == "Returners":
-            channel = self.bot.get_channel(CurrConfig.BLOCKLIST_ALERT_CHANNEL)
-            if isinstance(channel, discord.TextChannel):
-                await channel.send(
-                    f"\u26a0\ufe0f Blocked user `{mc.mc_username}` (`{mc.uuid}`) is currently in the in-game "
-                    f"guild Returners. They should be kicked.\n_(blocked by {ctx.author.mention})_",
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                in_game_alert_sent = True
-
-        msg = f"\U0001f6ab Added `{mc.mc_username}` to the blocklist."
-        if in_game_alert_sent:
-            msg += " (Posted alert to in-game-guild channel.)"
-        await ctx.reply(msg)
-
-    @commands.hybrid_command(name="unblock", description="(Staff) Remove a user from the blocklist.")
-    @is_staff()
-    async def unblock(self, ctx: commands.Context, target: str):
-        _, mc = await resolve_target(ctx, target)
-        if mc is None:
-            await ctx.reply(f"No Minecraft account found for `{target}`.")
-            return
-        deleted = await Blocklist.filter(minecraft_account=mc).delete()
-        if not deleted:
-            await ctx.reply(f"`{mc.mc_username}` was not on the blocklist.")
-            return
-        await ctx.reply(f"\u2705 Removed `{mc.mc_username}` from the blocklist.")
-
-    # =================================================================
-    # FORCE
-    # =================================================================
+    # ---------- /force ----------
 
     @commands.hybrid_group(name="force", description="(Admin) Force-apply automation actions.")
     @is_admin()
@@ -353,12 +275,12 @@ class Management(commands.Cog):
     )
     @app_commands.choices(
         transition=[
-            app_commands.Choice(name="registered \u2192 hiatus", value="registered_to_hiatus"),
+            app_commands.Choice(name="registered → hiatus", value="registered_to_hiatus"),
         ]
     )
     async def force_change(self, ctx: commands.Context, target: str, transition: str):
         await ctx.defer()
-        member, mc = await resolve_target(ctx, target)
+        member, _mc = await resolve_target(ctx, target)
         if member is None:
             await ctx.reply(f"`{target}` is not in the discord server.")
             return
@@ -368,7 +290,7 @@ class Management(commands.Cog):
             if State.REGISTERED not in state:
                 await ctx.reply(
                     f"{member.mention} is not currently Registered (state: {state}). "
-                    "Refusing to apply registered\u2192hiatus.",
+                    "Refusing to apply registered→hiatus.",
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
@@ -377,10 +299,10 @@ class Management(commands.Cog):
             if reg is None or hia is None:
                 await ctx.reply("Configured Registered/Hiatus role not found in this guild.")
                 return
-            await member.remove_roles(reg, reason="staff /force change registered\u2192hiatus")
-            await member.add_roles(hia, reason="staff /force change registered\u2192hiatus")
+            await member.remove_roles(reg, reason="staff /force change registered→hiatus")
+            await member.add_roles(hia, reason="staff /force change registered→hiatus")
             await ctx.reply(
-                f"\u2705 Forced {member.mention} \u2192 Hiatus.",
+                f"✅ Forced {member.mention} → Hiatus.",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
@@ -400,11 +322,9 @@ class Management(commands.Cog):
         # ``check_guild`` is a tasks.loop wrapping a coroutine; calling the
         # Loop instance invokes the underlying coroutine once.
         await act.check_guild()
-        await ctx.reply("\u2705 Guild check completed.")
+        await ctx.reply("✅ Guild check completed.")
 
-    # =================================================================
-    # VANITY (self + staff)
-    # =================================================================
+    # ---------- /vanity ----------
 
     @commands.hybrid_group(name="vanity", description="Self-assign a vanity year/date role.")
     async def vanity(self, ctx: commands.Context):
@@ -444,7 +364,10 @@ class Management(commands.Cog):
 
             if vr_cog is not None:
                 await vr_cog._set_role_exclusive(ctx.author, role_id)
-        await ctx.reply(f"\u2705 Vanity role updated to <@&{role_id}>.", allowed_mentions=discord.AllowedMentions.none())
+        await ctx.reply(
+            f"✅ Vanity role updated to <@&{role_id}>.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @vanity.command(name="force", description="(Staff) Force-assign a vanity role to another user.")
     @is_staff()
@@ -470,13 +393,11 @@ class Management(commands.Cog):
         if vr_cog is not None:
             await vr_cog._set_role_exclusive(user, role_id)
         await ctx.reply(
-            f"\u2705 Forced vanity role <@&{role_id}> on {user.mention}.",
+            f"✅ Forced vanity role <@&{role_id}> on {user.mention}.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    # =================================================================
-    # HONOUR / UNHONOUR (admin)
-    # =================================================================
+    # ---------- /honour /unhonour ----------
 
     @commands.hybrid_command(name="honour", description="(Admin) Mark a user as Honourary.")
     @is_admin()
@@ -507,7 +428,8 @@ class Management(commands.Cog):
             disc.minecraft_account.is_honourary = True
             await disc.minecraft_account.save(update_fields=["is_honourary"])
         await ctx.reply(
-            f"\u2728 {user.mention} is now Honourary.", allowed_mentions=discord.AllowedMentions.none()
+            f"✨ {user.mention} is now Honourary.",
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     @commands.hybrid_command(name="unhonour", description="(Admin) Revoke Honourary status.")
@@ -531,12 +453,11 @@ class Management(commands.Cog):
             disc.minecraft_account.token = None
             await disc.minecraft_account.save(update_fields=["is_honourary", "token"])
         await ctx.reply(
-            f"\u2705 {user.mention} is no longer Honourary.", allowed_mentions=discord.AllowedMentions.none()
+            f"✅ {user.mention} is no longer Honourary.",
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    # =================================================================
-    # LIST UNLINKED + USERNAME LOOKUP
-    # =================================================================
+    # ---------- /list ----------
 
     @commands.hybrid_group(name="list", description="(Staff) Listings.")
     @is_staff()
@@ -564,11 +485,11 @@ class Management(commands.Cog):
 
         unlinked = [m for m in api_members if m.uuid not in linked_set]
         if not unlinked:
-            await ctx.reply("\u2705 Every in-game member is linked to a Discord account.")
+            await ctx.reply("✅ Every in-game member is linked to a Discord account.")
             return
 
         lines = [
-            f"\u2022 `{m.username}`"
+            f"• `{m.username}`"
             + (f"  _(legacyName: `{m.legacyName}`)_" if m.legacyName and m.legacyName != m.username else "")
             for m in unlinked
         ]
@@ -618,18 +539,18 @@ class Management(commands.Cog):
             assert mc is not None
             mention = f"<@{d.disc_uuid}>"
             guild_tag = f" _[{mc.guild}]_" if mc.guild else " _[guildless]_"
-            lines.append(f"\u2022 {mention} \u2014 `{mc.mc_username}`{guild_tag}")
+            lines.append(f"• {mention} — `{mc.mc_username}`{guild_tag}")
             for a in alts_by_disc.pop(d.disc_uuid, []):
                 amc = a.minecraft_account
-                lines.append(f"  \u21b3 alt `{amc.mc_username}`")
+                lines.append(f"  ↳ alt `{amc.mc_username}`")
 
         # Any leftover alts whose discord_account has no primary link.
         for disc_uuid, alt_list in alts_by_disc.items():
             mention = f"<@{disc_uuid}>"
-            lines.append(f"\u2022 {mention} \u2014 _(no primary, alts only)_")
+            lines.append(f"• {mention} — _(no primary, alts only)_")
             for a in alt_list:
                 amc = a.minecraft_account
-                lines.append(f"  \u21b3 alt `{amc.mc_username}`")
+                lines.append(f"  ↳ alt `{amc.mc_username}`")
 
         embeds = from_lines(
             title=f"Linked accounts ({len(discs)} primary, {total_alts} alts)",
@@ -642,6 +563,8 @@ class Management(commands.Cog):
             view=Paginator(embeds),
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    # ---------- /info ----------
 
     @commands.hybrid_command(
         name="info",
@@ -689,7 +612,7 @@ class Management(commands.Cog):
                 embed.add_field(
                     name=f"Alts ({len(alts)})",
                     value="\n".join(
-                        f"\u2022 `{a.minecraft_account.mc_username}` (`{a.minecraft_account.uuid}`)" for a in alts
+                        f"• `{a.minecraft_account.mc_username}` (`{a.minecraft_account.uuid}`)" for a in alts
                     ),
                     inline=False,
                 )
@@ -724,334 +647,16 @@ class Management(commands.Cog):
 
         await ctx.reply(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
-    # =================================================================
-    # WAITLIST (override existing simple stub with the spec'd one)
-    # =================================================================
-
-    @commands.hybrid_group(name="waitlist", description="Manage the VETS waitlist.")
-    async def waitlist_group(self, ctx: commands.Context):
-        if ctx.invoked_subcommand is None:
-            await ctx.reply(
-                "Use `/waitlist add <user> [username]` (staff), `/waitlist view` (registered), "
-                "`/waitlist remove <user>` (staff), `/waitlist self` (guild member self-add), "
-                "or `/waitlist leave` (anyone, self-remove)."
-            )
-
-    @waitlist_group.command(
-        name="add",
-        description="(Staff) Add a user to the waitlist; `username` required if they aren't linked.",
-    )
-    @is_staff()
-    async def waitlist_group_add(
-        self,
-        ctx: commands.Context,
-        user: Annotated[discord.Member, CaseInsensitiveMember],
-        username: Optional[str] = None,
-    ):
-        if ctx.guild is None:
-            return
-        disc = await DiscordAccount.filter(disc_uuid=str(user.id)).select_related("minecraft_account").first()
-        mc: Optional[MinecraftAccount] = disc.minecraft_account if disc else None
-
-        if mc is None:
-            if not username:
-                await ctx.reply(
-                    f"{user.mention} is not linked yet \u2014 supply their Minecraft username so I can /register them.",
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                return
-            # Functional /register
-            try:
-                mc = await ensure_mc_account(username)
-            except WynnApiError as e:
-                await ctx.reply(f"Could not find `{username}` on Wynncraft: {e.message}")
-                return
-            except Exception as e:  # noqa: BLE001 — third-party API
-                logger.exception("/waitlist add: failed to fetch player stats")
-                await ctx.reply(f"Failed to fetch Wynncraft stats for `{username}`: {e}")
-                return
-            existing = await DiscordAccount.filter(minecraft_account_id=mc.id).first()
-            if existing is not None and existing.disc_uuid != str(user.id):
-                other = await self.bot.fetch_user(int(existing.disc_uuid))
-                await ctx.reply(
-                    f"`{mc.mc_username}` is already linked to {other.mention}.",
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                return
-            disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(user.id))
-            disc.minecraft_account = mc
-            await disc.save(update_fields=["minecraft_account_id"])
-
-        # Check blocklist.
-        block = await Blocklist.filter(minecraft_account=mc).first()
-        if block is not None:
-            await ctx.reply(f"`{mc.mc_username}` is on the blocklist; cannot waitlist.")
-            return
-
-        # Add to waitlist (DB).
-        existing_wl = await Waitlist.filter(minecraft_account=mc).first()
-        if existing_wl is None:
-            await Waitlist.create(minecraft_account=mc)
-
-        # Apply role transition.
-        result = await apply_transition(user, Trigger.ADDED_TO_WAITLIST, reason="/waitlist add")
-        if result.is_error:
-            await ctx.reply(
-                f"\u26a0\ufe0f Added to waitlist DB but role change failed: {result.error}",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-        await ctx.reply(
-            f"\u2705 {user.mention} (`{mc.mc_username}`) added to waitlist.",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-
-    @waitlist_group.command(
-        name="view",
-        description="(Registered) View the current waitlist.",
-    )
-    @is_registered()
-    async def waitlist_group_view(self, ctx: commands.Context):
-        from lib.discord_paginated_embed import Paginator, from_lines
-
-        entries = await Waitlist.all().prefetch_related("minecraft_account").order_by("created_at")
-        lines = [
-            f"{i + 1}. <t:{int(entry.created_at.timestamp())}:R> - "
-            f"`{entry.minecraft_account.mc_username}` (`{entry.minecraft_account.uuid}`)"
-            for i, entry in enumerate(entries)
-        ]
-        if not lines:
-            await ctx.reply("The waitlist is empty.")
-            return
-
-        embeds = from_lines(
-            title="Current waitlist",
-            lines=lines,
-            lines_per_page=10,
-            logger=logger,
-        )
-        await ctx.send(
-            embed=embeds[0],
-            view=Paginator(embeds),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-
-    @waitlist_group.command(
-        name="remove",
-        description="(Staff) Remove a player from the waitlist by Minecraft username or UUID.",
-    )
-    @is_staff()
-    async def waitlist_group_remove(self, ctx: commands.Context, username_or_uuid: str):
-        deleted = await Waitlist.filter(
-            Q(minecraft_account__uuid=username_or_uuid)
-            | Q(minecraft_account__mc_username__iexact=username_or_uuid)
-        ).delete()
-        if not deleted:
-            await ctx.reply(f"`{username_or_uuid}` is not on the waitlist.")
-            return
-        await ctx.reply(f"`{username_or_uuid}` has been removed from the waitlist.")
-
-    @waitlist_group.command(
-        name="self",
-        description="(Guild) Add yourself to the in-game guild waitlist.",
-    )
-    @is_guild()
-    async def waitlist_self(self, ctx: commands.Context):
-        disc_uuid = str(ctx.author.id)
-        mc = await MinecraftAccount.filter(discord_account__disc_uuid=disc_uuid).first()
-        if mc is None:
-            await ctx.reply(
-                "You haven't linked a Minecraft account yet. Use `/link code <username>` to link one."
-            )
-            return
-        if mc.guild == "Returners":
-            await ctx.reply(f"You (`{mc.mc_username}`) are already in the guild.")
-            return
-        if mc.guild is not None:
-            await ctx.reply(f"You (`{mc.mc_username}`) are in a different guild called `{mc.guild}`.")
-            return
-        existing = await Waitlist.filter(minecraft_account__discord_account__disc_uuid=disc_uuid).first()
-        if existing:
-            await ctx.reply(f"You (`{mc.mc_username}`) are already on the waitlist.")
-            return
-        await Waitlist.create(minecraft_account=mc)
-        await ctx.reply(f"You (`{mc.mc_username}`) are now on the waitlist!")
-
-    @waitlist_group.command(
-        name="leave",
-        description="Remove yourself from the in-game guild waitlist.",
-    )
-    async def waitlist_leave(self, ctx: commands.Context):
-        deleted = await Waitlist.filter(
-            minecraft_account__discord_account__disc_uuid=str(ctx.author.id)
-        ).delete()
-        if not deleted:
-            await ctx.reply("You are not on the waitlist.")
-            return
-        await ctx.reply("You have been removed from the waitlist.")
-
-    # =================================================================
-    # /config
-    # =================================================================
-
-    @commands.hybrid_group(name="config", description="(Admin) View/modify runtime config.")
-    @is_admin()
-    async def config_group(self, ctx: commands.Context):
-        if ctx.invoked_subcommand is None:
-            await ctx.reply("Use `/config list`, `/config get <key>`, `/config set <key> <value>`, `/config reset <key>`.")
-
-    @config_group.command(name="list")
-    async def config_list(self, ctx: commands.Context):
-        keys = runtime_config.list_keys()
-        chunks: list[str] = []
-        cur = ""
-        for k in keys:
-            try:
-                v = runtime_config.get_value(k)
-            except Exception:
-                continue
-            line = f"`{k}` = `{v}`\n"
-            if len(cur) + len(line) > 1800:
-                chunks.append(cur)
-                cur = ""
-            cur += line
-        if cur:
-            chunks.append(cur)
-        if not chunks:
-            await ctx.reply("(no overridable keys)")
-            return
-        for c in chunks:
-            await ctx.send(c)
-
-    @config_group.command(name="get")
-    async def config_get(self, ctx: commands.Context, key: str):
-        if not hasattr(CurrConfig, key):
-            await ctx.reply(f"Unknown key: `{key}`.")
-            return
-        try:
-            v = runtime_config.get_value(key)
-        except Exception as e:
-            await ctx.reply(f"Error: {e}")
-            return
-        await ctx.reply(f"`{key}` = `{v}`")
-
-    @config_group.command(name="set")
-    async def config_set(self, ctx: commands.Context, key: str, value: str):
-        try:
-            new = await runtime_config.set_override(key, value)
-        except (KeyError, PermissionError, ValueError) as e:
-            await ctx.reply(f"\u274c {e}")
-            return
-        await ctx.reply(f"\u2705 `{key}` = `{new}` (persisted)")
-
-    @config_group.command(name="reset")
-    async def config_reset(self, ctx: commands.Context, key: str):
-        await runtime_config.clear_override(key)
-        await ctx.reply(f"\u2705 Cleared override for `{key}`. Restart bot for compiled default to take effect.")
-
-    # =================================================================
-    # /alerts  (shortcuts on top of /config for the guild dead/full alerts)
-    # =================================================================
-
-    @commands.hybrid_group(name="alerts", description="(Admin) Mute / unmute / tune guild dead+full alerts.")
-    @is_admin()
-    async def alerts_group(self, ctx: commands.Context):
-        if ctx.invoked_subcommand is None:
-            await ctx.reply(
-                "Use `/alerts status`, `/alerts mute [duration_hours]`, `/alerts unmute`, "
-                "`/alerts thresholds <dead_when> <full_when>`."
-            )
-
-    # A duration big enough that the throttle effectively silences the alert,
-    # but still finite/reset-able. ~10 years.
-    _ALERTS_MUTE_SECONDS = 10 * 365 * 24 * 3600
-
-    @alerts_group.command(
-        name="status",
-        description="Show current dead/full alert thresholds and throttle deltas.",
-    )
-    async def alerts_status(self, ctx: commands.Context):
-        dead_when = runtime_config.get_value("GUILD_DEAD_WHEN")
-        full_when = runtime_config.get_value("GUILD_FULL_WHEN")
-        dead_delta = runtime_config.get_value("GUILD_DEAD_ALERT_DELTA")
-        full_delta = runtime_config.get_value("GUILD_FULL_ALERT_DELTA")
-
-        def _muted(delta: timedelta) -> str:
-            return " \u26d4 muted" if delta.total_seconds() >= 365 * 24 * 3600 else ""
-
-        await ctx.reply(
-            "**Guild alert config**\n"
-            f"\u2022 Dead alert: fires when online \u2264 `{dead_when}`, "
-            f"throttled `{dead_delta}`{_muted(dead_delta)}\n"
-            f"\u2022 Full alert: fires when members \u2265 `{full_when}`, "
-            f"throttled `{full_delta}`{_muted(full_delta)}"
-        )
-
-    @alerts_group.command(
-        name="mute",
-        description="Silence dead+full guild alerts (default: ~forever).",
-    )
-    @app_commands.describe(duration_hours="How long to mute, in hours. Omit for ~forever.")
-    async def alerts_mute(self, ctx: commands.Context, duration_hours: Optional[float] = None):
-        seconds = int(duration_hours * 3600) if duration_hours else self._ALERTS_MUTE_SECONDS
-        try:
-            await runtime_config.set_override("GUILD_DEAD_ALERT_DELTA", str(seconds))
-            await runtime_config.set_override("GUILD_FULL_ALERT_DELTA", str(seconds))
-        except (KeyError, PermissionError, ValueError) as e:
-            await ctx.reply(f"\u274c {e}")
-            return
-        td = timedelta(seconds=seconds)
-        await ctx.reply(f"\ud83d\udd07 Muted dead+full alerts for `{td}`. Use `/alerts unmute` to restore.")
-
-    @alerts_group.command(
-        name="unmute",
-        description="Restore the compiled default throttle for dead+full alerts.",
-    )
-    async def alerts_unmute(self, ctx: commands.Context):
-        await runtime_config.clear_override("GUILD_DEAD_ALERT_DELTA")
-        await runtime_config.clear_override("GUILD_FULL_ALERT_DELTA")
-        await ctx.reply(
-            "\ud83d\udd0a Cleared dead+full alert throttle overrides. "
-            "Compiled defaults take effect after the next bot restart; "
-            "the running process keeps the muted values until then."
-        )
-
-    @alerts_group.command(
-        name="thresholds",
-        description="Set dead-when (online <=) and full-when (members >=) thresholds.",
-    )
-    @app_commands.describe(
-        dead_when="Online-player count at or below which the dead alert fires.",
-        full_when="Member count at or above which the full alert fires.",
-    )
-    async def alerts_thresholds(
-        self,
-        ctx: commands.Context,
-        dead_when: Optional[int] = None,
-        full_when: Optional[int] = None,
-    ):
-        if dead_when is None and full_when is None:
-            await ctx.reply("Provide at least one of `dead_when` or `full_when`.")
-            return
-        changes: list[str] = []
-        try:
-            if dead_when is not None:
-                v = await runtime_config.set_override("GUILD_DEAD_WHEN", str(dead_when))
-                changes.append(f"`GUILD_DEAD_WHEN` = `{v}`")
-            if full_when is not None:
-                v = await runtime_config.set_override("GUILD_FULL_WHEN", str(full_when))
-                changes.append(f"`GUILD_FULL_WHEN` = `{v}`")
-        except (KeyError, PermissionError, ValueError) as e:
-            await ctx.reply(f"\u274c {e}")
-            return
-        await ctx.reply("\u2705 " + "; ".join(changes))
-
-    # =================================================================
-    # INACTIVITY LOOP
-    # =================================================================
+    # ---------- inactivity loop ----------
 
     @tasks.loop(hours=6)
     async def inactivity_loop(self):
+        """Both waitlist-decay and member-inactivity DM warnings live here.
+
+        Single loop rather than two so config changes (e.g. flipping
+        INACTIVITY_MEMBER_ENABLED via /config) re-evaluate atomically each
+        tick. Splitting into two loops would risk drift between cadences.
+        """
         # Re-read config each tick (admin may have toggled via /config).
         guild = self.bot.get_guild(CurrConfig.GUILD)
         if guild is None:
@@ -1059,7 +664,9 @@ class Management(commands.Cog):
 
         if getattr(CurrConfig, "INACTIVITY_WAITLIST_ENABLED", True):
             cutoff = datetime.now(timezone.utc) - timedelta(days=int(CurrConfig.INACTIVITY_WAITLIST_DAYS))
-            stale = await Waitlist.filter(created_at__lt=cutoff).prefetch_related("minecraft_account__discord_account")
+            stale = await Waitlist.filter(created_at__lt=cutoff).prefetch_related(
+                "minecraft_account__discord_account"
+            )
             for entry in stale:
                 disc_list = await entry.minecraft_account.discord_account.all()
                 for d in disc_list:
@@ -1097,7 +704,7 @@ class Management(commands.Cog):
                         await dm.send(
                             f"Hi {member.display_name}! You've been inactive in VETS for "
                             f"{int(CurrConfig.INACTIVITY_MEMBER_DAYS)}+ days.\n\n"
-                            "Inactive slots are a strain on the guild \u2014 if you don't plan on returning soon, "
+                            "Inactive slots are a strain on the guild — if you don't plan on returning soon, "
                             "consider stepping down. You can always rejoin at any time when you get back!"
                         )
                         await DMSentLog.create(disc_uuid=str(member.id), kind="member_inactivity")
@@ -1106,5 +713,5 @@ class Management(commands.Cog):
 
 
 async def setup(bot: Bot):
-    await bot.add_cog(Management(bot))
-    logger.info("Management cog loaded successfully")
+    await bot.add_cog(MembershipState(bot))
+    logger.info("MembershipState cog loaded successfully")

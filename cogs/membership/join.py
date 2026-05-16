@@ -86,6 +86,14 @@ class Join(commands.Cog):
                     "waitlist_cleanup: failed to strip WAITLISTED for %s: %s", member, e
                 )
 
+    @waitlist_cleanup.before_loop
+    async def _before_waitlist_cleanup(self):
+        # check_player_full() above does account.save() (lib/mc/wynn.py),
+        # firing the vanity post_save signal -> bot.get_guild(), which is
+        # None until READY. Same root cause/fix as activity.py's
+        # _before_check_guild and server_watcher.py's _before_poll.
+        await self.bot.wait_until_ready()
+
     def cog_unload(self):
         self.clear_old_requests.cancel()
         self.waitlist_cleanup.cancel()

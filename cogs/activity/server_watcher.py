@@ -66,6 +66,15 @@ class ServerWatcher(commands.Cog):
         logger.debug(f"polling {len(candidates)} unknown-bucket player(s)")
         await asyncio.gather(*(self._check_one(a) for a in candidates))
 
+    @poll.before_loop
+    async def _before_poll(self):
+        # _check_one bulk-saves MinecraftAccount rows; each save fires the
+        # vanity post_save signal -> bot.get_guild(), which is None until the
+        # guild cache is populated at READY. Without this wait the first pre-
+        # READY tick logs "Guild not found" once per polled account. Same
+        # root cause and fix as activity.py's _before_check_guild.
+        await self.bot.wait_until_ready()
+
     async def _check_one(self, account: MinecraftAccount):
         try:
             player = await get_player_stats(account.uuid)

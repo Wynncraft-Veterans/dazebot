@@ -14,12 +14,14 @@ keeps only the periodic janitor loops:
 from datetime import datetime, timedelta, timezone
 import logging
 
+import discord
 from discord.ext import commands, tasks
 from tortoise.expressions import Q
 
 from bot import Bot
 from lib.mc.wynn import check_player_full
-from orm import LinkRequest, MinecraftAccount, Waitlist
+from lib.role_state import Trigger, apply_transition, resolve_guild_member
+from orm import DiscordAccount, LinkRequest, MinecraftAccount, Waitlist
 
 logger = logging.getLogger("dazebot.cogs.membership.join")
 
@@ -54,11 +56,35 @@ class Join(commands.Cog):
         for mc in mc_accounts:
             await check_player_full(mc.uuid)
 
-        to_delete = await Waitlist.filter(
+        # Fetch the stale rows (with their MC account) so we can both delete
+        # them *and* strip the now-dangling WAITLISTED role from the linked
+        # Discord member — a raw delete here was the source of the
+        # "WAITLISTED role but no Waitlist DB row" divergence.
+        stale = await Waitlist.filter(
             Q(minecraft_account__guild__isnull=False)
             | Q(minecraft_account__last_online__lt=now - timedelta(days=9))
-        ).values_list("id", flat=True)
-        await Waitlist.filter(id__in=to_delete).delete()
+        ).select_related("minecraft_account")
+        if not stale:
+            return
+        await Waitlist.filter(id__in=[w.id for w in stale]).delete()
+        for w in stale:
+            disc = await DiscordAccount.filter(
+                minecraft_account_id=w.minecraft_account.id
+            ).first()
+            if disc is None:
+                continue
+            member = await resolve_guild_member(self.bot, disc.disc_uuid)
+            if member is None:
+                continue
+            try:
+                # INACTIVE_WAITLIST removes WAITLISTED if present, else no-op.
+                await apply_transition(
+                    member, Trigger.INACTIVE_WAITLIST, reason="waitlist_cleanup: dropped from DB"
+                )
+            except discord.HTTPException as e:
+                logger.warning(
+                    "waitlist_cleanup: failed to strip WAITLISTED for %s: %s", member, e
+                )
 
     def cog_unload(self):
         self.clear_old_requests.cancel()

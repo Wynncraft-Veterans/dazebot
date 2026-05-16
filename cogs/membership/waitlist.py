@@ -14,7 +14,14 @@ from lib.auth import is_guild, is_registered, is_staff
 from lib.discord_utils.converters import CaseInsensitiveMember
 from lib.mc.resolve import ensure_mc_account
 from lib.mc.wynn_api.errors import WynnApiError
-from lib.role_state import Trigger, apply_transition, ensure_linked_baseline
+from lib.role_state import (
+    RoleState,
+    Trigger,
+    apply_transition,
+    ensure_linked_baseline,
+    resolve_guild_member,
+    state_of,
+)
 from orm import Blocklist, DiscordAccount, MinecraftAccount, Waitlist
 
 logger = logging.getLogger("dazebot.cogs.membership.waitlist")
@@ -123,6 +130,17 @@ class WaitlistCog(commands.Cog):
         # Apply role transition.
         result = await apply_transition(user, Trigger.ADDED_TO_WAITLIST, reason="/waitlist add")
         if result.is_error:
+            # The DB row is ensured above. If the member already holds the
+            # WAITLISTED role, the desired end state (DB row + role) is
+            # satisfied — the "already waitlisted" error is just a stale-role /
+            # missing-DB-row divergence we've now reconciled. Report success.
+            if RoleState.WAITLISTED in state_of(user):
+                await ctx.reply(
+                    f"✅ {user.mention} (`{mc.mc_username}`) is on the waitlist "
+                    f"(re-synced DB row + role).",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
             await ctx.reply(
                 f"⚠️ Added to waitlist DB but role change failed: {result.error}",
                 allowed_mentions=discord.AllowedMentions.none(),
@@ -169,16 +187,28 @@ class WaitlistCog(commands.Cog):
     )
     @is_staff()
     async def waitlist_remove(self, ctx: commands.Context, username_or_uuid: str):
-        # SQLite can't DELETE across a JOIN, so resolve matching rows by PK
-        # first (the SELECT side may JOIN freely) then delete by id.
-        ids = await Waitlist.filter(
+        # Fetch the matching rows first (SELECT may JOIN freely; SQLite can't
+        # DELETE across a JOIN) so we can both delete by PK *and* strip the
+        # dangling WAITLISTED role — keeping the DB and role state in sync.
+        rows = await Waitlist.filter(
             Q(minecraft_account__uuid=username_or_uuid)
             | Q(minecraft_account__mc_username__iexact=username_or_uuid)
-        ).values_list("id", flat=True)
-        deleted = await Waitlist.filter(id__in=ids).delete() if ids else 0
-        if not deleted:
+        ).select_related("minecraft_account")
+        if not rows:
             await ctx.reply(f"`{username_or_uuid}` is not on the waitlist.")
             return
+        await Waitlist.filter(id__in=[w.id for w in rows]).delete()
+        for w in rows:
+            disc = await DiscordAccount.filter(minecraft_account_id=w.minecraft_account.id).first()
+            if disc is None:
+                continue
+            member = await resolve_guild_member(self.bot, disc.disc_uuid)
+            if member is None:
+                continue
+            try:
+                await apply_transition(member, Trigger.INACTIVE_WAITLIST, reason="/waitlist remove")
+            except discord.HTTPException as e:
+                logger.warning("waitlist remove: failed to strip WAITLISTED for %s: %s", member, e)
         await ctx.reply(f"`{username_or_uuid}` has been removed from the waitlist.")
 
     @waitlist_group.command(
@@ -204,7 +234,33 @@ class WaitlistCog(commands.Cog):
         if existing:
             await ctx.reply(f"You (`{mc.mc_username}`) are already on the waitlist.")
             return
+        block = await Blocklist.filter(minecraft_account=mc).first()
+        if block is not None:
+            await ctx.reply(f"You (`{mc.mc_username}`) are on the blocklist; cannot waitlist.")
+            return
         await Waitlist.create(minecraft_account=mc)
+        # Apply the WAITLISTED role so the DB row and role state stay in sync
+        # (mc.guild is None here — guaranteed by the checks above).
+        if isinstance(ctx.author, discord.Member):
+            try:
+                await ensure_linked_baseline(
+                    ctx.author,
+                    in_returners=False,
+                    in_other_guild=False,
+                    blocked=False,
+                    reason="/waitlist self baseline",
+                )
+            except discord.HTTPException as e:
+                logger.warning("waitlist self: ensure_linked_baseline failed for %s: %s", ctx.author, e)
+            result = await apply_transition(
+                ctx.author, Trigger.ADDED_TO_WAITLIST, reason="/waitlist self"
+            )
+            if result.is_error and RoleState.WAITLISTED not in state_of(ctx.author):
+                await ctx.reply(
+                    f"⚠️ Added you (`{mc.mc_username}`) to the waitlist DB but the "
+                    f"role couldn't be set: {result.error}"
+                )
+                return
         await ctx.reply(f"You (`{mc.mc_username}`) are now on the waitlist!")
 
     @waitlist_group.command(
@@ -221,6 +277,12 @@ class WaitlistCog(commands.Cog):
         if not deleted:
             await ctx.reply("You are not on the waitlist.")
             return
+        # Strip the WAITLISTED role so DB and role state stay in sync.
+        if isinstance(ctx.author, discord.Member):
+            try:
+                await apply_transition(ctx.author, Trigger.INACTIVE_WAITLIST, reason="/waitlist leave")
+            except discord.HTTPException as e:
+                logger.warning("waitlist leave: failed to strip WAITLISTED for %s: %s", ctx.author, e)
         await ctx.reply("You have been removed from the waitlist.")
 
 

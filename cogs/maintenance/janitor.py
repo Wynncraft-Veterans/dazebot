@@ -20,6 +20,10 @@ Reconcilers (run in this order):
   HIATUS) and must not be downgraded without positive information (a guild
   change, which the activity loop already handles). Genuine multi-primary
   conflicts (e.g. MEMBER+REGISTERED) are intentionally left for manual review.
+* **(D) ``reconcile_waitlist_role``** — keeps the WAITLISTED role in sync with
+  the Waitlist DB table (the source of truth): an orphaned role with no DB row
+  is removed; a DB row whose member lacks the role gets it. Runs after (A) so a
+  just-healed stateless member can be waitlisted.
 * **(B) ``reconcile_kept_linkcodes``** — cleans leftover ``LinkCode`` rows.
   Unrecoverable rows are deleted (MC linked elsewhere / user in no guild). For
   a row whose user is linked: if the user already has a valid primary state
@@ -49,7 +53,14 @@ from bot import Bot
 from config import Config, CurrConfig
 from lib.auth import is_staff
 from lib.mc.linking import _enforce_linked_baseline_for
-from lib.role_state import RoleState, force_to_registered_only, state_of
+from lib.role_state import (
+    RoleState,
+    Trigger,
+    apply_transition,
+    force_to_registered_only,
+    resolve_guild_member,
+    state_of,
+)
 from orm import Blocklist, DiscordAccount, JanitorAlert, LinkCode, MinecraftAccount
 
 logger = logging.getLogger("dazebot.cogs.maintenance.janitor")
@@ -61,6 +72,7 @@ _PRIMARY = (RoleState.REGISTERED, RoleState.MEMBER, RoleState.HIATUS, RoleState.
 _LABELS = {
     "blocklist": "(F) Blocklist → REGISTERED",
     "baseline": "(A) No-state self-heal (Flame)",
+    "waitlist": "(D) WAITLISTED ↔ DB sync",
     "linkcodes": "(B) Stale / kept LinkCodes",
 }
 
@@ -88,29 +100,15 @@ def _fmt_state(state: RoleState) -> str:
 async def _resolve_member(
     bot: Bot, disc_uuid: str
 ) -> tuple[discord.Member | None, bool]:
-    """Resolve a Discord member across the bot's guilds, get_member → REST
-    fetch_member fallback (same pattern as ``_enforce_linked_baseline_for``).
+    """Resolve a Discord member across the bot's guilds via the shared
+    ``resolve_guild_member`` helper (get_member → REST fetch_member fallback).
 
     Returns ``(member_or_None, found_anywhere)``. ``found_anywhere`` is False
     only when the user is in *no* guild at all (a cache miss is resolved via
     the REST fetch first, so it does not count as "no guild").
     """
-    try:
-        uid = int(disc_uuid)
-    except ValueError:
-        return None, False
-    for guild in bot.guilds:
-        member = guild.get_member(uid)
-        if member is None:
-            try:
-                member = await guild.fetch_member(uid)
-            except discord.NotFound:
-                continue
-            except discord.HTTPException as e:
-                logger.warning("janitor: fetch_member(%s) in %s failed: %s", uid, guild.name, e)
-                continue
-        return member, True
-    return None, False
+    member = await resolve_guild_member(bot, disc_uuid)
+    return member, member is not None
 
 
 # --------------------------------------------------------------------------
@@ -212,6 +210,90 @@ async def reconcile_linked_baseline(bot: Bot, *, enforce: bool) -> ReconcilerRes
         except Exception:  # noqa: BLE001
             r.errors += 1
             logger.exception("janitor (A): unexpected error on a linked account")
+    return r
+
+
+async def reconcile_waitlist_role(bot: Bot, *, enforce: bool) -> ReconcilerResult:
+    """(D) Keep the WAITLISTED role in sync with the Waitlist DB table.
+
+    The Waitlist table is the source of truth for "is on the in-game guild
+    waitlist". An orphaned WAITLISTED role (no DB row) or a DB row whose
+    member is missing the role is a fixable divergence (e.g. a delete path
+    that didn't strip the role, or `/waitlist self` that didn't add it).
+
+    - role held but **no** Waitlist row → remove it (`INACTIVE_WAITLIST`).
+    - Waitlist row but role **missing** → add it (`ADDED_TO_WAITLIST`); this
+      respects the transition guards (refuses for a MEMBER / no-state user —
+      recorded as an error sample, not forced). Runs *after* (A) so a
+      stateless user has already been granted REGISTERED and can be waitlisted.
+
+    Scoped to linked members (an unlinked member with a stray WAITLISTED role
+    is the separate, de-scoped "unlinked but roled" class).
+    """
+    r = ReconcilerResult(name="waitlist")
+    # disc_uuids that SHOULD hold WAITLISTED: those whose linked MC account
+    # has a Waitlist row.
+    should = set(
+        await DiscordAccount.filter(
+            minecraft_account__waitlist__id__isnull=False
+        ).values_list("disc_uuid", flat=True)
+    )
+    discs = await DiscordAccount.filter(
+        minecraft_account_id__isnull=False
+    ).select_related("minecraft_account")
+    for disc in discs:
+        try:
+            r.scanned += 1
+            member, _ = await _resolve_member(bot, disc.disc_uuid)
+            if member is None:
+                continue
+            has_wl = RoleState.WAITLISTED in state_of(member)
+            on_list = disc.disc_uuid in should
+            if has_wl == on_list:
+                continue  # consistent — nothing to do
+            r.flagged += 1
+            mc = disc.minecraft_account
+            if has_wl and not on_list:
+                r.samples.append(
+                    f"<@{disc.disc_uuid}> `{mc.mc_username}` has WAITLISTED but no DB row "
+                    f"→ remove role" + ("" if enforce else " (would fix)")
+                )
+                if enforce:
+                    try:
+                        res = await apply_transition(
+                            member, Trigger.INACTIVE_WAITLIST, reason="janitor:waitlist-sync"
+                        )
+                        if res.is_error:
+                            r.errors += 1
+                        else:
+                            r.repaired += 1
+                    except discord.HTTPException as e:
+                        r.errors += 1
+                        logger.warning("janitor (D): strip WAITLISTED failed for %s: %s", member, e)
+            else:  # on_list and not has_wl
+                r.samples.append(
+                    f"<@{disc.disc_uuid}> `{mc.mc_username}` on waitlist DB but missing role "
+                    f"→ add role" + ("" if enforce else " (would fix)")
+                )
+                if enforce:
+                    try:
+                        res = await apply_transition(
+                            member, Trigger.ADDED_TO_WAITLIST, reason="janitor:waitlist-sync"
+                        )
+                        if res.is_error:
+                            r.errors += 1
+                            logger.warning(
+                                "janitor (D): cannot add WAITLISTED for <@%s>: %s",
+                                disc.disc_uuid, res.error,
+                            )
+                        else:
+                            r.repaired += 1
+                    except discord.HTTPException as e:
+                        r.errors += 1
+                        logger.warning("janitor (D): add WAITLISTED failed for %s: %s", member, e)
+        except Exception:  # noqa: BLE001
+            r.errors += 1
+            logger.exception("janitor (D): unexpected error on a linked account")
     return r
 
 
@@ -346,7 +428,8 @@ async def reconcile_kept_linkcodes(bot: Bot, *, enforce: bool) -> ReconcilerResu
 RECONCILERS = (
     reconcile_blocklisted_registered_only,  # (F) — first: strongest invariant
     reconcile_linked_baseline,              # (A) — the Flame self-heal
-    reconcile_kept_linkcodes,               # (B) — sees the post-F/A world
+    reconcile_waitlist_role,                # (D) — needs A's baseline grants first
+    reconcile_kept_linkcodes,               # (B) — sees the post-F/A/D world
 )
 
 

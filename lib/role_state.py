@@ -189,6 +189,32 @@ def compute_transition(state: RoleState, trigger: Trigger) -> TransitionResult:
     return TransitionResult(error=f"Unknown trigger: {trigger!r}")
 
 
+async def resolve_guild_member(bot, disc_uuid: str) -> discord.Member | None:
+    """Resolve a Discord member from a ``disc_uuid`` string across the bot's
+    guilds: cached ``get_member`` first, REST ``fetch_member`` on a cache miss.
+
+    Returns ``None`` only if the user is in *no* guild (a cache miss is
+    resolved via REST before concluding "not present") or the id is invalid.
+    Shared by the waitlist commands, the ``waitlist_cleanup`` loop and the
+    janitor so every role/DB reconciliation uses one consistent lookup.
+    """
+    try:
+        uid = int(disc_uuid)
+    except (TypeError, ValueError):
+        return None
+    for guild in bot.guilds:
+        member = guild.get_member(uid)
+        if member is None:
+            try:
+                member = await guild.fetch_member(uid)
+            except discord.NotFound:
+                continue
+            except discord.HTTPException:
+                continue
+        return member
+    return None
+
+
 async def apply_transition(
     member: discord.Member,
     trigger: Trigger,

@@ -290,6 +290,17 @@ class Activity(commands.Cog):
 
         await asyncio.gather(*alerts)
 
+    @check_guild.before_loop
+    async def _before_check_guild(self):
+        # check_guild bulk-saves every guild member; each save fires the vanity
+        # post_save signal -> bot.get_guild(). The guild cache isn't populated
+        # until READY, and setup_hook (where this loop is .start()'d) runs
+        # entirely before the gateway connects -- so without this wait the
+        # first pass logs "Guild not found" once per account. (Whether it
+        # actually raced safely depended on cog load order, which the
+        # subfolder reorg changed.) Mirrors janitor.py's _before_janitor_loop.
+        await self.bot.wait_until_ready()
+
     async def _low_count_alert(self):
         logger.warning("Low player count!")
         channel = self.bot.get_channel(self.bot.config.GUILD_DEAD_ALERT_CHANNEL)

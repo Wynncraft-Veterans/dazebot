@@ -102,23 +102,29 @@ class WaitlistCog(commands.Cog):
             await ctx.reply(f"`{mc.mc_username}` is on the blocklist; cannot waitlist.")
             return
 
+        # Add to waitlist (DB).
+        existing_wl = await Waitlist.filter(minecraft_account=mc).first()
+        wl = existing_wl or await Waitlist.create(minecraft_account=mc)
+
         # Heads-up for staff: an API-disabled player has no readable
         # lastJoin, so the waitlist inactivity rule can't measure them.
         # server_watcher tracks them via server-change observation instead
-        # (so the entry persists rather than being purged) — surface that so
-        # staff aren't surprised it won't auto-expire on inactivity.
-        api_note = (
-            f"\n⚠️ `{mc.mc_username}` has their Wynncraft API disabled — "
-            "activity is tracked via server-change observation, so this entry "
-            "won't auto-drop on the inactivity rule."
-            if is_last_online_unknown(mc.last_online)
-            else ""
-        )
-
-        # Add to waitlist (DB).
-        existing_wl = await Waitlist.filter(minecraft_account=mc).first()
-        if existing_wl is None:
-            await Waitlist.create(minecraft_account=mc)
+        # (the entry persists rather than being purged). Since there's no
+        # real last-online to show, give a best-guess "last seen": the later
+        # of when they were waitlisted and any real last_online server_watcher
+        # has since recorded from an observed world change — so the epoch
+        # sentinel falls back to the add date, and a since-spotted world
+        # change wins. Compared as unix seconds to sidestep aware/naive
+        # datetime mixing (matches /waitlist view's created_at formatting).
+        if is_last_online_unknown(mc.last_online):
+            best_ts = max(int(wl.created_at.timestamp()), int(mc.last_online.timestamp()))
+            api_note = (
+                f"\n⚠️ `{mc.mc_username}` has their Wynncraft API disabled — "
+                f"best-guess last seen <t:{best_ts}:R>. Tracked via "
+                "server-change observation; won't auto-drop on the inactivity rule."
+            )
+        else:
+            api_note = ""
 
         # Enforce the linked-account baseline before the waitlist transition.
         # Users linked via this command's own auto-/register path above (or
@@ -175,11 +181,24 @@ class WaitlistCog(commands.Cog):
         from lib.discord_utils.paginated_embed import Paginator, from_lines
 
         entries = await Waitlist.all().prefetch_related("minecraft_account").order_by("created_at")
-        lines = [
-            f"{i + 1}. <t:{int(entry.created_at.timestamp())}:R> - "
-            f"`{entry.minecraft_account.mc_username}` (`{entry.minecraft_account.uuid}`)"
-            for i, entry in enumerate(entries)
-        ]
+        lines: list[str] = []
+        # (mc_username, best-guess last-seen unix ts) for API-disabled rows.
+        api_disabled: list[tuple[str, int]] = []
+        for i, entry in enumerate(entries):
+            mc = entry.minecraft_account
+            added_ts = int(entry.created_at.timestamp())
+            marker = ""
+            if is_last_online_unknown(mc.last_online):
+                # Same best-guess as /waitlist add: the later of the
+                # waitlist-add date and any real last_online server_watcher
+                # has recorded (epoch sentinel always loses to the add date).
+                best_ts = max(added_ts, int(mc.last_online.timestamp()))
+                api_disabled.append((mc.mc_username, best_ts))
+                marker = " \\*"  # escaped so Discord renders a literal *
+            lines.append(
+                f"{i + 1}. <t:{added_ts}:R> - "
+                f"`{mc.mc_username}` (`{mc.uuid}`){marker}"
+            )
         if not lines:
             await ctx.reply("The waitlist is empty.")
             return
@@ -190,6 +209,19 @@ class WaitlistCog(commands.Cog):
             lines_per_page=10,
             logger=logger,
         )
+        if api_disabled:
+            guesses = ", ".join(
+                f"{name} was probably last seen <t:{ts}:R>"
+                for name, ts in api_disabled
+            )
+            blurb = (
+                "\\* Some users have their API disabled; they will not be "
+                "dropped automatically upon inactivity. Best activity "
+                f"guesses: {guesses}."
+            )
+            # from_lines sets no description; show the blurb on every page.
+            for embed in embeds:
+                embed.description = blurb
         await ctx.send(
             embed=embeds[0],
             view=Paginator(embeds),

@@ -37,6 +37,7 @@ Staff and admin commands provided by the [`cogs/membership/`](../cogs/membership
 | `/list unlinked` | staff | Lists in-game Returners members who don't have a Discord link yet. Used to chase down stragglers after a recruitment push. |
 | `/username <user>` | staff | Lists all Minecraft accounts linked to the Discord user (primary + alts). |
 | `/waitlist add <user> [username]` | staff | Adds the user to the waitlist (`Waitlist` table + WAITLISTED role). Username is optional if the user is already linked; required otherwise (the command will issue a force-link). |
+| `/waitlist force <user> <position>` | staff | Moves an already-waitlisted user to a specific position (1 = top). Position is derived from `created_at` ordering, so this rewrites only that user's `created_at`; everyone at/after the target slot shifts down by one. Does not touch roles or row existence. Errors if the user isn't on the waitlist. Position is clamped to the list size. |
 
 ### Blocklist invariant
 

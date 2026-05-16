@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Annotated, Optional
 
 import discord
@@ -41,7 +42,8 @@ class WaitlistCog(commands.Cog):
         if ctx.invoked_subcommand is None:
             await ctx.reply(
                 "Use `/waitlist add <user> [username]` (staff), `/waitlist view` (registered), "
-                "`/waitlist remove <user>` (staff), `/waitlist self` (guild member self-add), "
+                "`/waitlist remove <user>` (staff), `/waitlist force <user> <position>` (staff), "
+                "`/waitlist self` (guild member self-add), "
                 "or `/waitlist leave` (anyone, self-remove)."
             )
 
@@ -210,6 +212,91 @@ class WaitlistCog(commands.Cog):
             except discord.HTTPException as e:
                 logger.warning("waitlist remove: failed to strip WAITLISTED for %s: %s", member, e)
         await ctx.reply(f"`{username_or_uuid}` has been removed from the waitlist.")
+
+    @waitlist_group.command(
+        name="force",
+        description="(Staff) Move a user to a specific waitlist position (1 = top).",
+    )
+    @is_staff()
+    async def waitlist_force(
+        self,
+        ctx: commands.Context,
+        user: Annotated[discord.Member, CaseInsensitiveMember],
+        position: int,
+    ):
+        # Position is *derived* from `created_at` ascending ordering (see
+        # waitlist_view); there is no position column. Forcing a user to slot N
+        # therefore means rewriting only that user's `created_at` to fall just
+        # before the entry currently at N. Every other row keeps its timestamp,
+        # so the old #N, #N+1, ... each shift down by one automatically — the
+        # legacy `/force waitlist` bump-down behaviour. This intentionally does
+        # not touch roles or row existence, so the WAITLISTED state and the
+        # janitor reconciler are unaffected; only the moved user's displayed
+        # "added X ago" changes, which is inherent to how position is stored.
+        disc = (
+            await DiscordAccount.filter(disc_uuid=str(user.id))
+            .select_related("minecraft_account")
+            .first()
+        )
+        mc: Optional[MinecraftAccount] = disc.minecraft_account if disc else None
+        if mc is None:
+            await ctx.reply(
+                f"{user.mention} is not on the waitlist. Use `/waitlist add` first.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        entries = await Waitlist.all().prefetch_related("minecraft_account").order_by("created_at")
+        target_idx = next(
+            (i for i, e in enumerate(entries) if e.minecraft_account_id == mc.id), None
+        )
+        if target_idx is None:
+            await ctx.reply(
+                f"`{mc.mc_username}` is not on the waitlist. Use `/waitlist add` first.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        n = len(entries)
+        pos = max(1, min(position, n))  # clamp to [1, n]; 1-indexed like /waitlist view
+        dst_idx = pos - 1
+        if dst_idx == target_idx:
+            await ctx.reply(
+                f"`{mc.mc_username}` is already at waitlist position **{pos}** (of {n}).",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        # Others keep their relative order; inserting the target at index
+        # `dst_idx` among them yields the final ordering.
+        others = [e for i, e in enumerate(entries) if i != target_idx]
+        prev_entry = others[dst_idx - 1] if dst_idx > 0 else None
+        next_entry = others[dst_idx] if dst_idx < len(others) else None
+
+        target_entry = entries[target_idx]
+        if prev_entry is None:  # moving to the top
+            new_ts = next_entry.created_at - timedelta(seconds=1)
+        elif next_entry is None:  # moving to the bottom
+            new_ts = prev_entry.created_at + timedelta(seconds=1)
+        else:
+            span = next_entry.created_at - prev_entry.created_at
+            new_ts = prev_entry.created_at + span / 2
+            # Defensive only: distinct rows sharing a microsecond is effectively
+            # impossible, but never emit a timestamp outside (prev, next).
+            if not (prev_entry.created_at < new_ts < next_entry.created_at):
+                new_ts = prev_entry.created_at + timedelta(microseconds=1)
+        target_entry.created_at = new_ts
+        await target_entry.save(update_fields=["created_at"])
+
+        clamp_note = (
+            f" (requested {position}; clamped to valid range 1–{n})"
+            if pos != position
+            else ""
+        )
+        await ctx.reply(
+            f"✅ Moved `{mc.mc_username}` to waitlist position **{pos}** (of {n}){clamp_note}.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @waitlist_group.command(
         name="self",

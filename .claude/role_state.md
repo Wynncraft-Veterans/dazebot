@@ -57,8 +57,15 @@ The normal path. Calls `state_of`, then `compute_transition`, then performs the 
 ### `force_to_registered_only(member, *, reason=None)`
 Used by `/block` ([`membership_spec.md` §2b](membership_spec.md#2--manual-overrides-commands)). Strips MEMBER/HIATUS/HONOURARY/WAITLISTED, ensures REGISTERED. Bypasses the transition table — this is the "nuclear option" for blocklisted users.
 
-### `ensure_linked_baseline(member, *, in_returners, blocked, reason=None)`
-The **invariant-enforcing** helper. Any linked Discord user must hold either MEMBER or REGISTERED — never both, never neither, never HIATUS or HONOURARY as their primary state. Called from three event-driven places **and** re-run periodically by the data-integrity janitor:
+### `ensure_linked_baseline(member, *, in_returners, in_other_guild=False, blocked=False, reason=None)`
+The **invariant-enforcing** helper. A linked Discord user must hold a *valid* primary membership state, never none. It is **preservation-based**: it strips only primary roles that are *invalid* for the given situation and grants a baseline only when no valid one remains — a manually-assigned HIATUS/HONOURARY is **kept** when still valid (re-running enforcement must never silently demote a legitimate manual tag). Validity (exactly one of `in_returners`/`in_other_guild` may be True; both False = guildless):
+
+- `blocked` → REGISTERED only (authoritative, [membership_spec §2b](membership_spec.md#2--manual-overrides-commands)).
+- `in_returners` → MEMBER only (authoritative — they're in the guild; matches `JOINED_VETS`).
+- `in_other_guild` → valid {REGISTERED, HONOURARY}; HIATUS stripped (**in a guild → never Hiatus**), stale MEMBER stripped; HONOURARY preserved (matches `JOINED_OTHER_GUILD`).
+- guildless → valid {REGISTERED, HIATUS, HONOURARY}; only a stale MEMBER stripped — a manually-parked HIATUS is preserved.
+
+Baseline (granted only when no valid primary remains) = MEMBER for `in_returners`, else REGISTERED — the additive "Flame" no-state self-heal. Called from three event-driven places **and** re-run periodically by the data-integrity janitor:
 - `lib/mc/linking.py:try_consume_code` (via `_enforce_linked_baseline_for`) after a successful link-code consumption
 - `cogs/moderation/admin.py:link_set` — the `/link set` staff command, run on both new links *and* the already-linked branch (so it doubles as a role re-sync / repair)
 - `cogs/membership/waitlist.py:waitlist_add` — before the `ADDED_TO_WAITLIST` transition, so a user linked via that command's own auto-`/register` path has a baseline state-role to transition from
@@ -66,10 +73,10 @@ The **invariant-enforcing** helper. Any linked Discord user must hold either MEM
 
 `cogs/activity/activity.py` does **not** call this — its loops drive `MEMBER ↔ REGISTERED` through the transition table (`apply_transition`), not through `ensure_linked_baseline`.
 
-Idempotent: if the member already has the correct primary role and no conflicting ones, it's a no-op (no API calls). Safe to retry.
+Idempotent: a member already holding a valid primary and no invalid ones is a no-op (no API calls). Safe to retry.
 
 `WAITLISTED` is preserved — it's an additive flag managed by the waitlist commands.
-`HONOURARY` is *intentionally cleared* — it's mutually exclusive with the linked-account baseline; staff can re-grant via `/honour`.
+`HONOURARY`/`HIATUS` are **preserved when valid** (guildless, or HONOURARY in another guild). They are only cleared when authoritatively superseded: `blocked` → REGISTERED-only; `in_returners` → MEMBER; and HIATUS specifically is cleared when the player is in *any* guild (Returners → MEMBER, other guild → REGISTERED). This intentionally diverges from the old "always clears HIATUS/HONOURARY" behavior, which silently demoted legitimately manual tags on every re-link/janitor pass — and is closer to the [membership_spec §6](membership_spec.md#6--role-automation-behaviour) transition table (JOINED_OTHER_GUILD keeps HONOURARY; HIATUS is reached only via BECAME_GUILDLESS).
 
 If `to_add_ids` is non-empty but the role lookup fails (`guild.get_role(rid)` returns `None`, usually because the role ID in `CurrConfig` is wrong), the function aborts with a loud error log rather than silently leaving the member in a partial state.
 

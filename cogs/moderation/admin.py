@@ -285,6 +285,7 @@ class Admin(commands.Cog):
             await ensure_linked_baseline(
                 user,
                 in_returners=(mc.guild == "Returners"),
+                in_other_guild=(mc.guild is not None and mc.guild != "Returners"),
                 blocked=blocked,
                 reason=f"/link set by {ctx.author}",
             )

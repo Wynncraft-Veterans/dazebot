@@ -252,24 +252,40 @@ async def ensure_linked_baseline(
     member: discord.Member,
     *,
     in_returners: bool,
+    in_other_guild: bool = False,
     blocked: bool = False,
     reason: str | None = None,
 ) -> None:
-    """Enforce the invariant: any linked Discord user must be MEMBER or
-    REGISTERED, never both, never neither.
+    """Enforce the invariant: any linked Discord user must hold a *valid*
+    primary membership state, never none.
 
-    - blocked OR not in Returners \u2192 REGISTERED (clears MEMBER/HIATUS/HONOURARY).
-    - in Returners (and not blocked) \u2192 MEMBER (clears REGISTERED/HIATUS/HONOURARY).
+    Preservation-based: it strips only primary roles that are **invalid**
+    given the inputs, and grants a baseline **only when no valid primary role
+    remains**. A manually-assigned HIATUS / HONOURARY is kept when it is still
+    valid \u2014 re-running enforcement (on a re-link, /link set, /waitlist add,
+    or the janitor) must never quietly demote a legitimate manual tag.
 
-    WAITLISTED is preserved \u2014 it's an additive flag managed separately by
-    the waitlist commands and is independent of the in-guild status.
+    Validity by situation (exactly one of ``in_returners`` / ``in_other_guild``
+    may be True; both False = guildless):
 
-    Idempotent: if the member already has the correct primary role and no
-    conflicting ones, this is a no-op (no API calls made). Safe to call
-    repeatedly from background loops.
+    - ``blocked``       \u2192 REGISTERED only (authoritative, membership_spec
+                          \u00a72b; clears MEMBER/HIATUS/HONOURARY).
+    - ``in_returners``  \u2192 MEMBER only (authoritative \u2014 they *are* in the
+                          guild; clears REGISTERED/HIATUS/HONOURARY, matching
+                          the JOINED_VETS transition).
+    - ``in_other_guild``\u2192 valid = {REGISTERED, HONOURARY}. HIATUS is invalid
+                          (in a guild \u2192 never Hiatus) and a stale MEMBER is
+                          invalid (not in Returners); both stripped. HONOURARY
+                          is preserved (matches JOINED_OTHER_GUILD).
+    - guildless         \u2192 valid = {REGISTERED, HIATUS, HONOURARY}. A
+                          manually-parked HIATUS is legitimate and preserved;
+                          only a stale MEMBER is stripped.
 
-    HONOURARY is intentionally cleared \u2014 honourary status is mutually
-    exclusive with the linked-account baseline; staff can re-grant it.
+    When no valid primary remains the safe baseline is granted (MEMBER for the
+    in_returners case, REGISTERED otherwise \u2014 the "Flame" no-state self-heal;
+    purely additive). WAITLISTED is never touched. Idempotent: a member
+    already holding a valid primary and no invalid ones is a no-op (no API
+    calls).
     """
     REG = RoleState.REGISTERED
     MEM = RoleState.MEMBER
@@ -277,18 +293,27 @@ async def ensure_linked_baseline(
     HON = RoleState.HONOURARY
 
     state = state_of(member)
-    target = REG if (blocked or not in_returners) else MEM
-    primary_state_flags = (REG, MEM, HIA, HON)
 
-    target_role_id = _STATE_ROLE_MAP[target]()
+    if blocked:
+        valid = {REG}
+    elif in_returners:
+        valid = {MEM}
+    elif in_other_guild:
+        valid = {REG, HON}
+    else:  # guildless
+        valid = {REG, HIA, HON}
+
+    primary_state_flags = (REG, MEM, HIA, HON)
+    held_valid = any(s in state for s in valid)
     to_remove_ids = {
         _STATE_ROLE_MAP[s]()
         for s in primary_state_flags
-        if s != target and s in state
+        if s in state and s not in valid
     }
     to_add_ids: set[int] = set()
-    if target not in state:
-        to_add_ids.add(target_role_id)
+    if not held_valid:
+        baseline = MEM if valid == {MEM} else REG
+        to_add_ids.add(_STATE_ROLE_MAP[baseline]())
 
     if not to_add_ids and not to_remove_ids:
         return
@@ -296,10 +321,13 @@ async def ensure_linked_baseline(
     guild = member.guild
     rem_roles = [r for r in (guild.get_role(rid) for rid in to_remove_ids) if r is not None]
     add_roles = [r for r in (guild.get_role(rid) for rid in to_add_ids) if r is not None]
-    default_reason = f"linked baseline -> {'MEMBER' if target == MEM else 'REGISTERED'}"
+    if to_add_ids:
+        default_reason = f"linked baseline -> {'MEMBER' if valid == {MEM} else 'REGISTERED'}"
+    else:
+        default_reason = "linked baseline: prune invalid role(s)"
     if to_add_ids and not add_roles:
         logger.error(
-            "ensure_linked_baseline: target role(s) %s could not be resolved in guild %s "
+            "ensure_linked_baseline: baseline role(s) %s could not be resolved in guild %s "
             "(check CurrConfig.ROLE_MEMBER / ROLE_REGISTERED ids). Aborting for %s.",
             to_add_ids, guild.id, member,
         )
@@ -314,7 +342,6 @@ async def ensure_linked_baseline(
     if add_roles:
         await member.add_roles(*add_roles, reason=reason or default_reason)
     logger.info(
-        f"ensure_linked_baseline: {member} ({member.id}) -> "
-        f"{'MEMBER' if target == MEM else 'REGISTERED'} "
-        f"+{[r.name for r in add_roles]} -{[r.name for r in rem_roles]}"
+        "ensure_linked_baseline: %s (%s) +%s -%s",
+        member, member.id, [r.name for r in add_roles], [r.name for r in rem_roles],
     )

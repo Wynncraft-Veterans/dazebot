@@ -282,6 +282,7 @@ async def _enforce_linked_baseline_for(bot: Bot, disc_uuid: str, mc: MinecraftAc
     ``False`` as "don't delete the LinkCode row, retry later".
     """
     in_returners = mc.guild == "Returners"
+    in_other_guild = mc.guild is not None and mc.guild != "Returners"
     blocked = await Blocklist.filter(minecraft_account=mc).exists()
     logger.info(
         "enforce_baseline: start disc=%s mc_uuid=%s mc_guild=%r in_returners=%s blocked=%s",
@@ -322,6 +323,7 @@ async def _enforce_linked_baseline_for(bot: Bot, disc_uuid: str, mc: MinecraftAc
             await ensure_linked_baseline(
                 member,
                 in_returners=in_returners,
+                in_other_guild=in_other_guild,
                 blocked=blocked,
                 reason="link_completed",
             )

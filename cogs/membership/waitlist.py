@@ -108,6 +108,7 @@ class WaitlistCog(commands.Cog):
             await ensure_linked_baseline(
                 user,
                 in_returners=(mc.guild == "Returners"),
+                in_other_guild=(mc.guild is not None and mc.guild != "Returners"),
                 blocked=False,
                 reason="/waitlist add baseline",
             )

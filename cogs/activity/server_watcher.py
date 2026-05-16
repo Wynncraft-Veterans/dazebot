@@ -8,12 +8,20 @@ https://docs.wynncraft.com/privacy). The field is the *last* server they
 were on — not a live "currently on" indicator — so it changes on
 every login.
 
-This cog polls the unknown-bucket Returners players (those whose
-``last_online`` is the ``UNKNOWN_LAST_ONLINE`` sentinel because the guild
-endpoint returned ``lastJoin=null``) and, on any transition between two
-non-null server values, infers in-interval activity and bumps
-``last_online = now``. The existing ``/purgelist`` logic then surfaces
-them out of the Unknown section.
+This cog polls the unknown-bucket players (those whose ``last_online`` is
+the ``UNKNOWN_LAST_ONLINE`` sentinel because the guild/player endpoint
+returned ``lastJoin=null``) and, on any transition between two non-null
+server values, infers in-interval activity and bumps ``last_online =
+now``. The existing ``/purgelist`` logic then surfaces them out of the
+Unknown section.
+
+Scope is **Returners *and* waitlisted accounts**. Returners is the
+original Unknown-bucket use case; waitlisted accounts were added because
+``waitlist_cleanup`` no longer purges the sentinel (an API-hidden
+waitlisted player would otherwise sit at epoch forever, untracked) — this
+watch is their only path to a real ``last_online`` and thus to the normal
+inactivity rule. The waitlist is small, so the extra rows are a rounding
+error against the rate budget below.
 
 First observation just records the baseline; we cannot date a change we
 have not yet seen happen. Asymmetric transitions involving ``None``
@@ -34,6 +42,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from discord.ext import commands, tasks
+from tortoise.expressions import Q
 
 from bot import Bot
 from lib.mc.wynn_api.player import get_player_stats
@@ -57,9 +66,12 @@ class ServerWatcher(commands.Cog):
     async def poll(self):
         # Server-side filter for the unknown sentinel: matches
         # ``is_last_online_unknown`` (anything within 24h of epoch).
+        # Scope: Returners (original use case) OR waitlisted — see module
+        # docstring. ``waitlist`` is the reverse relation on MinecraftAccount;
+        # Waitlist.minecraft_account is unique, so the join can't fan out.
         candidates = await MinecraftAccount.filter(
-            guild="Returners",
-            last_online__lte=UNKNOWN_LAST_ONLINE + timedelta(days=1),
+            Q(last_online__lte=UNKNOWN_LAST_ONLINE + timedelta(days=1))
+            & (Q(guild="Returners") | Q(waitlist__isnull=False))
         )
         if not candidates:
             return

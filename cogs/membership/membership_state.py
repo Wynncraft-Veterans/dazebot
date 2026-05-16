@@ -32,6 +32,7 @@ from orm import (
     FirstInstallMonitor,
     MinecraftAccount,
     MinecraftAlt,
+    UNKNOWN_LAST_ONLINE,
     UserVanityChoice,
     Waitlist,
 )
@@ -681,8 +682,14 @@ class MembershipState(commands.Cog):
 
         if getattr(CurrConfig, "INACTIVITY_MEMBER_ENABLED", False):
             cutoff = datetime.now(timezone.utc) - timedelta(days=int(CurrConfig.INACTIVITY_MEMBER_DAYS))
+            # Exclude the API-disabled epoch sentinel: it's trivially < cutoff
+            # and would send a false "you're inactive" DM to players whose
+            # real activity server_watcher tracks separately. Same rule as
+            # /purgelist and waitlist_cleanup ("never compare directly").
             members = await MinecraftAccount.filter(
-                guild="Returners", last_online__lt=cutoff
+                guild="Returners",
+                last_online__lt=cutoff,
+                last_online__gt=UNKNOWN_LAST_ONLINE + timedelta(days=1),
             ).prefetch_related("discord_account")
             for mc in members:
                 disc_list = await mc.discord_account.all()

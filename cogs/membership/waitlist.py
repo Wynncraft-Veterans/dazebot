@@ -23,7 +23,7 @@ from lib.role_state import (
     resolve_guild_member,
     state_of,
 )
-from orm import Blocklist, DiscordAccount, MinecraftAccount, Waitlist
+from orm import Blocklist, DiscordAccount, MinecraftAccount, Waitlist, is_last_online_unknown
 
 logger = logging.getLogger("dazebot.cogs.membership.waitlist")
 
@@ -102,6 +102,19 @@ class WaitlistCog(commands.Cog):
             await ctx.reply(f"`{mc.mc_username}` is on the blocklist; cannot waitlist.")
             return
 
+        # Heads-up for staff: an API-disabled player has no readable
+        # lastJoin, so the waitlist inactivity rule can't measure them.
+        # server_watcher tracks them via server-change observation instead
+        # (so the entry persists rather than being purged) — surface that so
+        # staff aren't surprised it won't auto-expire on inactivity.
+        api_note = (
+            f"\n⚠️ `{mc.mc_username}` has their Wynncraft API disabled — "
+            "activity is tracked via server-change observation, so this entry "
+            "won't auto-drop on the inactivity rule."
+            if is_last_online_unknown(mc.last_online)
+            else ""
+        )
+
         # Add to waitlist (DB).
         existing_wl = await Waitlist.filter(minecraft_account=mc).first()
         if existing_wl is None:
@@ -139,7 +152,7 @@ class WaitlistCog(commands.Cog):
             if RoleState.WAITLISTED in state_of(user):
                 await ctx.reply(
                     f"✅ {user.mention} (`{mc.mc_username}`) is on the waitlist "
-                    f"(re-synced DB row + role).",
+                    f"(re-synced DB row + role).{api_note}",
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
@@ -149,7 +162,7 @@ class WaitlistCog(commands.Cog):
             )
             return
         await ctx.reply(
-            f"✅ {user.mention} (`{mc.mc_username}`) added to waitlist.",
+            f"✅ {user.mention} (`{mc.mc_username}`) added to waitlist.{api_note}",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 

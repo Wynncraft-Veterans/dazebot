@@ -21,7 +21,7 @@ from tortoise.expressions import Q
 from bot import Bot
 from lib.mc.wynn import check_player_full
 from lib.role_state import Trigger, apply_transition, resolve_guild_member
-from orm import DiscordAccount, LinkRequest, MinecraftAccount, Waitlist
+from orm import UNKNOWN_LAST_ONLINE, DiscordAccount, LinkRequest, MinecraftAccount, Waitlist
 
 logger = logging.getLogger("dazebot.cogs.membership.join")
 
@@ -60,9 +60,21 @@ class Join(commands.Cog):
         # them *and* strip the now-dangling WAITLISTED role from the linked
         # Discord member — a raw delete here was the source of the
         # "WAITLISTED role but no Waitlist DB row" divergence.
+        #
+        # The inactivity clause must exclude the ``UNKNOWN_LAST_ONLINE``
+        # sentinel (Wynn-API-disabled players). Epoch is trivially < now-9d,
+        # so without the lower bound every API-hidden waitlisted player was
+        # purged within a minute of every bot start. Per the ``/purgelist``
+        # rule we never treat the sentinel as inactive (orm.py: "never
+        # compare directly"); ``server_watcher`` now also watches waitlisted
+        # accounts and bumps them to a real ``last_online`` on observed
+        # world-change activity, after which this rule applies normally.
         stale = await Waitlist.filter(
             Q(minecraft_account__guild__isnull=False)
-            | Q(minecraft_account__last_online__lt=now - timedelta(days=9))
+            | Q(
+                minecraft_account__last_online__lt=now - timedelta(days=9),
+                minecraft_account__last_online__gt=UNKNOWN_LAST_ONLINE + timedelta(days=1),
+            )
         ).select_related("minecraft_account")
         if not stale:
             return

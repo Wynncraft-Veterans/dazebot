@@ -8,7 +8,7 @@ Auto-discovery: `bot.py:_load_cogs` walks every `.py` file under `cogs/` (recurs
 
 | Cog | Owns |
 |---|---|
-| [`join.py`](../cogs/membership/join.py) | Periodic janitor that re-runs `ensure_linked_baseline` for every linked user (catches stale states from prior failures). |
+| [`join.py`](../cogs/membership/join.py) | Two periodic janitor loops only: `clear_old_requests` (5 min — drops `LinkRequest` rows whose MC or Discord side was since linked elsewhere) and `waitlist_cleanup` (1 min — refreshes stale waitlist entries against the Wynncraft API and drops entries now in a guild or inactive ≥9 days). It does **not** re-run `ensure_linked_baseline`; the baseline self-heal loop lives in [`cogs/maintenance/janitor.py`](../cogs/maintenance/janitor.py) reconciler (A), not here (see [role_state.md](role_state.md)). |
 | [`vanity_roles.py`](../cogs/membership/vanity_roles.py) | Per-member year/date cosmetic role auto-assignment driven by Wynncraft `firstJoin`. |
 | [`blocking.py`](../cogs/membership/blocking.py) | `/block`, `/unblock`. |
 | [`waitlist.py`](../cogs/membership/waitlist.py) | `/waitlist add\|view\|remove\|self\|leave`. |
@@ -27,8 +27,16 @@ Auto-discovery: `bot.py:_load_cogs` walks every `.py` file under `cogs/` (recurs
 
 | Cog | Owns |
 |---|---|
-| [`activity.py`](../cogs/activity/activity.py) | Periodic Returners-guild scan; fires `JOINED_VETS`/`BECAME_GUILDLESS`/`JOINED_OTHER_GUILD`/`INACTIVE_*` triggers via `lib/role_state.apply_transition`. Hosts `/purgelist` and the `/shout` group. |
+| [`activity.py`](../cogs/activity/activity.py) | Periodic Returners-guild scan; fires `JOINED_VETS`/`BECAME_GUILDLESS`/`JOINED_OTHER_GUILD`/`INACTIVE_*` triggers via `lib/role_state.apply_transition`. Hosts `/purgelist` and the `/shout` group. `_check_guild` has a plausibility write-guard: if the Wynncraft guild response returns implausibly few members vs. what's stored (`GUILD_SCAN_MIN_PLAUSIBLE_*`), it suppresses **both** join- and leave-detection that tick — a truncated/degraded API response no longer mass-downgrades members. |
 | [`server_watcher.py`](../cogs/activity/server_watcher.py) | 3-min poll of Returners members whose `lastJoin` is privacy-hidden. Reads the `/v3/player` `server` field; between-tick changes are treated as activity and bump `last_online`. |
+
+## `cogs/maintenance/` — data-integrity janitor
+
+| Cog | Owns |
+|---|---|
+| [`janitor.py`](../cogs/maintenance/janitor.py) | Periodic reconciliation loop (`JANITOR_INTERVAL_MINUTES`, default 6h) + staff `/janitor run`. Three reconcilers, run **(F)→(A)→(B)**: **(F)** blocklisted users' linked members forced REGISTERED-only; **(A)** the Flame self-heal — every linked member re-checked against `ensure_linked_baseline` (via `_enforce_linked_baseline_for`); **(B)** kept `LinkCode` rows retried/cleaned, mirroring `try_consume_code`'s delete/keep contract. Log-only by default (`JANITOR_REPAIR_ENABLED=False`); flips to actually mutate at runtime. **Either way** it posts a throttled (`JANITOR_ALERT_DELTA`) summary embed to `JANITOR_ALERT_CHANNEL`, throttle bypassed when a tick actually repaired. `JANITOR_ENABLED`/interval are read at init/decoration → restart to change; `JANITOR_REPAIR_ENABLED` is the live switch. Throttle marker = `JanitorAlert` ORM table (mirror of `DeadGuildAlert`). |
+
+`cogs/maintenance/` is a normal auto-loaded subfolder (not in `COG_SKIP_DIRS`); the empty `__init__.py` is the subpackage marker like every other `cogs/*` folder.
 
 ## `cogs/events/` — return weeks + scoring
 

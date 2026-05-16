@@ -52,6 +52,28 @@ class Config:
     INACTIVITY_WAITLIST_DAYS = 3
     INACTIVITY_WAITLIST_ENABLED = True
 
+    # --- Data-integrity janitor (cogs/maintenance/janitor.py) ---
+    # JANITOR_ENABLED gates whether the loop runs at all (detect + alert even
+    # when repair is off). JANITOR_REPAIR_ENABLED is the live mutation switch:
+    # False = log-only (detect + alert), True = actually fix roles / delete
+    # kept LinkCodes. JANITOR_ENABLED and the interval are read at cog __init__
+    # / decoration time → toggling needs a restart; JANITOR_REPAIR_ENABLED is
+    # re-read every tick. See .claude/role_state.md.
+    JANITOR_ENABLED = True
+    JANITOR_REPAIR_ENABLED = False
+    JANITOR_INTERVAL_MINUTES = 360  # 6h
+    JANITOR_ALERT_CHANNEL = 1313786561145606216
+    JANITOR_ALERT_DELTA = timedelta(hours=6)  # throttle window for "still detecting" summaries
+    JANITOR_ALERT_MAX_SAMPLES = 15
+
+    # _check_guild API-down write-guard: a Wynncraft guild response is treated
+    # as untrustworthy (membership inference suppressed) when it returns zero
+    # members, or fewer than max(ABS, db_count * FRACTION) members vs. how many
+    # we currently have stored for that guild — almost certainly a truncated /
+    # degraded API response rather than a real mass exodus.
+    GUILD_SCAN_MIN_PLAUSIBLE_FRACTION = 0.5
+    GUILD_SCAN_MIN_PLAUSIBLE_ABS = 5
+
     GUILD_DEAD_ALERT_ROLE_USA = 1402295013169172500
     GUILD_DEAD_ALERT_ROLE_EUROPE = 1436108975132119221
     GUILD_DEAD_ALERT_ROLE_ASIA = 1436109140195020892
@@ -127,6 +149,7 @@ class DevConfig(Config):
     GUILD = 1407388408472666243
     GUILD_DEAD_ALERT_CHANNEL = GUILD_FULL_ALERT_CHANNEL = 1407388410393399494  # general
     LINK_FALLBACK_CHANNEL = 1407388410393399494  # general
+    JANITOR_ALERT_CHANNEL = 1407388410393399494  # general (never post into prod from dev)
     GUILD_FULL_ALERT_ROLE = 1409300773439012874  # @aaaaa
     GUILD_DEAD_WHEN = 10
     GUILD_FULL_WHEN = 10

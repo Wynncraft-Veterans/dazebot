@@ -125,6 +125,21 @@ class GuildCapacityAlert(Model):
         table = "guild_capacity_alerts"
 
 
+class JanitorAlert(Model):
+    """Restart-safe throttle marker for the data-integrity janitor's Discord
+    summary (cogs/maintenance/janitor.py). One row per posted summary; the
+    janitor reads the most recent ``created_at`` to decide whether the
+    JANITOR_ALERT_DELTA window has elapsed. Mirrors DeadGuildAlert/
+    GuildCapacityAlert exactly. Created automatically by
+    ``Tortoise.generate_schemas()`` in ``init_db`` — no migration."""
+
+    id = fields.UUIDField(pk=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "janitor_alerts"
+
+
 class Shout(Model):
     id = fields.UUIDField(pk=True)
     shouter = fields.ForeignKeyField("models.DiscordAccount", related_name="shouts", on_delete=fields.CASCADE)

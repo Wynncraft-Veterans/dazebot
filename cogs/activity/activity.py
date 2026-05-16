@@ -117,9 +117,34 @@ class Activity(commands.Cog):
 
         tasks = []
 
-        # Detect newly-joined and newly-left members of *Returners* and fire the
-        # role-state machine accordingly. (../.claude/membership_spec.md \u00a76)
-        if guild_name_full == "Returners":
+        # API-down write-guard: `get_guild` raises on error envelopes / network
+        # errors, but a *successful-but-truncated* member list parses silently.
+        # If we trust such a response, every still-present member is wrongly
+        # detected as "left" \u2192 guild nulled \u2192 mass MEMBER\u2192HIATUS/REGISTERED
+        # downgrades. So suppress *all* membership inference (both join- and
+        # leave-detection) when the response is implausibly small vs. what we
+        # have stored. The per-member `_apply_guild` "still here / refresh"
+        # pass below always runs \u2014 writing fresher data for members the API
+        # *did* return is safe; only inference from *absence* is unsafe.
+        api_count = len(members)
+        db_count = await MinecraftAccount.filter(guild=guild_name_full).count()
+        trust = api_count > 0 and (
+            db_count == 0
+            or api_count
+            >= max(
+                self.bot.config.GUILD_SCAN_MIN_PLAUSIBLE_ABS,
+                int(db_count * self.bot.config.GUILD_SCAN_MIN_PLAUSIBLE_FRACTION),
+            )
+        )
+        if not trust:
+            logger.error(
+                "check_guild(%s): SUSPICIOUS api_count=%d vs db_count=%d \u2014 skipping "
+                "membership inference (join + leave) to avoid mass false transitions",
+                guild_name_full, api_count, db_count,
+            )
+
+        # Detect newly-joined members of *Returners*. (../.claude/membership_spec.md \u00a76)
+        if trust and guild_name_full == "Returners":
             api_uuids = {m.uuid for m in members}
             previously_in: list[MinecraftAccount] = await MinecraftAccount.filter(guild=guild_name_full).all()
             previously_in_uuids = {a.uuid for a in previously_in}
@@ -129,17 +154,21 @@ class Activity(commands.Cog):
         for member in members:
             tasks.append(self._apply_guild(guild, member))
 
-        accounts = await MinecraftAccount.filter(Q(guild=guild_name_full) & ~Q(uuid__in=[m.uuid for m in members]))
-        left_uuids = [a.uuid for a in accounts]
-        for account in accounts:
-            account.guild = None
-            await account.save()
+        left_uuids: list[str] = []
+        if trust:
+            accounts = await MinecraftAccount.filter(
+                Q(guild=guild_name_full) & ~Q(uuid__in=[m.uuid for m in members])
+            )
+            left_uuids = [a.uuid for a in accounts]
+            for account in accounts:
+                account.guild = None
+                await account.save()
 
         await asyncio.gather(*tasks)
 
-        if guild_name_full == "Returners" and left_uuids:
+        if trust and guild_name_full == "Returners" and left_uuids:
             await self._fire_role_transitions_for_uuids(set(left_uuids), _trigger="became_guildless")
-        elif guild_name_full != "Returners":
+        elif trust and guild_name_full != "Returners":
             # When we re-check a non-Returners guild, fire JOINED_OTHER_GUILD
             # for every uuid we already had in our DB. The state machine
             # ignores no-op transitions, so this is safe even if they've been

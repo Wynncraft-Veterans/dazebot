@@ -269,16 +269,16 @@ class Admin(commands.Cog):
 
         disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(user.id))
 
-        if disc.minecraft_account_id == mc.id:
-            await ctx.reply(
-                f"{user.mention} is already linked to `{mc.mc_username}`.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
+        already_linked = disc.minecraft_account_id == mc.id
+        if not already_linked:
+            disc.minecraft_account = mc
+            await disc.save(update_fields=["minecraft_account_id"])
 
-        disc.minecraft_account = mc
-        await disc.save(update_fields=["minecraft_account_id"])
-
+        # Always (re-)enforce the linked baseline, even when the DB link
+        # already existed: a user can be linked but missing their state-role
+        # (e.g. linked via /waitlist add before that path enforced the
+        # baseline). Re-running here is idempotent and repairs that, so the
+        # staff override is a genuine fix rather than a no-op early return.
         baseline_note = ""
         try:
             blocked = await Blocklist.filter(minecraft_account=mc).exists()
@@ -295,8 +295,13 @@ class Admin(commands.Cog):
             logger.exception("/link set: ensure_linked_baseline crashed")
             baseline_note = "\n\u26a0\ufe0f Could not update roles (see logs)."
 
+        verb = (
+            f"was already linked to `{mc.mc_username}`; re-synced roles"
+            if already_linked
+            else f"linked to Minecraft account `{mc.mc_username}`"
+        )
         await ctx.reply(
-            f"Linked {user.mention} to Minecraft account `{mc.mc_username}`.{baseline_note}",
+            f"{user.mention} {verb}.{baseline_note}",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 

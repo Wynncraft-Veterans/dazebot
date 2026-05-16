@@ -237,11 +237,14 @@ async def try_consume_code(
     # IMPORTANT: only delete the LinkCode row after enforcement confirms the
     # member was found in at least one guild and roles applied without
     # error. If enforcement can't find the member (cache cold + REST race,
-    # bot recently joined, etc.), we KEEP the row so the periodic janitor
-    # in cogs/join.py can retry. Without this, a user could end up with the
-    # DiscordAccount<->MinecraftAccount link in the DB but neither the
+    # bot recently joined, etc.), we KEEP the row. The data-integrity janitor
+    # (cogs/maintenance/janitor.py reconciler B) re-attempts enforcement for
+    # kept rows on its interval and applies this same delete/keep contract, so
+    # recovery no longer depends solely on the player re-sending the code or a
+    # staff /link set (those still work too). Without this, a user could end up
+    # with the DiscordAccount<->MinecraftAccount link in the DB but neither the
     # MEMBER nor REGISTERED role -- the exact invariant violation we're
-    # protecting against.
+    # protecting against. See .claude/linking.md.
     enforcement_ok = False
     try:
         enforcement_ok = await _enforce_linked_baseline_for(bot, row.disc_uuid, mc)
@@ -253,7 +256,10 @@ async def try_consume_code(
     else:
         logger.error(
             "try_consume_code: KEEPING LinkCode row for disc=%s mc=%s because role "
-            "enforcement did not confirm success; periodic janitor will retry.",
+            "enforcement did not confirm success. The janitor (cogs/maintenance/"
+            "janitor.py reconciler B) will re-attempt this on its interval; a "
+            "player code re-send or staff /link set also recovers it. "
+            "See .claude/linking.md.",
             row.disc_uuid, key,
         )
 

@@ -14,7 +14,7 @@ from lib.auth import is_guild, is_registered, is_staff
 from lib.discord_utils.converters import CaseInsensitiveMember
 from lib.mc.resolve import ensure_mc_account
 from lib.mc.wynn_api.errors import WynnApiError
-from lib.role_state import Trigger, apply_transition
+from lib.role_state import Trigger, apply_transition, ensure_linked_baseline
 from orm import Blocklist, DiscordAccount, MinecraftAccount, Waitlist
 
 logger = logging.getLogger("dazebot.cogs.membership.waitlist")
@@ -98,6 +98,27 @@ class WaitlistCog(commands.Cog):
         if existing_wl is None:
             await Waitlist.create(minecraft_account=mc)
 
+        # Enforce the linked-account baseline before the waitlist transition.
+        # Users linked via this command's own auto-/register path above (or
+        # via an older code path that skipped enforcement) have no state-role,
+        # and ADDED_TO_WAITLIST would otherwise fail with "User has no
+        # membership state". This is idempotent and also self-heals stale
+        # already-linked users. blocked=False: on-blocklist users returned above.
+        try:
+            await ensure_linked_baseline(
+                user,
+                in_returners=(mc.guild == "Returners"),
+                blocked=False,
+                reason="/waitlist add baseline",
+            )
+        except discord.HTTPException as e:
+            logger.warning(f"/waitlist add: ensure_linked_baseline failed for {user}: {e}")
+            await ctx.reply(
+                f"⚠️ Added to waitlist DB but could not set baseline roles: {e}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
         # Apply role transition.
         result = await apply_transition(user, Trigger.ADDED_TO_WAITLIST, reason="/waitlist add")
         if result.is_error:
@@ -147,10 +168,13 @@ class WaitlistCog(commands.Cog):
     )
     @is_staff()
     async def waitlist_remove(self, ctx: commands.Context, username_or_uuid: str):
-        deleted = await Waitlist.filter(
+        # SQLite can't DELETE across a JOIN, so resolve matching rows by PK
+        # first (the SELECT side may JOIN freely) then delete by id.
+        ids = await Waitlist.filter(
             Q(minecraft_account__uuid=username_or_uuid)
             | Q(minecraft_account__mc_username__iexact=username_or_uuid)
-        ).delete()
+        ).values_list("id", flat=True)
+        deleted = await Waitlist.filter(id__in=ids).delete() if ids else 0
         if not deleted:
             await ctx.reply(f"`{username_or_uuid}` is not on the waitlist.")
             return
@@ -187,9 +211,12 @@ class WaitlistCog(commands.Cog):
         description="Remove yourself from the in-game guild waitlist.",
     )
     async def waitlist_leave(self, ctx: commands.Context):
-        deleted = await Waitlist.filter(
+        # SQLite can't DELETE across a JOIN (here two relations deep); resolve
+        # ids via the SELECT side first, then delete by PK.
+        ids = await Waitlist.filter(
             minecraft_account__discord_account__disc_uuid=str(ctx.author.id)
-        ).delete()
+        ).values_list("id", flat=True)
+        deleted = await Waitlist.filter(id__in=ids).delete() if ids else 0
         if not deleted:
             await ctx.reply("You are not on the waitlist.")
             return

@@ -58,7 +58,7 @@ The code itself is the shared secret; `mc_username` is purely a scope hint that 
 - The Discord member isn't in any of the bot's guilds (e.g. they left between clicking the button and typing the code).
 - The Discord cache is cold AND the REST `fetch_member` falls back fail (rate limit, transient HTTPException).
 
-If `_enforce_linked_baseline_for` returns `False`, `try_consume_code` **keeps the `LinkCode` row** and logs an `ERROR`. The periodic janitor in `cogs/join.py` will retry on its next tick.
+If `_enforce_linked_baseline_for` returns `False`, `try_consume_code` **keeps the `LinkCode` row** and logs an `ERROR`. The data-integrity janitor (`cogs/maintenance/janitor.py` reconciler B) now periodically re-attempts `_enforce_linked_baseline_for` for kept rows and applies this *same* delete/keep contract: delete when enforcement confirms success, delete when unrecoverable (the MC is linked to a different `DiscordAccount`, or the Discord user is in no guild at all), keep otherwise. Re-attempt cadence = the janitor interval (default 6h) and only mutates when `JANITOR_REPAIR_ENABLED` is on (log-only otherwise, but still alerts). A player code re-send (re-invokes `try_consume_code`) or a staff `/link set` / `/janitor run` still recover it immediately. So keeping the row prevents *premature* `LinkCode` deletion **and** is now eventually reconciled rather than relying solely on manual re-trigger.
 
 Without this rule, a user could end up with the `DiscordAccount ↔ MinecraftAccount` link in the DB but **neither** the MEMBER nor REGISTERED role — the exact invariant the role-state machine exists to prevent.
 

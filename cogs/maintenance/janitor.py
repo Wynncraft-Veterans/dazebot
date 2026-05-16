@@ -11,13 +11,22 @@ Reconcilers (run in this order):
 * **(F) ``reconcile_blocklisted_registered_only``** — a blocklisted user's
   linked member must be REGISTERED-only. Runs first so the strongest
   invariant wins.
-* **(A) ``reconcile_linked_baseline``** — the "Flame" self-heal: any linked
-  member must hold exactly MEMBER or REGISTERED (never neither, never
-  HONOURARY/HIATUS contamination). Re-runs ``ensure_linked_baseline`` via
-  ``_enforce_linked_baseline_for``.
-* **(B) ``reconcile_kept_linkcodes``** — retries / cleans ``LinkCode`` rows
-  kept by ``try_consume_code`` when enforcement failed, mirroring that
-  function's delete/keep contract.
+* **(A) ``reconcile_linked_baseline``** — the "Flame" self-heal, *strictly*:
+  only linked members holding **no** membership state at all (none of
+  REGISTERED/MEMBER/HIATUS/HONOURARY) get the baseline granted (MEMBER if in
+  Returners, else REGISTERED — additive, never a demotion). Members with any
+  valid primary role are left **untouched** — HIATUS and HONOURARY are
+  legitimate manually-assigned states (e.g. a pre-dazebot member parked on
+  HIATUS) and must not be downgraded without positive information (a guild
+  change, which the activity loop already handles). Genuine multi-primary
+  conflicts (e.g. MEMBER+REGISTERED) are intentionally left for manual review.
+* **(B) ``reconcile_kept_linkcodes``** — cleans leftover ``LinkCode`` rows.
+  Unrecoverable rows are deleted (MC linked elsewhere / user in no guild). For
+  a row whose user is linked: if the user already has a valid primary state
+  the link plainly succeeded and the row is just a stale leftover → delete it,
+  **never touch roles**; only a *stateless* user is a real kept-on-failure →
+  additively re-enforce the baseline (same Flame rule as (A)) then clear the
+  code.
 
 Operational notes:
 
@@ -51,8 +60,8 @@ _PRIMARY = (RoleState.REGISTERED, RoleState.MEMBER, RoleState.HIATUS, RoleState.
 
 _LABELS = {
     "blocklist": "(F) Blocklist → REGISTERED",
-    "baseline": "(A) Linked baseline (Flame self-heal)",
-    "linkcodes": "(B) Kept LinkCodes",
+    "baseline": "(A) No-state self-heal (Flame)",
+    "linkcodes": "(B) Stale / kept LinkCodes",
 }
 
 
@@ -152,13 +161,13 @@ async def reconcile_blocklisted_registered_only(
 
 
 async def reconcile_linked_baseline(bot: Bot, *, enforce: bool) -> ReconcilerResult:
-    """(A) Every linked member must hold exactly MEMBER or REGISTERED.
-
-    Detection mirrors ``ensure_linked_baseline``'s delta math (target =
-    REGISTERED if blocked or not in Returners, else MEMBER; flagged if the
-    target is missing or any conflicting primary / HONOURARY is held). Enforce
-    delegates the actual repair to ``_enforce_linked_baseline_for`` (which
-    re-computes blocked/in_returners itself and is idempotent).
+    """(A) The Flame self-heal, strictly: a linked member holding **no**
+    membership state at all (none of REGISTERED/MEMBER/HIATUS/HONOURARY) gets
+    the baseline granted. A member with any valid primary role is left
+    untouched — HIATUS/HONOURARY are legitimate manual states and must never
+    be demoted here; genuine multi-primary conflicts are left for manual
+    review. Enforce delegates to ``_enforce_linked_baseline_for``, which for a
+    stateless member is purely additive (nothing to strip → never a demotion).
     """
     r = ReconcilerResult(name="baseline")
     discs = await DiscordAccount.filter(
@@ -171,19 +180,20 @@ async def reconcile_linked_baseline(bot: Bot, *, enforce: bool) -> ReconcilerRes
             member, _ = await _resolve_member(bot, disc.disc_uuid)
             if member is None:
                 continue  # not in guild → ensure_linked_baseline can't act anyway
-            blocked = await Blocklist.filter(minecraft_account_id=mc.id).exists()
-            in_returners = mc.guild == "Returners"
-            target = RoleState.REGISTERED if (blocked or not in_returners) else RoleState.MEMBER
             state = state_of(member)
-            need_remove = [s for s in _PRIMARY if s is not target and s in state]
-            need_add = target not in state
-            if not (need_remove or need_add):
-                continue  # already correct — idempotent no-op
+            if any(s in state for s in _PRIMARY):
+                # Has a valid primary role (REGISTERED/MEMBER/HIATUS/HONOURARY).
+                # Leave it ALONE — HIATUS/HONOURARY are legitimate manual
+                # states; genuine conflicts are for manual review. We only
+                # heal the true Flame class: no membership state at all.
+                continue
             r.flagged += 1
-            note = " (HONOURARY contamination)" if RoleState.HONOURARY in state else ""
+            in_returners = mc.guild == "Returners"
+            blocked = await Blocklist.filter(minecraft_account_id=mc.id).exists()
+            target_name = "MEMBER" if (in_returners and not blocked) else "REGISTERED"
             r.samples.append(
-                f"<@{disc.disc_uuid}> `{mc.mc_username}` state={_fmt_state(state)} "
-                f"→ {target.name}{note}" + ("" if enforce else " (would fix)")
+                f"<@{disc.disc_uuid}> `{mc.mc_username}` no membership state "
+                f"→ {target_name}" + ("" if enforce else " (would grant)")
             )
             if enforce:
                 try:
@@ -206,13 +216,16 @@ async def reconcile_linked_baseline(bot: Bot, *, enforce: bool) -> ReconcilerRes
 
 
 async def reconcile_kept_linkcodes(bot: Bot, *, enforce: bool) -> ReconcilerResult:
-    """(B) Retry / clean ``LinkCode`` rows kept by ``try_consume_code``.
+    """(B) Clean leftover ``LinkCode`` rows.
 
-    Mirrors that function's contract: delete when unrecoverable (the MC is
-    linked to a different DiscordAccount, or the Discord user is in no guild),
-    re-attempt enforcement otherwise and delete only when it confirms success.
-    A row whose DiscordAccount has no primary link is *pending*, not kept —
-    left untouched.
+    A row whose DiscordAccount has no primary link is *pending* (the consume
+    never created the link) — left untouched. Unrecoverable rows are deleted
+    (MC linked to a different DiscordAccount, or the Discord user is in no
+    guild). For a row whose user IS linked: if the user already holds a valid
+    primary state the link succeeded and the row is a stale leftover → delete
+    it, **never touching roles** (preserves manual HIATUS/HONOURARY); only a
+    *stateless* user is a real kept-on-failure → additively re-enforce the
+    baseline (same Flame rule as (A)) then clear the code.
     """
     r = ReconcilerResult(name="linkcodes")
     rows = await LinkCode.all()
@@ -269,11 +282,38 @@ async def reconcile_kept_linkcodes(bot: Bot, *, enforce: bool) -> ReconcilerResu
                         logger.exception("janitor (B): delete failed (unrecoverable-2)")
                 continue
 
-            # Recoverable: re-attempt enforcement; delete only on confirmed success.
+            # The Discord user IS linked. Two very different cases:
             r.flagged += 1
+            state = state_of(member)
+            if any(s in state for s in _PRIMARY):
+                # Link plainly succeeded (user has a valid primary state,
+                # possibly a legitimate manual HIATUS/HONOURARY). This row is
+                # just a stale leftover (linked via /link set, a re-issued
+                # code, etc.). Safe cleanup ONLY — never touch roles.
+                if not enforce:
+                    r.samples.append(
+                        f"<@{row.disc_uuid}> `{row.mc_username}` stale code "
+                        f"(already linked, state={_fmt_state(state)}) — would clear"
+                    )
+                    continue
+                try:
+                    await row.delete()
+                    r.repaired += 1
+                    r.samples.append(
+                        f"<@{row.disc_uuid}> `{row.mc_username}` stale code "
+                        f"(already linked, state={_fmt_state(state)}) — cleared"
+                    )
+                except Exception:  # noqa: BLE001 — already-absent row is fine
+                    logger.debug("janitor (B): LinkCode row already gone for %s", row.disc_uuid)
+                continue
+
+            # Stateless = a real kept-on-enforcement-failure (Flame). The
+            # baseline grant is additive for a stateless user (nothing to
+            # strip), so this never demotes anyone.
             if not enforce:
                 r.samples.append(
-                    f"<@{row.disc_uuid}> `{row.mc_username}` LinkCode kept — would re-attempt enforce"
+                    f"<@{row.disc_uuid}> `{row.mc_username}` no membership state "
+                    f"— would re-enforce baseline & clear code"
                 )
                 continue
             try:
@@ -290,12 +330,12 @@ async def reconcile_kept_linkcodes(bot: Bot, *, enforce: bool) -> ReconcilerResu
                     logger.debug("janitor (B): LinkCode row already gone for %s", row.disc_uuid)
                 r.repaired += 1
                 r.samples.append(
-                    f"<@{row.disc_uuid}> `{row.mc_username}` LinkCode re-consumed & deleted"
+                    f"<@{row.disc_uuid}> `{row.mc_username}` no state — re-enforced & code cleared"
                 )
             else:
                 r.errors += 1
                 r.samples.append(
-                    f"<@{row.disc_uuid}> `{row.mc_username}` LinkCode kept: enforce still failing"
+                    f"<@{row.disc_uuid}> `{row.mc_username}` no state — enforce still failing (code kept)"
                 )
         except Exception:  # noqa: BLE001
             r.errors += 1

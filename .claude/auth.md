@@ -22,6 +22,12 @@ Both flows hit dazebot's HTTP sidecar under `/api/auth/...`. They share that pre
 - **Issued via:** the `/vetsmod` slash command ([cogs/integrations/vetsmod.py](../cogs/integrations/vetsmod.py)) — DMs the user the modrinth link + `/unlock <key>` body, with a `LINK_FALLBACK_CHANNEL` ping fallback for closed DMs.
 - **Auth on the endpoint:** `X-Introspect-Secret` header must match `$DAZEBOT_INTROSPECT_SECRET`. Missing env → 503 (fail-closed); mismatch → 401.
 
+### C. vets-anni / fishbot identity lookup
+- **Endpoint:** `POST /api/internal/anni-identity` (defined in [api/main.py](../api/main.py))
+- **Caller:** vets-anni's **fishbot**, at `/rsvp` time, to map the invoking Discord user to their Minecraft identity (fishbot does not duplicate linking).
+- **Purpose:** Body `{discord_id}` → `{linked, disc_uuid, mc_uuid, mc_username, tier, blocked, reason}`. Pure reuse of `resolve_tier`/`_find_member` — **no new model, env var, or migration**. Returns 200 with `linked:false` (not 404) when unlinked so the caller can branch.
+- **Auth on the endpoint:** same shared `X-Introspect-Secret` / `$DAZEBOT_INTROSPECT_SECRET` fail-closed pattern as B (503 missing / 401 mismatch); verify network only.
+
 ## Tier resolution
 
 `lib/staff/verify_keys.py:resolve_tier(member)` is the single source of truth for mapping Discord roles + DB state to a tier. Called both at `/vetsmod` issuance and on every introspection, so tier changes propagate without re-issuing keys (worst case 60s — temporary-server's cache TTL).

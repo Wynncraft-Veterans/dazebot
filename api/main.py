@@ -30,7 +30,7 @@ from lib.mc.linking import dm_or_log, try_consume_code
 from lib.mc.wynn_api.errors import WynnApiError
 from lib.staff import staff_actions
 from lib.staff.rank_alerts import post_rank_alert
-from lib.staff.verify_keys import introspect
+from lib.staff.verify_keys import _find_member, introspect, resolve_tier
 
 if TYPE_CHECKING:
     from bot import Bot
@@ -359,6 +359,70 @@ def create_app(bot: Bot) -> FastAPI:
                 }
                 for r in rows
             ],
+        }
+
+    @app.post("/api/internal/anni-identity")
+    async def anni_identity(
+        body: dict = Body(...),
+        x_introspect_secret: str | None = Header(default=None),
+    ):
+        """Resolve a Discord user id to their linked Minecraft identity + tier.
+
+        Added for **vets-anni / fishbot** ``/rsvp``: fishbot needs to know who
+        the invoking Discord user *is* in Minecraft terms, but dazebot owns the
+        Discord<->MC link, so it asks here instead of duplicating linking.
+
+        Same auth + fail-closed pattern as the other ``/api/internal/*``
+        endpoints (shared ``DAZEBOT_INTROSPECT_SECRET``, verify network only).
+        Reuses :func:`resolve_tier` / :func:`_find_member` — no new dazebot
+        model, env var, or migration.
+
+        Body: ``{"discord_id": "<snowflake string>"}``
+        Response (200 even when not linked, so callers branch on ``linked``)::
+
+            {"linked": bool, "disc_uuid": str,
+             "mc_uuid": str|null, "mc_username": str|null,
+             "tier": str|null,        # member|waitlist|honourary|other
+             "blocked": bool, "reason": str|null}
+        """
+        expected = os.environ.get("DAZEBOT_INTROSPECT_SECRET")
+        if not expected:
+            logger.error(
+                "anni_identity: DAZEBOT_INTROSPECT_SECRET not set; refusing"
+            )
+            raise HTTPException(status_code=503, detail="anni-identity disabled")
+        if x_introspect_secret != expected:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+        raw = (body or {}).get("discord_id")
+        discord_id = str(raw).strip() if raw is not None else ""
+        if not discord_id.isdigit():
+            raise HTTPException(
+                status_code=400, detail="missing/invalid 'discord_id' in body"
+            )
+
+        member = _find_member(bot, int(discord_id))
+        if member is None:
+            return {
+                "linked": False,
+                "disc_uuid": discord_id,
+                "mc_uuid": None,
+                "mc_username": None,
+                "tier": None,
+                "blocked": False,
+                "reason": "discord member not found in any guild",
+            }
+
+        resolved = await resolve_tier(member)
+        linked = resolved.mc_uuid is not None
+        return {
+            "linked": linked,
+            "disc_uuid": discord_id,
+            "mc_uuid": resolved.mc_uuid,
+            "mc_username": resolved.mc_username,
+            "tier": resolved.tier,
+            "blocked": resolved.blocked,
+            "reason": None if linked else "no linked minecraft account",
         }
 
     return app

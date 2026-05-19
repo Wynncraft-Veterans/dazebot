@@ -21,6 +21,7 @@ Three things this module centralises:
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import logging
 import re
 from typing import Optional
 
@@ -32,6 +33,8 @@ from config import CurrConfig
 from lib.discord_utils.converters import CaseInsensitiveMember
 from lib.mc.wynn_api.player import get_player_stats
 from orm import DiscordAccount, MinecraftAccount, UNKNOWN_LAST_ONLINE
+
+logger = logging.getLogger("dazebot.lib.mc.resolve")
 
 
 _VANITY_DATE_RE = re.compile(
@@ -79,6 +82,40 @@ async def ensure_mc_account(value: str) -> MinecraftAccount:
         last_manual_check=UNKNOWN_LAST_ONLINE,
         first_join=fs.firstJoin,
     )
+
+
+async def refresh_mc_guild(mc: MinecraftAccount) -> MinecraftAccount:
+    """Best-effort refresh of ``mc.guild`` from the live Wynncraft API.
+
+    Why this is needed: nothing in the periodic path clears a *stale*
+    ``guild``. ``cogs/activity`` only nulls ``guild`` for guilds it actively
+    scans (Returners); ``lib/mc/wynn.check_player_full`` advances
+    ``last_online`` but deliberately never touches ``guild``. So a player
+    who left an unscanned guild keeps a non-null ``guild`` forever. Any
+    caller that gates on guild membership (``/waitlist`` add/self, the
+    role-state baseline in ``try_consume_code``) must refresh first, or it
+    acts on a value that says "in a guild" when the player is guildless --
+    which the ``waitlist_cleanup`` janitor reads as "joined a guild, drop
+    them", purging a freshly-added entry within a minute.
+
+    Best-effort: on any API failure the stored value is left untouched
+    (matches the pre-existing inline behaviour in ``try_consume_code``).
+    Mutates and saves ``mc``; returns it for call chaining.
+    """
+    try:
+        fs = await get_player_stats(mc.uuid, full=True)
+    except Exception:  # noqa: BLE001 - third-party API
+        logger.warning(
+            "refresh_mc_guild: API lookup failed for %s; using stored guild %r",
+            mc.uuid, mc.guild,
+        )
+        return mc
+    live_guild = fs.guild.name if fs.guild else None
+    if mc.guild != live_guild:
+        logger.info("refresh_mc_guild: %s guild %r -> %r", mc.uuid, mc.guild, live_guild)
+        mc.guild = live_guild
+        await mc.save(update_fields=["guild"])
+    return mc
 
 
 async def resolve_target_member(

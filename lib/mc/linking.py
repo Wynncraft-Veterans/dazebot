@@ -26,7 +26,6 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from lib.mc.wynn_api.player import get_player_stats
 from lib.role_state import ensure_linked_baseline
 from orm import Blocklist, DiscordAccount, LinkCode, MinecraftAccount
 
@@ -201,7 +200,7 @@ async def try_consume_code(
 
     # ensure_mc_account: creates the row (populating guild from the live API)
     # if we've never seen this UUID, otherwise returns the existing row.
-    from lib.mc.resolve import ensure_mc_account
+    from lib.mc.resolve import ensure_mc_account, refresh_mc_guild
 
     try:
         mc = await ensure_mc_account(mc_uuid)
@@ -218,16 +217,8 @@ async def try_consume_code(
 
     # Refresh mc.guild from the live API before enforcing the baseline so
     # the MEMBER vs REGISTERED decision is based on current truth, not on
-    # whatever the activity loop happened to cache last. Best-effort: if the
-    # API call fails, we fall back to whatever is stored.
-    try:
-        fs = await get_player_stats(mc_uuid, full=True)
-        live_guild = fs.guild.name if fs.guild else None
-        if mc.guild != live_guild:
-            mc.guild = live_guild
-            await mc.save(update_fields=["guild"])
-    except Exception:  # noqa: BLE001 - third-party API
-        logger.warning("try_consume_code: guild refresh failed for %s; using stored value", mc_uuid)
+    # whatever the activity loop happened to cache last.
+    await refresh_mc_guild(mc)
 
     # Enforce the linked-account role invariant immediately. Without this,
     # a user who linked AFTER joining Returners would never get the MEMBER

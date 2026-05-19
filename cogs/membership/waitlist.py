@@ -13,7 +13,7 @@ from tortoise.expressions import Q
 from bot import Bot
 from lib.auth import is_guild, is_registered, is_staff
 from lib.discord_utils.converters import CaseInsensitiveMember
-from lib.mc.resolve import ensure_mc_account
+from lib.mc.resolve import ensure_mc_account, refresh_mc_guild
 from lib.mc.wynn_api.errors import WynnApiError
 from lib.role_state import (
     RoleState,
@@ -125,6 +125,13 @@ class WaitlistCog(commands.Cog):
             )
         else:
             api_note = ""
+
+        # The stored mc.guild can be stale (a player who left an unscanned
+        # guild keeps it forever — see lib/mc/resolve.refresh_mc_guild).
+        # ensure_linked_baseline below and the waitlist_cleanup janitor both
+        # gate on it, so refresh from live truth first; otherwise a guildless
+        # player is purged within a minute of being added.
+        await refresh_mc_guild(mc)
 
         # Enforce the linked-account baseline before the waitlist transition.
         # Users linked via this command's own auto-/register path above (or
@@ -356,6 +363,10 @@ class WaitlistCog(commands.Cog):
                 "You haven't linked a Minecraft account yet. Use `/link code <username>` to link one."
             )
             return
+        # Stored guild may be stale; refresh before the guild-membership
+        # gates below, or a guildless player gets a false "you're in guild
+        # X" rejection (same root cause as the /waitlist add purge).
+        await refresh_mc_guild(mc)
         if mc.guild == "Returners":
             await ctx.reply(f"You (`{mc.mc_username}`) are already in the guild.")
             return

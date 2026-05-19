@@ -460,6 +460,31 @@ class BuildPromotion(Model):
         table = "build_promotions"
 
 
+class StorySegment(Model):
+    """One fragment of a collaborative ``/return`` story event.
+
+    Used by ``cogs/events/returns/week_73.py``: each accepted ``/return 73``
+    submission appends one row. The full story is reconstructed by ordering
+    rows for a ``week`` by ``created_at`` and concatenating ``content``.
+
+    Keyed by ``week`` (not an FK to WeeklyEvent) so a future story week just
+    picks a new int — no schema change. Scoring still goes through the normal
+    ``WeeklyEvent``/``Score`` tables. The back-to-back guard reads the most
+    recent row's ``discord_account`` to forbid the same author twice running.
+    """
+
+    id = fields.UUIDField(pk=True)
+    week = fields.IntField(index=True)
+    discord_account: fields.ForeignKeyRelation[DiscordAccount] = fields.ForeignKeyField(
+        "models.DiscordAccount", related_name="story_segments", on_delete=fields.CASCADE
+    )
+    content = fields.TextField()
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "story_segments"
+
+
 # Database initialization helper
 async def init_db():
     """Initialise the Tortoise ORM connection.

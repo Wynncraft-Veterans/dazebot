@@ -130,6 +130,9 @@ Special, non-hierarchical:
 | `/return 0 force <cult> target:<user>` | STAFF | Staff override: move a user to a cult, ignoring the self-switch cooldown. Figurehead exclusion still enforced. |
 | `/return 0 announce message:<text>` | ADMIN | Broadcast `message` to every cult thread via the bot. User mentions only (no role/@everyone). |
 | `/joincult <cult>` | REGISTERED | Shortcut for `/return 0 join`. Slash autocomplete lists every existing cult. |
+| `/return 73` | ROLE-GATED (`1407078065137254563` / `1407078148440592444` / `1407078577450520637`; ADMIN+ bypass) | Collaborative story. No args shows the most recent segment + how to add. |
+| `/return 73 message:<text>` | same role gate | Append the next fragment (ends at the next terminating punctuation `.` `!` `?` or 100 chars, whichever is first; `, ; :` allowed mid-fragment; can't have authored either of the last two segments). Awards +1 week-73 `/score`; posts a non-ephemeral "added" message. |
+| `/return 73 action:full` | ADMIN | Dump the entire week-73 story (paginated, ephemeral). |
 
 ## Background / listener-only cogs (no slash surface)
 

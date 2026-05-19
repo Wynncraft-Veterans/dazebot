@@ -5,9 +5,9 @@ where the story currently stands, then adds the next little bit.
 
 Commands (all routed through ``/return 73 ...`` by the generic Returns cog):
 
-* ``/return 73``                 — show the most recent segment (the last
-                                   complete sentence + any in-progress partial)
-                                   and how to add. This is the add-flow entry.
+* ``/return 73``                 — show the last 2 segments (or fewer if the
+                                   story is shorter) and how to add. This is
+                                   the add-flow entry.
 * ``/return 73 message:<text>``  — submit the next fragment.
 * ``/return 73 action:full``     — ADMIN: dump the entire story (paginated).
 
@@ -53,14 +53,13 @@ STORY_ROLE_IDS = frozenset(
     {1407078065137254563, 1407078148440592444, 1407078577450520637}
 )
 
-# Sentence terminators — used ONLY by the tail view to find the last
-# complete sentence to display. Submissions are not restricted by these;
-# a fragment is capped purely by MAX_LEN.
-TERMINATORS = ".!?"
 # Punctuation that "hugs" the preceding word when fragments are joined.
 HUG_PUNCT = ",;:.!?"
 
 MAX_LEN = 125
+
+# How many trailing segments the tail view (and post-submit confirmation) show.
+TAIL_SEGMENTS = 2
 
 # Action keywords that mean "dump the whole story" (admin only).
 FULL_ACTIONS = {"full", "story", "all", "view", "dump"}
@@ -111,21 +110,6 @@ def _assemble(contents: list[str]) -> str:
     return full
 
 
-def _tail(full: str) -> tuple[str, str]:
-    """Split ``full`` into (last complete sentence, in-progress partial).
-
-    The complete sentence runs from just after the second-to-last terminator
-    up to and including the last terminator; the partial is everything after
-    the last terminator. Either may be empty.
-    """
-    term_idx = [i for i, c in enumerate(full) if c in TERMINATORS]
-    if not term_idx:
-        return "", full.strip()
-    last = term_idx[-1]
-    prev = term_idx[-2] if len(term_idx) >= 2 else -1
-    return full[prev + 1 : last + 1].strip(), full[last + 1 :].strip()
-
-
 def _chunk(text: str, size: int = _FULL_EMBED_CHUNK) -> list[str]:
     """Split ``text`` into <=``size`` pieces on word boundaries."""
     out: list[str] = []
@@ -161,18 +145,19 @@ def _validate(text: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 
-def _render_tail(full: str, *, blocked_self: bool) -> str:
+def _render_tail(contents: list[str], *, blocked_self: bool) -> str:
     lines: list[str] = []
-    if not full.strip():
+    if not contents:
         lines.append("📖 **Return 73** — the story is empty. You write the opening line!")
     else:
-        complete, partial = _tail(full)
-        lines.append("📖 **Return 73 — the story so far:**")
-        # The previous full sentence plus the fragment being formed, shown
-        # continuously the way it reads (e.g. "...this. And this in progress,").
-        lines.append(f"> {_join(complete, partial)}")
-        if not partial and complete:
-            lines.append("*(the last sentence just ended — start the next one)*")
+        tail = contents[-TAIL_SEGMENTS:]
+        header = (
+            "📖 **Return 73 — the story so far:**"
+            if len(contents) <= TAIL_SEGMENTS
+            else f"📖 **Return 73 — the last {TAIL_SEGMENTS} segments:**"
+        )
+        lines.append(header)
+        lines.append(f"> {_assemble(tail)}")
     lines.append("")
     lines.append(
         f"Add up to **{MAX_LEN} characters** (any punctuation allowed):\n"
@@ -259,9 +244,12 @@ async def _show_tail(ctx: commands.Context) -> None:
         )
         return
     segs = await _segments()
-    full = _assemble([s.content for s in segs])
     await _private(
-        ctx, _render_tail(full, blocked_self=_authored_recent(segs, ctx.author.id))
+        ctx,
+        _render_tail(
+            [s.content for s in segs],
+            blocked_self=_authored_recent(segs, ctx.author.id),
+        ),
     )
 
 
@@ -304,13 +292,11 @@ async def _submit(ctx: commands.Context, message: str) -> None:
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
-    full = _join(_assemble([s.content for s in segs]), result)
-    complete, partial = _tail(full)
-    confirm = ["✅ Added to the story (+1 point for week 73)."]
-    if partial:
-        confirm.append(f"**In progress:** {partial}")
-    elif complete:
-        confirm.append(f"…{complete}")
+    tail_contents = [s.content for s in segs[-(TAIL_SEGMENTS - 1):]] + [result]
+    confirm = [
+        "✅ Added to the story (+1 point for week 73).",
+        f"…{_assemble(tail_contents)}",
+    ]
     await _private(ctx, "\n".join(confirm))
 
 

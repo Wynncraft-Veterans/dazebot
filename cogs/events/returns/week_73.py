@@ -21,8 +21,14 @@ and operators always pass). Rules enforced on a submission:
 
 Each accepted fragment is appended as a ``StorySegment`` row and awards the
 author **+1** week-73 ``/score`` point (same increment path as
-``/score add``). A non-ephemeral ``"<user> has added to the return 73
-story!"`` is posted in the invoking channel.
+``/score add``). The only public output is the non-ephemeral
+``"<user> has added to the return 73 story!"`` line (no story text).
+
+Anything that reveals story text (the tail view, the submit confirmation,
+the admin full dump, error messages) goes back **privately**: an ephemeral
+reply for slash invocation, or a DM for the prefix form (``~return 73``),
+which has no ephemeral channel — in that case the command message is also
+deleted, since ``~return 73 message:<text>`` would itself spoil the story.
 """
 
 from __future__ import annotations
@@ -203,40 +209,81 @@ def _authored_recent(segs: list[StorySegment], author_id: int) -> bool:
     return any(s.discord_account.disc_uuid == uid for s in segs[-2:])
 
 
+async def _private(
+    ctx: commands.Context,
+    content: Optional[str] = None,
+    *,
+    embed: Optional[discord.Embed] = None,
+    view: Optional[discord.ui.View] = None,
+) -> None:
+    """Send a response only the invoking user should see.
+
+    Slash invocation -> ephemeral reply. A prefix invocation (``~return 73``)
+    has no ephemeral channel, and posting the story tail / fragment text
+    publicly would spoil it — so DM the user instead and delete the
+    (possibly spoiler-bearing) command message. Falls back to a non-spoiler
+    public nudge if the user's DMs are closed.
+    """
+    kw: dict = {}
+    if content is not None:
+        kw["content"] = content
+    if embed is not None:
+        kw["embed"] = embed
+    if view is not None:
+        kw["view"] = view
+
+    if ctx.interaction is not None:
+        await ctx.reply(ephemeral=True, **kw)
+        return
+
+    try:
+        await ctx.author.send(**kw)
+    except discord.Forbidden:
+        await ctx.reply(
+            "I couldn't DM you. Open your DMs or use the **slash** command "
+            "`/return 73` — posting this here would spoil the story.",
+            mention_author=False,
+        )
+        return
+    try:
+        await ctx.message.delete()
+    except (discord.Forbidden, discord.NotFound, AttributeError):
+        pass
+
+
 async def _show_tail(ctx: commands.Context) -> None:
     if not _can_contribute(ctx.author):
-        await ctx.reply(
+        await _private(
+            ctx,
             "You don't have a role that can take part in the Return 73 story.",
-            ephemeral=True,
         )
         return
     segs = await _segments()
     full = _assemble([s.content for s in segs])
-    await ctx.reply(
-        _render_tail(full, blocked_self=_authored_recent(segs, ctx.author.id)),
-        ephemeral=True,
+    await _private(
+        ctx, _render_tail(full, blocked_self=_authored_recent(segs, ctx.author.id))
     )
 
 
 async def _submit(ctx: commands.Context, message: str) -> None:
     if not _can_contribute(ctx.author):
-        await ctx.reply(
+        await _private(
+            ctx,
             "You don't have a role that can take part in the Return 73 story.",
-            ephemeral=True,
         )
         return
 
     ok, result = _validate(message)
     if not ok:
-        await ctx.reply(result, ephemeral=True)
+        await _private(ctx, result)
         return
 
     segs = await _segments()
     if _authored_recent(segs, ctx.author.id):
-        await ctx.reply(
+        await _private(
+            ctx,
             "You wrote one of the last two segments — wait for two other "
             "people to add before you contribute again.",
-            ephemeral=True,
         )
         return
 
@@ -264,21 +311,20 @@ async def _submit(ctx: commands.Context, message: str) -> None:
         confirm.append(f"**In progress:** {partial}")
     elif complete:
         confirm.append(f"…{complete}")
-    await ctx.send("\n".join(confirm), ephemeral=True)
+    await _private(ctx, "\n".join(confirm))
 
 
 async def _show_full(ctx: commands.Context) -> None:
     if not _is_admin_or_higher(ctx.author):
-        await ctx.reply(
-            "Administrator is required to view the entire story.", ephemeral=True
-        )
+        await _private(ctx, "Administrator is required to view the entire story.")
         return
 
-    await ctx.defer(ephemeral=True)
+    if ctx.interaction is not None:
+        await ctx.defer(ephemeral=True)
     segs = await StorySegment.filter(week=WEEK).order_by("created_at")
     full = _assemble([s.content for s in segs])
     if not full.strip():
-        await ctx.reply("The Return 73 story is empty.", ephemeral=True)
+        await _private(ctx, "The Return 73 story is empty.")
         return
 
     chunks = _chunk(full)
@@ -290,9 +336,9 @@ async def _show_full(ctx: commands.Context) -> None:
         embeds.append(embed)
 
     if total == 1:
-        await ctx.reply(embed=embeds[0], ephemeral=True)
+        await _private(ctx, embed=embeds[0])
     else:
-        await ctx.reply(embed=embeds[0], view=Paginator(embeds), ephemeral=True)
+        await _private(ctx, embed=embeds[0], view=Paginator(embeds))
 
 
 # ---------------------------------------------------------------------------

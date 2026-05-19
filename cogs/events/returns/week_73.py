@@ -14,9 +14,8 @@ Commands (all routed through ``/return 73 ...`` by the generic Returns cog):
 Contribution is gated to the three event roles in ``STORY_ROLE_IDS`` (admins
 and operators always pass). Rules enforced on a submission:
 
-* The fragment ends at the next **terminating** punctuation (``.`` ``!``
-  ``?``) or at **100 characters**, whichever comes first. Non-terminating
-  punctuation (``,`` ``;`` ``:``) is allowed freely mid-fragment.
+* A fragment is capped at **125 characters**. Any punctuation may appear
+  anywhere — there is no terminating-punctuation restriction.
 * No near-back-to-back additions: you can't add if you wrote either of the
   most recent two segments — two other people have to go between your turns.
 
@@ -48,15 +47,14 @@ STORY_ROLE_IDS = frozenset(
     {1407078065137254563, 1407078148440592444, 1407078577450520637}
 )
 
-# Terminating punctuation: a fragment ends as soon as one of these is typed
-# (so it may appear only as the final character), and a "complete sentence"
-# ends in one of these. Non-terminating punctuation (",", ";", ":") may
-# appear anywhere mid-fragment.
+# Sentence terminators — used ONLY by the tail view to find the last
+# complete sentence to display. Submissions are not restricted by these;
+# a fragment is capped purely by MAX_LEN.
 TERMINATORS = ".!?"
 # Punctuation that "hugs" the preceding word when fragments are joined.
 HUG_PUNCT = ",;:.!?"
 
-MAX_LEN = 100
+MAX_LEN = 125
 
 # Action keywords that mean "dump the whole story" (admin only).
 FULL_ACTIONS = {"full", "story", "all", "view", "dump"}
@@ -146,16 +144,8 @@ def _validate(text: str) -> tuple[bool, str]:
     if len(s) > MAX_LEN:
         return (
             False,
-            f"Too long — {len(s)}/{MAX_LEN} characters. A fragment runs until "
-            f"the next terminating punctuation (`{' '.join(TERMINATORS)}`) or "
-            f"{MAX_LEN} characters, whichever comes first.",
-        )
-    idx = next((i for i, c in enumerate(s) if c in TERMINATORS), None)
-    if idx is not None and idx != len(s) - 1:
-        return (
-            False,
-            "Your fragment ends at the next terminating punctuation "
-            f"(`{' '.join(TERMINATORS)}`). Allowed: `{s[: idx + 1]}`",
+            f"Too long — {len(s)}/{MAX_LEN} characters. A fragment is capped "
+            f"at {MAX_LEN} characters.",
         )
     return True, s
 
@@ -179,8 +169,7 @@ def _render_tail(full: str, *, blocked_self: bool) -> str:
             lines.append("*(the last sentence just ended — start the next one)*")
     lines.append("")
     lines.append(
-        f"Add until the **next terminating punctuation** (`{' '.join(TERMINATORS)}`) "
-        f"or **{MAX_LEN} characters**, whichever comes first:\n"
+        f"Add up to **{MAX_LEN} characters** (any punctuation allowed):\n"
         "`/return 73 message:<your text>`"
     )
     if blocked_self:

@@ -68,6 +68,7 @@ Auto-discovery: `bot.py:_load_cogs` walks every `.py` file under `cogs/` (recurs
 - `FirstInstallView` (`lib/discord_utils/first_install_view.py`) — the "Link my account" button in the welcome flow
 - `LinkFallbackView` (`lib/discord_utils/first_install_view.py`) — public-channel fallback when DM is closed
 - `VetsmodFallbackView` (`cogs/integrations/vetsmod.py`) — same idea for the `/vetsmod` flow
+- `IntercultButtonView` (`lib/discord_utils/intercult_view.py`) — pinned in each cult thread by `/return 0 install_intercult`; click opens an ephemeral select → modal flow that sends one message to another cult's thread (mirrored back to the sender's thread). Rate-limited to one outbound message per cult per 24h via `IntercultMessage` rows.
 
 If you add a button that needs to survive a restart, register it in `setup_hook`. discord.py only re-attaches handlers for views explicitly added via `bot.add_view(view)`.
 

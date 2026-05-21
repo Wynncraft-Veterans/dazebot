@@ -375,6 +375,26 @@ class CultMembership(Model):
         table = "cult_memberships"
 
 
+class IntercultMessage(Model):
+    """One outbound cross-cult message sent via the pinned intercult button.
+
+    Append-only audit log; the 24h-per-cult cooldown is derived by querying
+    the most recent row whose ``sender_cult_name`` matches. Cult names
+    (not FKs) are stored so a future cult rename via ``/script rename_cult``
+    leaves history pointing at the name-at-time without dangling FKs.
+    """
+
+    id = fields.UUIDField(pk=True)
+    sender_cult_name = fields.CharField(max_length=64, index=True)
+    target_cult_name = fields.CharField(max_length=64)
+    sender_disc_uuid = fields.CharField(max_length=255)
+    content = fields.TextField()
+    sent_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "intercult_messages"
+
+
 class LinkCode(Model):
     """A persistent (until consumed) Minecraft<->Discord link code.
 

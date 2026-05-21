@@ -32,6 +32,7 @@ from lib.auth import (
     _has_staff_role,
     _is_operator,
 )
+from lib.cult_threads import CULT_THREADS
 from lib.discord_utils.converters import CaseInsensitiveMember
 from lib.mc.wynn_api.errors import WynnApiError
 from lib.mc.wynn_api.player import get_player_stats
@@ -44,19 +45,6 @@ from orm import (
 )
 
 logger = logging.getLogger("dazebot.cogs.events.returns.week_0")
-
-
-# Cult name (lowercased) -> private thread id under channel 1313786225735237654.
-# Bot needs Manage Messages (or Manage Threads) on the parent to add/remove
-# non-invited members on private threads.
-CULT_THREADS: dict[str, int] = {
-    "wencult":    1501233308284092546,
-    "deercult":   1501233117829140480,
-    "nazcult":    1501233190285738115,
-    "fishcult":   1501232813943292026,
-    "brycult":    1501233371802767420,
-    "xandercult": 1501233419135221860,
-}
 
 
 async def _resolve_thread(bot, thread_id: int) -> Optional[discord.Thread]:
@@ -400,6 +388,27 @@ async def do_force_join_by_name(
     await ctx.reply(f"✅ Force-moved {target.mention} {note}to `{cult_name}`.")
 
 
+async def _do_install_intercult(ctx: commands.Context) -> None:
+    if not _is_admin_or_higher(ctx.author):
+        await ctx.reply(
+            "You need Administrator to install the intercult button.",
+            ephemeral=True,
+        )
+        return
+
+    # Late import: the view module imports from this package's sibling
+    # lib.cult_threads, so deferring keeps load order obvious.
+    from lib.discord_utils.intercult_view import install_intercult_button
+
+    await ctx.defer(ephemeral=True)
+    posted, skipped, failed, unresolved = await install_intercult_button(ctx.bot)
+    await ctx.reply(
+        f"✅ intercult install: posted={posted} skipped={skipped} "
+        f"failed={failed} unresolved={unresolved}",
+        ephemeral=True,
+    )
+
+
 async def _do_announce(ctx: commands.Context, message: str) -> None:
     if not _is_admin_or_higher(ctx.author):
         await ctx.reply("You need Administrator to broadcast to cult threads.", ephemeral=True)
@@ -508,7 +517,8 @@ async def handle(
 ) -> None:
     if action is None:
         await ctx.reply(
-            "Usage: `/return 0 <join|add|list|force|announce> [cult] [owner|target|message]`",
+            "Usage: `/return 0 <join|add|list|force|announce|install_intercult> "
+            "[cult] [owner|target|message]`",
             ephemeral=True,
         )
         return
@@ -520,6 +530,10 @@ async def handle(
             await ctx.reply("`announce` requires a `message`.", ephemeral=True)
             return
         await _do_announce(ctx, message)
+        return
+
+    if action == "install_intercult":
+        await _do_install_intercult(ctx)
         return
 
     if not cult:
@@ -542,6 +556,7 @@ async def handle(
         await do_force_join_by_name(ctx, target, cult)
     else:
         await ctx.reply(
-            f"Unknown action `{action}`. Use `join`, `add`, `list`, `force`, or `announce`.",
+            f"Unknown action `{action}`. Use `join`, `add`, `list`, `force`, "
+            "`announce`, or `install_intercult`.",
             ephemeral=True,
         )

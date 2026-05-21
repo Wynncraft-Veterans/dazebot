@@ -65,6 +65,7 @@ The role state itself (REGISTERED/HIATUS/MEMBER/HONOURARY/WAITLISTED) lives on D
 |---|---|---|
 | `Cult` | `cogs/events/returns/week_0.py` | Returners "cults" (sub-groups). |
 | `CultMembership` | `cogs/events/returns/week_0.py` | Membership of a Discord user in a cult. |
+| `IntercultMessage` | `lib/discord_utils/intercult_view.py` | Append-only log of cross-cult messages sent via the pinned intercult button. The 24h-per-cult cooldown is derived from the most recent row per `sender_cult_name`. Stores names (not FKs) so a future cult rename leaves history pointing at the name-at-time. |
 
 ## Misc
 

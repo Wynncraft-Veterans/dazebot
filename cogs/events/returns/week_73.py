@@ -1,14 +1,20 @@
 """Week 73: collaborative story.
 
 A single shared story is built one fragment at a time. Each contributor sees
-where the story currently stands, then adds the next little bit.
+the most recent segment, then clicks a button to add the next little bit.
 
 Commands (all routed through ``/return 73 ...`` by the generic Returns cog):
 
-* ``/return 73``                 — show the last 2 segments (or fewer if the
-                                   story is shorter) and how to add. This is
-                                   the add-flow entry.
-* ``/return 73 message:<text>``  — submit the next fragment.
+* ``/return 73``                 — show the most recent segment in an
+                                   ephemeral reply with an **Add to the
+                                   story** button. The button opens a Discord
+                                   Modal where the fragment is typed; the
+                                   text never appears in the channel UI.
+* ``/return 73 message:<text>``  — rejected. Discord's "used /return" hover
+                                   exposes every slash parameter, so passing
+                                   the fragment as ``message:`` would leak it
+                                   publicly. The user is redirected to the
+                                   button flow above.
 * ``/return 73 action:full``     — ADMIN: dump the entire story (paginated).
 
 Contribution is gated to the three event roles in ``STORY_ROLE_IDS`` (admins
@@ -26,9 +32,7 @@ author **+1** week-73 ``/score`` point (same increment path as
 
 Anything that reveals story text (the tail view, the submit confirmation,
 the admin full dump, error messages) goes back **privately**: an ephemeral
-reply for slash invocation, or a DM for the prefix form (``~return 73``),
-which has no ephemeral channel — in that case the command message is also
-deleted, since ``~return 73 message:<text>`` would itself spoil the story.
+reply for slash invocation, or a DM for the prefix form (``~return 73``).
 """
 
 from __future__ import annotations
@@ -59,12 +63,16 @@ HUG_PUNCT = ",;:.!?"
 MAX_LEN = 125
 
 # How many trailing segments the tail view (and post-submit confirmation) show.
-TAIL_SEGMENTS = 2
+TAIL_SEGMENTS = 1
 
 # Action keywords that mean "dump the whole story" (admin only).
 FULL_ACTIONS = {"full", "story", "all", "view", "dump"}
 
 _FULL_EMBED_CHUNK = 1000  # chars per page in the admin full-story view
+
+# How long the ephemeral tail view's button stays clickable. Leaves a few
+# minutes of buffer before the ephemeral interaction token (~15 min) expires.
+_VIEW_TIMEOUT = 600
 
 
 # ---------------------------------------------------------------------------
@@ -148,21 +156,20 @@ def _validate(text: str) -> tuple[bool, str]:
 def _render_tail(contents: list[str], *, blocked_self: bool) -> str:
     lines: list[str] = []
     if not contents:
-        lines.append("📖 **Return 73** — the story is empty. You write the opening line!")
+        lines.append(
+            "📖 **Return 73** — the story is empty. You'd be writing the opening line!"
+        )
+    elif len(contents) <= TAIL_SEGMENTS:
+        lines.append("📖 **Return 73 — the story so far:**")
+        lines.append(f"> {_assemble(contents[-TAIL_SEGMENTS:])}")
     else:
-        tail = contents[-TAIL_SEGMENTS:]
         header = (
-            "📖 **Return 73 — the story so far:**"
-            if len(contents) <= TAIL_SEGMENTS
+            "📖 **Return 73 — the most recent segment:**"
+            if TAIL_SEGMENTS == 1
             else f"📖 **Return 73 — the last {TAIL_SEGMENTS} segments:**"
         )
         lines.append(header)
-        lines.append(f"> {_assemble(tail)}")
-    lines.append("")
-    lines.append(
-        f"Add up to **{MAX_LEN} characters** (any punctuation allowed):\n"
-        "`/return 73 message:<your text>`"
-    )
+        lines.append(f"> {_assemble(contents[-TAIL_SEGMENTS:])}")
     if blocked_self:
         lines.append(
             "\n⚠️ You wrote one of the last two segments — two other people "
@@ -236,49 +243,15 @@ async def _private(
         pass
 
 
-async def _show_tail(ctx: commands.Context) -> None:
-    if not _can_contribute(ctx.author):
-        await _private(
-            ctx,
-            "You don't have a role that can take part in the Return 73 story.",
-        )
-        return
-    segs = await _segments()
-    await _private(
-        ctx,
-        _render_tail(
-            [s.content for s in segs],
-            blocked_self=_authored_recent(segs, ctx.author.id),
-        ),
-    )
+# ---------------------------------------------------------------------------
+# Button + Modal (keeps fragment text out of channel UI entirely)
+# ---------------------------------------------------------------------------
 
 
-async def _submit(ctx: commands.Context, message: str) -> None:
-    if not _can_contribute(ctx.author):
-        await _private(
-            ctx,
-            "You don't have a role that can take part in the Return 73 story.",
-        )
-        return
-
-    ok, result = _validate(message)
-    if not ok:
-        await _private(ctx, result)
-        return
-
-    segs = await _segments()
-    if _authored_recent(segs, ctx.author.id):
-        await _private(
-            ctx,
-            "You wrote one of the last two segments — wait for two other "
-            "people to add before you contribute again.",
-        )
-        return
-
-    disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
-    await StorySegment.create(week=WEEK, discord_account=disc, content=result)
-
-    # +1 week-73 score — same increment path as /score add.
+async def _persist_segment(user: discord.abc.User, text: str) -> None:
+    """Append a fragment and award the +1 week-73 score point."""
+    disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(user.id))
+    await StorySegment.create(week=WEEK, discord_account=disc, content=text)
     event, _ = await WeeklyEvent.get_or_create(week=WEEK)
     score_obj, created = await Score.get_or_create(
         event=event, discord_account=disc, defaults={"score": 1}
@@ -287,17 +260,127 @@ async def _submit(ctx: commands.Context, message: str) -> None:
         score_obj.score += 1
         await score_obj.save(update_fields=["score"])
 
-    await ctx.send(
-        f"{ctx.author.mention} has added to the return 73 story!",
-        allowed_mentions=discord.AllowedMentions.none(),
+
+class _StoryContributeModal(discord.ui.Modal):
+    """Discord modal for typing the next fragment. Never visible in channel."""
+
+    fragment = discord.ui.TextInput(
+        label="The next bit of the story",
+        placeholder="Pick up where the last segment left off.",
+        style=discord.TextStyle.paragraph,
+        min_length=1,
+        max_length=MAX_LEN,
+        required=True,
     )
 
-    tail_contents = [s.content for s in segs[-(TAIL_SEGMENTS - 1):]] + [result]
-    confirm = [
-        "✅ Added to the story (+1 point for week 73).",
-        f"…{_assemble(tail_contents)}",
-    ]
-    await _private(ctx, "\n".join(confirm))
+    def __init__(self, *, public_channel_id: int):
+        super().__init__(title="Return 73 — add to the story")
+        self.public_channel_id = public_channel_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        if not _can_contribute(interaction.user):
+            await interaction.followup.send(
+                "You don't have a role that can take part in the Return 73 story.",
+                ephemeral=True,
+            )
+            return
+
+        ok, result = _validate(str(self.fragment.value))
+        if not ok:
+            await interaction.followup.send(result, ephemeral=True)
+            return
+
+        segs = await _segments()
+        if _authored_recent(segs, interaction.user.id):
+            await interaction.followup.send(
+                "You wrote one of the last two segments — wait for two other "
+                "people to add before you contribute again.",
+                ephemeral=True,
+            )
+            return
+
+        await _persist_segment(interaction.user, result)
+
+        channel = interaction.client.get_channel(self.public_channel_id)
+        if channel is None:
+            try:
+                channel = await interaction.client.fetch_channel(self.public_channel_id)
+            except discord.HTTPException:
+                logger.exception(
+                    "could not fetch public channel %s", self.public_channel_id
+                )
+                channel = None
+        if isinstance(channel, discord.abc.Messageable):
+            await channel.send(
+                f"{interaction.user.mention} has added to the return 73 story!",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+        prev = segs[-(TAIL_SEGMENTS - 1):] if TAIL_SEGMENTS > 1 else []
+        tail_contents = [s.content for s in prev] + [result]
+        await interaction.followup.send(
+            "\n".join(
+                [
+                    "✅ Added to the story (+1 point for week 73).",
+                    f"…{_assemble(tail_contents)}",
+                ]
+            ),
+            ephemeral=True,
+        )
+
+
+class _StoryView(discord.ui.View):
+    """One-button view: opens the modal. Ephemeral / DM-bound, not persistent."""
+
+    def __init__(self, *, blocked_self: bool, public_channel_id: int):
+        super().__init__(timeout=_VIEW_TIMEOUT)
+        self.public_channel_id = public_channel_id
+        btn = discord.ui.Button(
+            label=(
+                "Wait — you wrote one of the last two"
+                if blocked_self
+                else "✍️ Add to the story"
+            ),
+            style=discord.ButtonStyle.primary,
+            disabled=blocked_self,
+        )
+        btn.callback = self._on_click
+        self.add_item(btn)
+
+    async def _on_click(self, interaction: discord.Interaction) -> None:
+        if not _can_contribute(interaction.user):
+            await interaction.response.send_message(
+                "You don't have a role that can take part in the Return 73 story.",
+                ephemeral=True,
+            )
+            return
+        segs = await _segments()
+        if _authored_recent(segs, interaction.user.id):
+            await interaction.response.send_message(
+                "You wrote one of the last two segments — wait for two other "
+                "people to add before you contribute again.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(
+            _StoryContributeModal(public_channel_id=self.public_channel_id)
+        )
+
+
+async def _show_tail(ctx: commands.Context) -> None:
+    if not _can_contribute(ctx.author):
+        await _private(
+            ctx,
+            "You don't have a role that can take part in the Return 73 story.",
+        )
+        return
+    segs = await _segments()
+    blocked = _authored_recent(segs, ctx.author.id)
+    body = _render_tail([s.content for s in segs], blocked_self=blocked)
+    view = _StoryView(blocked_self=blocked, public_channel_id=ctx.channel.id)
+    await _private(ctx, body, view=view)
 
 
 async def _show_full(ctx: commands.Context) -> None:
@@ -348,6 +431,11 @@ async def handle(
         await _show_full(ctx)
         return
     if message:
-        await _submit(ctx, message)
+        await _private(
+            ctx,
+            "❌ `/return 73 message:` has been removed in favour of a better system: "
+            "Simply run `/return 73` (no arguments) and "
+            "click the **Add to the story** button instead.",
+        )
         return
     await _show_tail(ctx)

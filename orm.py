@@ -342,8 +342,8 @@ class Cult(Model):
     The owner ("figurehead") is a MinecraftAccount, identified by an
     in-game username or UUID at creation time. ``thread_id`` is the Discord
     private-thread the cult lives in — used by ``cogs.events.returns.week_0``
-    for membership sync and by ``lib.discord_utils.intercult_view`` for
-    cross-cult messaging. Nullable so the column can be added by the
+    for membership sync and by ``cogs.events.returns.lib.views.intercult_view``
+    for cross-cult messaging. Nullable so the column can be added by the
     idempotent ALTER in :func:`init_db` without a default; the per-row
     backfill from the legacy
     ``cogs.events.returns.lib.cult_threads.CULT_THREADS`` map runs on
@@ -401,6 +401,23 @@ class IntercultMessage(Model):
 
     class Meta:
         table = "intercult_messages"
+
+
+class RecruitmentQuery(Model):
+    """One click of the pinned recruitment button.
+
+    Append-only audit log; the per-cult cooldown is derived by querying the
+    most recent row whose ``cult_name`` matches. Cult names (not FKs) are
+    stored for the same rename-resilience reason as ``IntercultMessage``.
+    """
+
+    id = fields.UUIDField(pk=True)
+    cult_name = fields.CharField(max_length=64, index=True)
+    requester_disc_uuid = fields.CharField(max_length=255)
+    queried_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "recruitment_queries"
 
 
 class LinkCode(Model):

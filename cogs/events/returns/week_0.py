@@ -36,6 +36,7 @@ from cogs.events.returns.lib.cult_threads import (
 from lib.discord_utils.converters import CaseInsensitiveMember
 from lib.mc.wynn_api.errors import WynnApiError
 from lib.mc.wynn_api.player import get_player_stats
+from lib.role_state import resolve_guild_member
 from orm import (
     Cult,
     CultMembership,
@@ -370,7 +371,7 @@ async def _username_for_disc(bot, disc: DiscordAccount) -> str:
         return f"<{disc.disc_uuid}> (unlinked)"
 
 
-async def _render_cult_listing(bot, guild: Optional[discord.Guild], cult: Cult) -> str:
+async def _render_cult_listing(bot, cult: Cult) -> str:
     """Format a cult's figurehead/staff/members listing."""
     memberships = await CultMembership.filter(cult=cult).prefetch_related("discord_account")
     staff_names: list[str] = []
@@ -379,16 +380,11 @@ async def _render_cult_listing(bot, guild: Optional[discord.Guild], cult: Cult) 
     for m in memberships:
         disc = m.discord_account
         username = await _username_for_disc(bot, disc)
-        is_staff = False
-        if guild is not None:
-            try:
-                discord_id = int(disc.disc_uuid)
-            except ValueError:
-                discord_id = None
-            if discord_id is not None:
-                member = guild.get_member(discord_id)
-                if member is not None and any(r.id == staff_role_id for r in member.roles):
-                    is_staff = True
+        # resolve_guild_member falls back to a REST fetch on cache miss; a
+        # plain guild.get_member() silently treats uncached members (common
+        # for users who don't actively chat) as if they had no roles.
+        member = await resolve_guild_member(bot, disc.disc_uuid)
+        is_staff = member is not None and any(r.id == staff_role_id for r in member.roles)
         (staff_names if is_staff else member_names).append(username)
 
     figurehead = cult.owner.mc_username
@@ -469,7 +465,7 @@ class _ListMembersButton(discord.ui.Button):
         if cult is None:
             await interaction.response.send_message("That cult is gone.", ephemeral=True)
             return
-        body = await _render_cult_listing(interaction.client, interaction.guild, cult)
+        body = await _render_cult_listing(interaction.client, cult)
         await interaction.response.send_message(body, ephemeral=True)
 
 
@@ -715,7 +711,7 @@ async def _manage_create_cult(ctx: commands.Context, args: list[str]) -> None:
 
     # Wire up the cross-cult messaging button. Late import keeps the
     # week_0 module import-time cheap and side-effect-free.
-    from lib.discord_utils.intercult_view import install_intercult_in_thread
+    from cogs.events.returns.lib.views.intercult_view import install_intercult_in_thread
     install_result = await install_intercult_in_thread(ctx.bot, thread)
     button_note = {
         "posted": "Intercult button installed and pinned.",
@@ -726,10 +722,32 @@ async def _manage_create_cult(ctx: commands.Context, args: list[str]) -> None:
         ),
     }[install_result]
 
+    # Wire up the recruitment button too — skipped for deercult, which
+    # gets it opted in later via `/script install_recruitment_deercult`.
+    from cogs.events.returns.lib.views.recruitment_view import (
+        DEERCULT_NAME,
+        install_recruitment_in_thread,
+    )
+    if name_key == DEERCULT_NAME:
+        recruit_note = (
+            "Recruitment button skipped (deercult is opt-in via "
+            "`/script install_recruitment_deercult`)."
+        )
+    else:
+        recruit_result = await install_recruitment_in_thread(ctx.bot, thread)
+        recruit_note = {
+            "posted": "Recruitment button installed and pinned.",
+            "skipped": "Recruitment button was already pinned in that thread.",
+            "failed": (
+                "⚠️ Recruitment button install failed — retry with "
+                "`/script install_recruitment` once the issue is resolved."
+            ),
+        }[recruit_result]
+
     await send_feedback(
         ctx,
         f"✅ Created cult `{name}` with figurehead `{mc.mc_username}` "
-        f"(thread `{thread_id}`). {button_note}",
+        f"(thread `{thread_id}`). {button_note} {recruit_note}",
         persist=persist,
     )
 
@@ -749,7 +767,7 @@ async def _manage_list_members(ctx: commands.Context, args: list[str]) -> None:
     if cult is None:
         await send_feedback(ctx, f"No cult named `{cult_name}`.", persist=persist)
         return
-    text = await _render_cult_listing(ctx.bot, ctx.guild, cult)
+    text = await _render_cult_listing(ctx.bot, cult)
     await send_feedback(ctx, text, persist=persist)
 
 

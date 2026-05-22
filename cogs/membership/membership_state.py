@@ -185,7 +185,8 @@ class MembershipState(commands.Cog):
         if ctx.invoked_subcommand is None:
             await ctx.reply(
                 "Available scripts: `/script edit_welcome <channel> <message_id>`, "
-                "`/script rename_cult`, `/script install_intercult`."
+                "`/script rename_cult`, `/script install_intercult`, "
+                "`/script install_recruitment`, `/script install_recruitment_deercult`."
             )
 
     @script_group.command(
@@ -275,7 +276,7 @@ class MembershipState(commands.Cog):
         recovery path for re-pinning after the original message was
         deleted, or for bootstrapping a backfilled DB.
         """
-        from lib.discord_utils.intercult_view import install_intercult_button
+        from cogs.events.returns.lib.views.intercult_view import install_intercult_button
 
         await ctx.defer(ephemeral=True)
         posted, skipped, failed, unresolved = await install_intercult_button(self.bot)
@@ -284,6 +285,53 @@ class MembershipState(commands.Cog):
             f"failed={failed} unresolved={unresolved}",
             ephemeral=True,
         )
+
+    @script_group.command(
+        name="install_recruitment",
+        description="(Operator) Install the recruitment button in every cult thread except deercult (idempotent).",
+    )
+    @is_operator()
+    async def script_install_recruitment(self, ctx: commands.Context):
+        """Bulk install of the recruitment button across non-deercult cults.
+
+        Deercult is excluded by default (membership-balance reasons);
+        opt it in separately with ``/script install_recruitment_deercult``.
+        Routine cult creation installs this button automatically (also
+        skipping deercult); this command exists for the initial bootstrap
+        and for re-pinning if the message was deleted.
+        """
+        from cogs.events.returns.lib.views.recruitment_view import install_recruitment_button
+
+        await ctx.defer(ephemeral=True)
+        posted, skipped, failed, unresolved, excluded = await install_recruitment_button(self.bot)
+        await ctx.reply(
+            f"✅ recruitment install: posted={posted} skipped={skipped} "
+            f"failed={failed} unresolved={unresolved} excluded_deercult={excluded}",
+            ephemeral=True,
+        )
+
+    @script_group.command(
+        name="install_recruitment_deercult",
+        description="(Operator) One-shot: install the recruitment button in deercult's thread.",
+    )
+    @is_operator()
+    async def script_install_recruitment_deercult(self, ctx: commands.Context):
+        """Install the recruitment button in deercult, normally excluded.
+
+        Call once membership rebalances make it appropriate. Idempotent —
+        safe to run twice (the second run reports ``skipped``).
+        """
+        from cogs.events.returns.lib.views.recruitment_view import install_recruitment_in_deercult
+
+        await ctx.defer(ephemeral=True)
+        result = await install_recruitment_in_deercult(self.bot)
+        note = {
+            "posted": "✅ Recruitment button installed and pinned in deercult.",
+            "skipped": "ℹ️ Recruitment button was already pinned in deercult.",
+            "failed": "❌ Recruitment button install failed; check logs.",
+            "unresolved": "❌ deercult has no resolvable `thread_id`; aborting.",
+        }[result]
+        await ctx.reply(note, ephemeral=True)
 
     # ---------- /force ----------
 

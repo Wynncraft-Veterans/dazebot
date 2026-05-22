@@ -28,7 +28,7 @@ import discord
 
 from orm import Cult, CultMembership, DiscordAccount, IntercultMessage
 
-logger = logging.getLogger("dazebot.lib.discord_utils.intercult_view")
+logger = logging.getLogger("dazebot.cogs.events.returns.lib.views.intercult_view")
 
 
 INTERCULT_BUTTON_CUSTOM_ID = "intercult:button"

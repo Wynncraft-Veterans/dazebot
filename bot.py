@@ -72,11 +72,17 @@ class Bot(commands.Bot):
         except Exception as e:
             logger.error(f"Failed to register VetsmodFallbackView: {e}")
         try:
-            from lib.discord_utils.intercult_view import IntercultButtonView
+            from cogs.events.returns.lib.views.intercult_view import IntercultButtonView
 
             self.add_view(IntercultButtonView())
         except Exception as e:
             logger.error(f"Failed to register IntercultButtonView: {e}")
+        try:
+            from cogs.events.returns.lib.views.recruitment_view import RecruitmentButtonView
+
+            self.add_view(RecruitmentButtonView())
+        except Exception as e:
+            logger.error(f"Failed to register RecruitmentButtonView: {e}")
         await self._load_cogs()
 
     async def _load_cogs(self):

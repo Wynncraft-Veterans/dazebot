@@ -125,7 +125,7 @@ class ManageReturn(commands.Cog):
         # exists if they can't run it).
         if isinstance(error, commands.CheckFailure):
             return
-        if isinstance(error, commands.MissingRequiredArgument):
+        if isinstance(error, commands.UserInputError):
             await ctx.reply(
                 "Usage: `~manage_return <week> [subcommand] [args...]`",
                 mention_author=False,

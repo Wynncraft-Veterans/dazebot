@@ -15,6 +15,7 @@ seed the new column for the six grandfathered cults.
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -49,6 +50,15 @@ logger = logging.getLogger("dazebot.cogs.events.returns.week_0")
 # Self-switch gate: a user can move themselves between cults at most once
 # every SELF_SWITCH_COOLDOWN. Force-moves by staff bypass this entirely.
 SELF_SWITCH_COOLDOWN = timedelta(days=180)
+
+# `cultDistribution` activity window. Time-bounded (not message-capped) so
+# quiet threads finish quickly; the bot's event loop stays responsive
+# between history-pagination batches.
+ACTIVITY_LOOKBACK = timedelta(days=14)
+
+# Distinct fill characters for pie slices. Order is stable so the same cult
+# index gets the same glyph in both charts (one legend covers both).
+_PIE_CHARS = "█▓▒░#@*+"
 
 
 # ---------------------------------------------------------------------------
@@ -526,16 +536,9 @@ async def handle(ctx: commands.Context) -> None:
     # State D: caller is a figurehead
     owned = await lookup_owned_cult(user_id)
     if owned is not None:
-        view = discord.ui.View(timeout=600)
-        link = _link_button_for_thread(
-            owned.thread_id, label="🔗 Visit your cult's thread", guild_id=guild_id
-        )
-        if link is not None:
-            view.add_item(link)
         await ctx.reply(
-            f"You're the figurehead of `{owned.name}`. Figureheads can't join cult "
-            "threads, but you can visit yours from here.",
-            view=view if link is not None else None,
+            f"You're the figurehead of `{owned.name}`. Figureheads can't join "
+            "cult threads.",
             ephemeral=True,
         )
         return
@@ -583,6 +586,81 @@ async def handle(ctx: commands.Context) -> None:
         view=view,
         ephemeral=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Pie-chart rendering (for the cultDistribution subcommand)
+# ---------------------------------------------------------------------------
+
+
+def _render_pie_ascii(counts: list[int], *, radius: int = 7) -> list[str]:
+    """Render a circular pie chart as monospace rows. Empty list if all zero.
+
+    Cells use ``_PIE_CHARS[i]`` for slice ``i``. The x-axis is doubled so
+    each cell renders ~square in a code block (Discord's monospace font is
+    roughly 1:2 width:height).
+    """
+    total = sum(counts)
+    if total <= 0:
+        return []
+    boundaries: list[float] = []
+    acc = 0
+    for c in counts:
+        acc += c
+        boundaries.append(acc / total * 2 * math.pi)
+    rows: list[str] = []
+    for y in range(-radius, radius + 1):
+        cells: list[str] = []
+        for x in range(-2 * radius, 2 * radius + 1):
+            dx = x / 2
+            if dx * dx + y * y > radius * radius:
+                cells.append(" ")
+                continue
+            angle = math.atan2(dx, -y)  # 0 at 12 o'clock, increases clockwise
+            if angle < 0:
+                angle += 2 * math.pi
+            glyph = _PIE_CHARS[(len(boundaries) - 1) % len(_PIE_CHARS)]
+            for i, b in enumerate(boundaries):
+                if angle <= b + 1e-9:
+                    glyph = _PIE_CHARS[i % len(_PIE_CHARS)]
+                    break
+            cells.append(glyph)
+        rows.append("".join(cells).rstrip())
+    return rows
+
+
+def _render_distribution_message(
+    cults: list[Cult],
+    membership: list[int],
+    activity: list[int],
+    *,
+    activity_days: int,
+) -> str:
+    membership_rows = _render_pie_ascii(membership) or ["  (no members)"]
+    activity_rows = _render_pie_ascii(activity) or ["  (no recent messages)"]
+
+    m_total = sum(membership) or 1
+    a_total = sum(activity) or 1
+    legend = []
+    for i, cult in enumerate(cults):
+        glyph = _PIE_CHARS[i % len(_PIE_CHARS)]
+        m_pct = membership[i] / m_total * 100
+        a_pct = activity[i] / a_total * 100
+        legend.append(
+            f"  {glyph}  {cult.name.capitalize():<14} "
+            f"size {m_pct:5.1f}%   activity {a_pct:5.1f}%"
+        )
+
+    body = "\n".join([
+        "Distribution",
+        *membership_rows,
+        "",
+        f"Activity (last {activity_days}d, non-bot messages)",
+        *activity_rows,
+        "",
+        *legend,
+    ])
+    return f"**Cult distribution & activity**\n```\n{body}\n```"
 
 
 # ---------------------------------------------------------------------------
@@ -821,4 +899,42 @@ async def _manage_force(ctx: commands.Context, args: list[str]) -> None:
     _ok, msg = await _force_move(ctx.bot, member.id, cult)
     await send_feedback(ctx, msg, persist=persist)
 
+
+@register_manage(
+    0, "cultDistribution", tier=Tier.STAFF,
+    help="Pie charts: relative cult sizes + recent thread activity (no raw counts).",
+    usage="",
+)
+async def _manage_cult_distribution(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    cults = await Cult.all().order_by("name")
+    if not cults:
+        await send_feedback(ctx, "No cults exist yet.", persist=persist)
+        return
+
+    membership_counts: list[int] = []
+    for cult in cults:
+        membership_counts.append(await CultMembership.filter(cult_id=cult.id).count())
+
+    cutoff = datetime.now(timezone.utc) - ACTIVITY_LOOKBACK
+    activity_counts: list[int] = []
+    for cult in cults:
+        n = 0
+        thread = await _resolve_thread(ctx.bot, cult.thread_id) if cult.thread_id else None
+        if thread is not None:
+            try:
+                async for msg in thread.history(limit=None, after=cutoff):
+                    if not msg.author.bot:
+                        n += 1
+            except discord.HTTPException as e:
+                logger.warning(
+                    "cultDistribution: history(%s) failed: %s", cult.name, e
+                )
+        activity_counts.append(n)
+
+    days = int(ACTIVITY_LOOKBACK.total_seconds() // 86400)
+    text = _render_distribution_message(
+        cults, membership_counts, activity_counts, activity_days=days
+    )
+    await send_feedback(ctx, text, persist=persist)
 

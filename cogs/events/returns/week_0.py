@@ -956,3 +956,72 @@ async def _manage_cult_distribution(ctx: commands.Context, args: list[str]) -> N
     )
     await send_feedback(ctx, text, persist=persist)
 
+
+@register_manage(
+    0, "listOnlineUnaffiliated", tier=Tier.STAFF,
+    help=(
+        "List online players not in any cult. Staff bypass for the cult-thread "
+        "recruitment button's 1h per-cult ratelimit (doesn't consume or check it)."
+    ),
+    usage="",
+)
+async def _manage_list_online_unaffiliated(
+    ctx: commands.Context, args: list[str]
+) -> None:
+    persist = is_persist_context(ctx)
+
+    # Late import: keeps week_0 import-time light and matches the
+    # createCult pattern for the other recruitment_view imports.
+    from cogs.events.returns.lib.views.recruitment_view import (
+        gather_unaffiliated_online,
+    )
+    unaffiliated, temp_err, wynn_err = await gather_unaffiliated_online()
+
+    if temp_err and wynn_err:
+        await send_feedback(
+            ctx,
+            "Couldn't reach either online-player source "
+            f"({temp_err}; {wynn_err}). Try again in a minute.",
+            persist=persist,
+        )
+        return
+
+    degraded = ""
+    if temp_err:
+        degraded += (
+            f"\n_(temp-server unavailable: {temp_err} — "
+            "VetsMod-only players may be missing.)_"
+        )
+    if wynn_err:
+        degraded += (
+            f"\n_(Wynncraft API unavailable: {wynn_err} — "
+            "non-VetsMod guild members may be missing.)_"
+        )
+
+    if not unaffiliated:
+        await send_feedback(
+            ctx,
+            "No unaffiliated players are online right now." + degraded,
+            persist=persist,
+        )
+        return
+
+    lines = [f"- {name}" for name in unaffiliated]
+    header = f"**Online players not in any cult** ({len(unaffiliated)}):\n"
+    body = "\n".join(lines)
+    full = header + body + degraded
+    if len(full) > 1900:
+        footer = "\n…_(list truncated)_" + degraded
+        budget = 2000 - len(header) - len(footer)
+        trimmed: list[str] = []
+        used = 0
+        for line in lines:
+            add = len(line) + 1  # newline
+            if used + add > budget:
+                break
+            trimmed.append(line)
+            used += add
+        full = header + "\n".join(trimmed) + footer
+
+    await send_feedback(ctx, full, persist=persist)
+

@@ -97,22 +97,22 @@ class WeeklyEvent(commands.Cog):
             )
 
     @score.command(name="leaderboard")
-    async def score_leaderboard(self, ctx: commands.Context, week: WeekRange, amount: commands.Range[int, 10, 20] = 10):
+    async def score_leaderboard(self, ctx: commands.Context, week: WeekRange):
         event, _ = await WeeklyEventTable.get_or_create(week=week)
 
-        # Get top scores
         scores = (
             await Score.filter(event=event, score__gt=0)
             .order_by("-score")
-            .limit(amount)
             .prefetch_related("discord_account")
         )
 
-        if scores:
-            text = "\n".join(f"<@{score.discord_account.disc_uuid}> {score.score}" for score in scores)
-            await ctx.send(text, allowed_mentions=discord.AllowedMentions.none())
-        else:
+        if not scores:
             await ctx.send(f"No one has any points for week {week}")
+            return
+
+        lines = [f"<@{score.discord_account.disc_uuid}> {score.score}" for score in scores]
+        embeds = from_lines(f"Leaderboard — week {week}", lines, 10, logger)
+        await ctx.send(embed=embeds[0], view=Paginator(embeds))
 
     @commands.hybrid_command(name="count")
     @is_staff()

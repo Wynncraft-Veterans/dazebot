@@ -98,7 +98,7 @@ Special, non-hierarchical:
 | `/score set <user> <week> <value>` | STAFF | |
 | `/score add <user> <week> <value>` | STAFF | |
 | `/score print <user> <week>` | PUBLIC | |
-| `/score leaderboard <week> [amount]` | PUBLIC | |
+| `/score leaderboard <week>` | PUBLIC | |
 | `/count <channel> [override_emoji]` | STAFF | Forum-channel reaction tally |
 
 ### Utility — `cogs/meta/utility.py`

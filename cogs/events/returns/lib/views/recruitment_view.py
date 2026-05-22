@@ -248,6 +248,32 @@ async def _unaffiliated_usernames(online: dict[str, str]) -> list[str]:
     return unaffiliated
 
 
+async def gather_unaffiliated_online() -> tuple[list[str], Optional[str], Optional[str]]:
+    """Fetch both online-player sources, merge, and filter to unaffiliated.
+
+    Shared by the in-cult-thread recruitment button and the staff
+    ``~manage_return 0 listOnlineUnaffiliated`` bypass. Both upstream
+    sources are tolerated as degraded — the per-source error strings
+    are returned so each caller can format its own user-facing copy.
+
+    Returns ``(unaffiliated, temp_err, wynn_err)``. When both errors
+    are non-None the result list is empty and the caller should bail
+    rather than treat it as "no one online".
+    """
+    (temp_users, temp_err), (wynn_users, wynn_err) = await asyncio.gather(
+        _fetch_tempserver_online(),
+        _fetch_wynn_online(),
+    )
+    if temp_err and wynn_err:
+        return [], temp_err, wynn_err
+    # Merge; Wynncraft API gives canonical guild-API username, temp-server
+    # gives VetsMod's last-seen username. On UUID collision, Wynncraft
+    # wins because it's the authoritative source for guild-member names.
+    merged: dict[str, str] = {**temp_users, **wynn_users}
+    unaffiliated = await _unaffiliated_usernames(merged)
+    return unaffiliated, temp_err, wynn_err
+
+
 class RecruitmentButtonView(discord.ui.View):
     """Persistent view pinned in cult threads.
 
@@ -287,11 +313,7 @@ class RecruitmentButtonView(discord.ui.View):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        # Fan-out fetch from both sources in parallel.
-        (temp_users, temp_err), (wynn_users, wynn_err) = await asyncio.gather(
-            _fetch_tempserver_online(),
-            _fetch_wynn_online(),
-        )
+        unaffiliated, temp_err, wynn_err = await gather_unaffiliated_online()
 
         if temp_err and wynn_err:
             await interaction.followup.send(
@@ -300,13 +322,6 @@ class RecruitmentButtonView(discord.ui.View):
                 ephemeral=True,
             )
             return
-
-        # Merge; Wynncraft API gives canonical guild-API username, temp-server
-        # gives VetsMod's last-seen username. On UUID collision, Wynncraft
-        # wins because it's the authoritative source for guild-member names.
-        merged: dict[str, str] = {**temp_users, **wynn_users}
-
-        unaffiliated = await _unaffiliated_usernames(merged)
 
         # Record the query *after* the work — failing fetches above don't
         # consume the cooldown so the clicker can retry immediately.

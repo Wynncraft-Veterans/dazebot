@@ -1,17 +1,15 @@
 """Week 0: cults.
 
-Three actions, dispatched off ``action`` in the kwargs forwarded by
-``cogs/return_cmd.py``:
+User-facing UI is a single ``/return 0`` ephemeral that adapts to the
+caller's state (no cult / in a cult / figurehead) and presents the
+appropriate buttons. Cult management is exposed via ``~manage_return 0
+<subcommand>`` — see the ``@register_manage`` decorators at the bottom of
+this file.
 
-* ``join <cult>``        REGISTERED — switch the caller's active cult.
-* ``add <cult> <owner>`` ADMIN      — create a new cult with an MC figurehead.
-                                      ``owner`` may be a Discord mention/id,
-                                      an MC username, or an MC UUID.
-* ``list <cult>``        REGISTERED — print figurehead, staff, and members.
-
-Cult names are stored lowercased; ``unique=True`` on the column doubles as
-the case-insensitive guard. Mutual exclusivity is enforced by the
-``unique=True`` on ``CultMembership.discord_account``.
+Cult ↔ thread mapping is stored in ``Cult.thread_id`` (a Discord channel
+id). The legacy ``cogs.events.returns.lib.cult_threads.CULT_THREADS`` dict
+is consulted only at startup by :func:`backfill_thread_ids_from_dict` to
+seed the new column for the six grandfathered cults.
 """
 
 from __future__ import annotations
@@ -25,14 +23,15 @@ from discord.ext import commands
 from tortoise.expressions import Q
 
 from config import CurrConfig
-from cogs.events.returns import register
-from lib.auth import (
-    _has_admin_perm,
-    _has_registered_role,
-    _has_staff_role,
-    _is_operator,
+from cogs.events.returns import Tier, register, register_manage
+from cogs.events.returns._common import (
+    is_persist_context,
+    send_feedback,
 )
-from lib.cult_threads import CULT_THREADS
+from cogs.events.returns.lib.cults import is_figurehead, lookup_owned_cult
+from cogs.events.returns.lib.cult_threads import (
+    CULT_THREADS,  # legacy seed source, used only by backfill
+)
 from lib.discord_utils.converters import CaseInsensitiveMember
 from lib.mc.wynn_api.errors import WynnApiError
 from lib.mc.wynn_api.player import get_player_stats
@@ -47,7 +46,19 @@ from orm import (
 logger = logging.getLogger("dazebot.cogs.events.returns.week_0")
 
 
-async def _resolve_thread(bot, thread_id: int) -> Optional[discord.Thread]:
+# Self-switch gate: a user can move themselves between cults at most once
+# every SELF_SWITCH_COOLDOWN. Force-moves by staff bypass this entirely.
+SELF_SWITCH_COOLDOWN = timedelta(days=180)
+
+
+# ---------------------------------------------------------------------------
+# Thread helpers — operate on a Cult row's thread_id
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_thread(bot, thread_id: Optional[int]) -> Optional[discord.Thread]:
+    if not thread_id:
+        return None
     ch = bot.get_channel(thread_id)
     if isinstance(ch, discord.Thread):
         return ch
@@ -59,74 +70,101 @@ async def _resolve_thread(bot, thread_id: int) -> Optional[discord.Thread]:
     return ch if isinstance(ch, discord.Thread) else None
 
 
-async def _add_to_cult_thread(bot, cult_name: str, discord_id: int) -> None:
-    thread_id = CULT_THREADS.get(cult_name.lower())
-    if thread_id is None:
-        logger.debug("no thread mapped for cult %r; skipping add", cult_name)
+async def _add_to_cult_thread(bot, cult: Cult, discord_id: int) -> None:
+    if not cult.thread_id:
+        logger.debug("no thread_id set for cult %r; skipping add", cult.name)
         return
-    thread = await _resolve_thread(bot, thread_id)
+    thread = await _resolve_thread(bot, cult.thread_id)
     if thread is None:
         return
     try:
         await thread.add_user(discord.Object(id=discord_id))
     except discord.HTTPException as e:
-        logger.warning("add_user(%s) on thread %s failed: %s", discord_id, thread_id, e)
+        logger.warning("add_user(%s) on thread %s failed: %s", discord_id, cult.thread_id, e)
         return
     try:
         await thread.send(
-            f"<@{discord_id}> joined {cult_name}",
+            f"<@{discord_id}> joined {cult.name}",
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
     except discord.HTTPException as e:
-        logger.warning("welcome msg in thread %s failed: %s", thread_id, e)
+        logger.warning("welcome msg in thread %s failed: %s", cult.thread_id, e)
 
 
-async def _remove_from_cult_thread(bot, cult_name: str, discord_id: int) -> None:
-    thread_id = CULT_THREADS.get(cult_name.lower())
-    if thread_id is None:
+async def _remove_from_cult_thread(bot, cult: Cult, discord_id: int) -> None:
+    if not cult.thread_id:
         return
-    thread = await _resolve_thread(bot, thread_id)
+    thread = await _resolve_thread(bot, cult.thread_id)
     if thread is None:
         return
     try:
         await thread.remove_user(discord.Object(id=discord_id))
     except discord.HTTPException as e:
-        # 404 here is normal (user wasn't in the thread); log at debug.
+        # 404 here is normal (user wasn't in the thread).
         if isinstance(e, discord.NotFound):
-            logger.debug("remove_user(%s) on thread %s: not a member", discord_id, thread_id)
+            logger.debug(
+                "remove_user(%s) on thread %s: not a member", discord_id, cult.thread_id
+            )
         else:
-            logger.warning("remove_user(%s) on thread %s failed: %s", discord_id, thread_id, e)
+            logger.warning(
+                "remove_user(%s) on thread %s failed: %s", discord_id, cult.thread_id, e
+            )
+
+
+# ---------------------------------------------------------------------------
+# Backfill (called from Returns.cog_load)
+# ---------------------------------------------------------------------------
+
+
+async def backfill_thread_ids_from_dict() -> int:
+    """Populate ``Cult.thread_id`` from the legacy CULT_THREADS map.
+
+    Idempotent: rows that already have a thread_id are skipped. Returns the
+    count of rows updated. The six grandfathered cults flow through this on
+    first deploy of the column.
+    """
+    updated = 0
+    rows = await Cult.filter(thread_id__isnull=True)
+    for cult in rows:
+        legacy = CULT_THREADS.get(cult.name.lower())
+        if legacy is None:
+            continue
+        cult.thread_id = legacy
+        await cult.save(update_fields=["thread_id"])
+        updated += 1
+        logger.info("backfilled thread_id=%s for cult %r", legacy, cult.name)
+    return updated
 
 
 async def backfill_cult_threads(bot) -> None:
     """Walk every CultMembership row and ensure each member is in their cult's
-    thread. Idempotent: re-adding a member is a no-op on Discord's side.
-
-    Figureheads are excluded everywhere: any stale CultMembership row whose
-    owner is the figurehead of *any* cult is deleted, and we sweep each
-    figurehead out of every cult thread in case they were added before this
-    rule existed.
+    thread. Idempotent. Excludes figureheads from every cult thread (any
+    stale CultMembership row whose owner is a figurehead is deleted, and
+    each figurehead is swept out of every cult thread).
     """
     figurehead_mc_ids = set(await Cult.all().values_list("owner_id", flat=True))
 
-    # Snapshot each thread's current membership once. The thread-members
-    # rate-limit bucket is per-channel, so blind PUTs/DELETEs for state
-    # that already matches reality were eating 429s. Diff against this set
-    # and only write when something actually changes.
-    thread_state: dict[str, tuple[Optional[discord.Thread], set[int]]] = {}
-    for cn, tid in CULT_THREADS.items():
-        thread = await _resolve_thread(bot, tid)
+    cults = await Cult.all()
+    # Snapshot each thread's current membership once (the thread-members
+    # rate-limit bucket is per-channel — blind PUTs/DELETEs ate 429s before).
+    thread_state: dict[int, tuple[Optional[discord.Thread], set[int], Cult]] = {}
+    for cult in cults:
+        if not cult.thread_id:
+            thread_state[cult.id] = (None, set(), cult)
+            continue
+        thread = await _resolve_thread(bot, cult.thread_id)
         if thread is None:
-            thread_state[cn] = (None, set())
+            thread_state[cult.id] = (None, set(), cult)
             continue
         try:
             members = await thread.fetch_members()
-            thread_state[cn] = (thread, {tm.id for tm in members})
+            thread_state[cult.id] = (thread, {tm.id for tm in members}, cult)
         except discord.HTTPException as e:
             logger.warning(
-                "backfill: fetch_members on thread %s (%s) failed: %s", tid, cn, e,
+                "backfill: fetch_members on thread %s (%s) failed: %s",
+                cult.thread_id, cult.name, e,
             )
-            thread_state[cn] = (thread, set())
+            thread_state[cult.id] = (thread, set(), cult)
 
     rows = await CultMembership.all().prefetch_related("cult", "discord_account")
     added = failed = skipped = pruned = already = 0
@@ -141,12 +179,11 @@ async def backfill_cult_threads(bot) -> None:
         except ValueError:
             skipped += 1
             continue
-        cult_name = m.cult.name
-        state = thread_state.get(cult_name.lower())
+        state = thread_state.get(m.cult_id)
         if state is None:
             skipped += 1
             continue
-        thread, members = state
+        thread, members, _cult = state
         if thread is None:
             failed += 1
             continue
@@ -160,7 +197,7 @@ async def backfill_cult_threads(bot) -> None:
         except discord.HTTPException as e:
             logger.warning(
                 "backfill: add_user(%s) on thread %s (%s) failed: %s",
-                disc_id, thread.id, cult_name, e,
+                disc_id, thread.id, m.cult.name, e,
             )
             failed += 1
 
@@ -175,7 +212,7 @@ async def backfill_cult_threads(bot) -> None:
                 figurehead_disc_ids.add(int(disc.disc_uuid))
             except ValueError:
                 continue
-        for cn, (thread, members) in thread_state.items():
+        for (thread, members, cult) in thread_state.values():
             if thread is None:
                 continue
             for fdid in figurehead_disc_ids & members:
@@ -187,7 +224,7 @@ async def backfill_cult_threads(bot) -> None:
                     pass
                 except discord.HTTPException as e:
                     logger.debug(
-                        "figurehead sweep remove(%s, %s) failed: %s", fdid, cn, e,
+                        "figurehead sweep remove(%s, %s) failed: %s", fdid, cult.name, e,
                     )
 
     logger.info(
@@ -197,25 +234,14 @@ async def backfill_cult_threads(bot) -> None:
     )
 
 
-def _is_admin_or_higher(user: discord.abc.User) -> bool:
-    return _is_operator(user) or _has_admin_perm(user)
-
-
-def _is_registered_or_higher(user: discord.abc.User) -> bool:
-    return (
-        _is_operator(user)
-        or _has_admin_perm(user)
-        or _has_staff_role(user)
-        or _has_registered_role(user)
-    )
+# ---------------------------------------------------------------------------
+# Owner / MC resolution (reused by createCult)
+# ---------------------------------------------------------------------------
 
 
 async def _resolve_owner_mc(ctx: commands.Context, owner: str) -> Optional[MinecraftAccount]:
-    """Resolve ``owner`` to a MinecraftAccount.
-
-    Tries: Discord mention/id/name → linked MC account, then MC username/UUID
-    lookup, then a Wynncraft API fetch (creating the row) for unknown
-    usernames. Returns ``None`` only if the value can't be resolved at all.
+    """Discord mention/id/name → linked MC account, then MC username/UUID
+    lookup, then Wynncraft API fetch (creating the row) for unknown names.
     """
     if ctx.guild is not None:
         try:
@@ -239,7 +265,7 @@ async def _resolve_owner_mc(ctx: commands.Context, owner: str) -> Optional[Minec
     try:
         fs = await get_player_stats(owner, full=True)
     except WynnApiError as e:
-        logger.info("week_0 add: Wynn API lookup failed for %r: %s", owner, e)
+        logger.info("week_0 owner resolution: Wynn API lookup failed for %r: %s", owner, e)
         return None
     return await MinecraftAccount.create(
         uuid=fs.uuid,
@@ -251,32 +277,9 @@ async def _resolve_owner_mc(ctx: commands.Context, owner: str) -> Optional[Minec
     )
 
 
-async def _do_add(ctx: commands.Context, cult_name: str, owner: str) -> None:
-    if not _is_admin_or_higher(ctx.author):
-        await ctx.reply("You need Administrator to add a cult.", ephemeral=True)
-        return
-
-    name_key = cult_name.lower()
-    if await Cult.filter(name=name_key).exists():
-        await ctx.reply(f"A cult named `{cult_name}` already exists.", ephemeral=True)
-        return
-
-    mc = await _resolve_owner_mc(ctx, owner)
-    if mc is None:
-        await ctx.reply(
-            f"Could not resolve owner `{owner}` to a Minecraft account "
-            "(tried Discord mention, MC username, and MC UUID).",
-            ephemeral=True,
-        )
-        return
-
-    await Cult.create(name=name_key, owner=mc)
-    await ctx.reply(f"✅ Created cult `{cult_name}` with figurehead `{mc.mc_username}`.")
-
-
-# Self-switch gate: a user can move themselves between cults at most once
-# every SELF_SWITCH_COOLDOWN. Force-moves by staff bypass this entirely.
-SELF_SWITCH_COOLDOWN = timedelta(days=180)
+# ---------------------------------------------------------------------------
+# Join / switch core
+# ---------------------------------------------------------------------------
 
 
 async def _switch_membership(
@@ -285,165 +288,68 @@ async def _switch_membership(
     discord_id: int,
     cult: Cult,
     existing: Optional[CultMembership],
-) -> Optional[str]:
-    """Apply a cult switch: rewrite the CultMembership row and sync threads.
-    Returns the previous cult's name (or ``None`` if first-time join).
-    """
-    prev_cult_name: Optional[str] = None
+) -> Optional[Cult]:
+    prev_cult: Optional[Cult] = None
     if existing is not None:
         prev_cult = await Cult.get(id=existing.cult_id)
-        prev_cult_name = prev_cult.name
         await existing.delete()
     await CultMembership.create(cult=cult, discord_account=disc)
-
-    if prev_cult_name and prev_cult_name != cult.name:
-        await _remove_from_cult_thread(bot, prev_cult_name, discord_id)
-    await _add_to_cult_thread(bot, cult.name, discord_id)
-    return prev_cult_name
-
-
-async def do_join_by_name(ctx: commands.Context, cult_name: str) -> None:
-    """Public entry-point reused by the `/joincult` shortcut."""
-    await _do_join(ctx, cult_name)
+    if prev_cult and prev_cult.id != cult.id:
+        await _remove_from_cult_thread(bot, prev_cult, discord_id)
+    await _add_to_cult_thread(bot, cult, discord_id)
+    return prev_cult
 
 
-async def _do_join(ctx: commands.Context, cult_name: str) -> None:
-    if not _is_registered_or_higher(ctx.author):
-        await ctx.reply("You need to be registered to join a cult.", ephemeral=True)
-        return
-
-    cult = await Cult.filter(name=cult_name.lower()).first()
-    if cult is None:
-        await ctx.reply(f"No cult named `{cult_name}`.", ephemeral=True)
-        return
-
-    disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
-
+async def _self_join(bot, user_id: int, cult: Cult) -> tuple[bool, str]:
+    """User-driven join from ``/return 0``. Returns ``(ok, message_to_user)``."""
+    disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(user_id))
     if disc.minecraft_account_id is not None:
         owned = await Cult.filter(owner_id=disc.minecraft_account_id).first()
         if owned is not None:
-            await ctx.reply(
-                f"You are the figurehead of `{owned.name}` — figureheads can't join cult threads.",
-                ephemeral=True,
+            return False, (
+                f"You're the figurehead of `{owned.name}` — figureheads can't "
+                "join cult threads."
             )
-            return
-
     existing = await CultMembership.filter(discord_account=disc).first()
+    if existing is not None and existing.cult_id == cult.id:
+        return False, f"You're already in `{cult.name}`."
     if existing is not None:
-        if existing.cult_id == cult.id:
-            await ctx.reply(f"You are already in `{cult_name}`.", ephemeral=True)
-            return
         elapsed = datetime.now(timezone.utc) - existing.joined_at
         if elapsed < SELF_SWITCH_COOLDOWN:
             remaining = SELF_SWITCH_COOLDOWN - elapsed
             days = max(1, remaining.days + (1 if remaining.seconds else 0))
-            await ctx.reply(
+            return False, (
                 f"You can switch cults again in ~{days} day(s). "
-                "Ask staff for a force-move if you need it sooner.",
-                ephemeral=True,
+                "Ask staff for a force-move if you need it sooner."
             )
-            return
-
-    await _switch_membership(ctx.bot, disc, ctx.author.id, cult, existing)
-    await ctx.reply(f"✅ Joined `{cult_name}`.")
+    await _switch_membership(bot, disc, user_id, cult, existing)
+    return True, f"✅ Joined `{cult.name}`."
 
 
-async def do_force_join_by_name(
-    ctx: commands.Context,
-    target: discord.Member,
-    cult_name: str,
-) -> None:
-    """Staff entry-point: move ``target`` to ``cult_name`` regardless of
-    cooldown. Figurehead exclusion is still enforced because that rule is
-    permanent, not a cooldown.
-    """
-    if not (_is_operator(ctx.author) or _has_admin_perm(ctx.author) or _has_staff_role(ctx.author)):
-        await ctx.reply("You need staff to force-move someone's cult.", ephemeral=True)
-        return
-
-    cult = await Cult.filter(name=cult_name.lower()).first()
-    if cult is None:
-        await ctx.reply(f"No cult named `{cult_name}`.", ephemeral=True)
-        return
-
-    disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(target.id))
-
+async def _force_move(bot, target_id: int, cult: Cult) -> tuple[bool, str]:
+    """Staff-driven force-move. Returns ``(ok, message_to_invoker)``."""
+    disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(target_id))
     if disc.minecraft_account_id is not None:
         owned = await Cult.filter(owner_id=disc.minecraft_account_id).first()
         if owned is not None:
-            await ctx.reply(
-                f"{target.mention} is the figurehead of `{owned.name}`; "
-                "figureheads can't be placed in any cult's thread.",
-                ephemeral=True,
+            return False, (
+                f"<@{target_id}> is the figurehead of `{owned.name}`; "
+                "figureheads can't be placed in any cult's thread."
             )
-            return
-
     existing = await CultMembership.filter(discord_account=disc).first()
     if existing is not None and existing.cult_id == cult.id:
-        await ctx.reply(f"{target.mention} is already in `{cult_name}`.", ephemeral=True)
-        return
-
-    prev = await _switch_membership(ctx.bot, disc, target.id, cult, existing)
-    note = f"from `{prev}` " if prev else ""
-    await ctx.reply(f"✅ Force-moved {target.mention} {note}to `{cult_name}`.")
+        return False, f"<@{target_id}> is already in `{cult.name}`."
+    prev = await _switch_membership(bot, disc, target_id, cult, existing)
+    note = f"from `{prev.name}` " if prev else ""
+    return True, f"✅ Force-moved <@{target_id}> {note}to `{cult.name}`."
 
 
-async def _do_install_intercult(ctx: commands.Context) -> None:
-    if not _is_admin_or_higher(ctx.author):
-        await ctx.reply(
-            "You need Administrator to install the intercult button.",
-            ephemeral=True,
-        )
-        return
-
-    # Late import: the view module imports from this package's sibling
-    # lib.cult_threads, so deferring keeps load order obvious.
-    from lib.discord_utils.intercult_view import install_intercult_button
-
-    await ctx.defer(ephemeral=True)
-    posted, skipped, failed, unresolved = await install_intercult_button(ctx.bot)
-    await ctx.reply(
-        f"✅ intercult install: posted={posted} skipped={skipped} "
-        f"failed={failed} unresolved={unresolved}",
-        ephemeral=True,
-    )
-
-
-async def _do_announce(ctx: commands.Context, message: str) -> None:
-    if not _is_admin_or_higher(ctx.author):
-        await ctx.reply("You need Administrator to broadcast to cult threads.", ephemeral=True)
-        return
-
-    await ctx.defer(ephemeral=True)
-    # Slash-modal text fields can't carry actual newlines, so admins can type
-    # the literal two characters \n where they want a line break.
-    text = message.replace("\\n", "\n")
-    sent = failed = missing = 0
-    for cult_name, thread_id in CULT_THREADS.items():
-        thread = await _resolve_thread(ctx.bot, thread_id)
-        if thread is None:
-            missing += 1
-            continue
-        try:
-            await thread.send(
-                text,
-                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-            )
-            sent += 1
-        except discord.HTTPException as e:
-            logger.warning("announce: send to thread %s (%s) failed: %s", thread_id, cult_name, e)
-            failed += 1
-
-    await ctx.reply(
-        f"✅ Sent to {sent} thread(s). ({failed} failed, {missing} unresolved)",
-        ephemeral=True,
-    )
+# ---------------------------------------------------------------------------
+# Listing helpers (shared by the user button and the manage subcommand)
+# ---------------------------------------------------------------------------
 
 
 async def _username_for_disc(bot, disc: DiscordAccount) -> str:
-    """In-game username for a cult member, or a best-effort Discord fallback
-    if they're not linked.
-    """
     if disc.minecraft_account_id is not None:
         mc = await MinecraftAccount.get(id=disc.minecraft_account_id)
         return mc.mc_username
@@ -454,25 +360,15 @@ async def _username_for_disc(bot, disc: DiscordAccount) -> str:
         return f"<{disc.disc_uuid}> (unlinked)"
 
 
-async def _do_list(ctx: commands.Context, cult_name: str) -> None:
-    if not _is_registered_or_higher(ctx.author):
-        await ctx.reply("You need to be registered to list a cult.", ephemeral=True)
-        return
-
-    cult = await Cult.filter(name=cult_name.lower()).prefetch_related("owner").first()
-    if cult is None:
-        await ctx.reply(f"No cult named `{cult_name}`.", ephemeral=True)
-        return
-
+async def _render_cult_listing(bot, guild: Optional[discord.Guild], cult: Cult) -> str:
+    """Format a cult's figurehead/staff/members listing."""
     memberships = await CultMembership.filter(cult=cult).prefetch_related("discord_account")
-
     staff_names: list[str] = []
     member_names: list[str] = []
-    guild = ctx.guild
     staff_role_id = CurrConfig.STAFF_ROLE
     for m in memberships:
         disc = m.discord_account
-        username = await _username_for_disc(ctx.bot, disc)
+        username = await _username_for_disc(bot, disc)
         is_staff = False
         if guild is not None:
             try:
@@ -483,80 +379,446 @@ async def _do_list(ctx: commands.Context, cult_name: str) -> None:
                 member = guild.get_member(discord_id)
                 if member is not None and any(r.id == staff_role_id for r in member.roles):
                     is_staff = True
-        if is_staff:
-            staff_names.append(username)
-        else:
-            member_names.append(username)
+        (staff_names if is_staff else member_names).append(username)
 
     figurehead = cult.owner.mc_username
-    title = cult_name.capitalize()
 
     def fmt(names: list[str]) -> str:
         return ", ".join(f"`{n}`" for n in names) if names else "(none)"
 
-    lines = [
-        f"# {title} Members:",
+    return "\n".join([
+        f"# {cult.name.capitalize()} Members:",
         f"Figurehead: `{figurehead}`",
         f"Staff: {fmt(staff_names)}",
         f"Members: {fmt(member_names)}",
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Views — /return 0 button-based UX
+# ---------------------------------------------------------------------------
+
+
+_CULT_DESCRIPTION = (
+    "Cults are silly clubs that have developed in secret around the guild's chiefs "
+    "without their knowledge. The chiefs don't know what these groups get up to, "
+    "but they have hideouts, compete with each other, have their own traditions, etc."
+)
+
+
+def _switch_remaining_days(membership: CultMembership) -> int:
+    elapsed = datetime.now(timezone.utc) - membership.joined_at
+    if elapsed >= SELF_SWITCH_COOLDOWN:
+        return 0
+    rem = SELF_SWITCH_COOLDOWN - elapsed
+    return max(1, rem.days + (1 if rem.seconds else 0))
+
+
+class _JoinCultSelect(discord.ui.Select):
+    """Used both for first-time join (no cult yet) and for switching."""
+
+    def __init__(self, options: list[discord.SelectOption]):
+        super().__init__(
+            placeholder="Pick a cult to join",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        picked = self.values[0]
+        cult = await Cult.filter(name=picked.lower()).first()
+        if cult is None:
+            await interaction.response.send_message(
+                f"`{picked}` no longer exists.", ephemeral=True
+            )
+            return
+        ok, msg = await _self_join(interaction.client, interaction.user.id, cult)
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
+async def _build_join_select(*, exclude_name: Optional[str] = None) -> Optional[_JoinCultSelect]:
+    cults = await Cult.all().order_by("name")
+    options = [
+        discord.SelectOption(label=c.name.capitalize(), value=c.name)
+        for c in cults
+        if c.name != (exclude_name or "").lower()
     ]
-    await ctx.reply("\n".join(lines))
+    if not options:
+        return None
+    return _JoinCultSelect(options[:25])  # Discord cap on select options
 
 
-@register(0)
-async def handle(
-    ctx: commands.Context,
-    *,
-    flag: bool = False,
-    action: Optional[str] = None,
-    cult: Optional[str] = None,
-    owner: Optional[str] = None,
-    target: Optional[discord.Member] = None,
-    message: Optional[str] = None,
-    **kwargs,
-) -> None:
-    if action is None:
+class _ListMembersButton(discord.ui.Button):
+    def __init__(self, cult_id):
+        super().__init__(label="📋 List members", style=discord.ButtonStyle.secondary)
+        self.cult_id = cult_id
+
+    async def callback(self, interaction: discord.Interaction):
+        cult = await Cult.filter(id=self.cult_id).prefetch_related("owner").first()
+        if cult is None:
+            await interaction.response.send_message("That cult is gone.", ephemeral=True)
+            return
+        body = await _render_cult_listing(interaction.client, interaction.guild, cult)
+        await interaction.response.send_message(body, ephemeral=True)
+
+
+class _SwitchButton(discord.ui.Button):
+    def __init__(self, current_cult_name: str):
+        super().__init__(label="🔄 Switch cults", style=discord.ButtonStyle.primary)
+        self.current_cult_name = current_cult_name
+
+    async def callback(self, interaction: discord.Interaction):
+        select = await _build_join_select(exclude_name=self.current_cult_name)
+        if select is None:
+            await interaction.response.send_message(
+                "No other cults exist to switch to.", ephemeral=True
+            )
+            return
+        view = discord.ui.View(timeout=180)
+        view.add_item(select)
+        await interaction.response.send_message(
+            "Pick the cult to switch to:", view=view, ephemeral=True
+        )
+
+
+def _link_button_for_thread(
+    thread_id: Optional[int], *, label: str, guild_id: int
+) -> Optional[discord.ui.Button]:
+    if not thread_id or not guild_id:
+        return None
+    url = f"https://discord.com/channels/{guild_id}/{thread_id}"
+    return discord.ui.Button(label=label, style=discord.ButtonStyle.link, url=url)
+
+
+def _build_in_cult_view(
+    membership: CultMembership, cult: Cult, *, guild_id: int
+) -> discord.ui.View:
+    view = discord.ui.View(timeout=600)
+    view.add_item(_ListMembersButton(cult.id))
+    link = _link_button_for_thread(cult.thread_id, label="🔗 Visit thread", guild_id=guild_id)
+    if link is not None:
+        view.add_item(link)
+    if _switch_remaining_days(membership) == 0:
+        view.add_item(_SwitchButton(cult.name))
+    return view
+
+
+async def _build_no_cult_view() -> Optional[discord.ui.View]:
+    select = await _build_join_select()
+    if select is None:
+        return None
+    view = discord.ui.View(timeout=600)
+    view.add_item(select)
+    return view
+
+
+# ---------------------------------------------------------------------------
+# /return 0 handler
+# ---------------------------------------------------------------------------
+
+
+@register(0, tier=Tier.REGISTERED)
+async def handle(ctx: commands.Context) -> None:
+    guild_id = ctx.guild.id if ctx.guild else 0
+    user_id = ctx.author.id
+
+    # State D: caller is a figurehead
+    owned = await lookup_owned_cult(user_id)
+    if owned is not None:
+        view = discord.ui.View(timeout=600)
+        link = _link_button_for_thread(
+            owned.thread_id, label="🔗 Visit your cult's thread", guild_id=guild_id
+        )
+        if link is not None:
+            view.add_item(link)
         await ctx.reply(
-            "Usage: `/return 0 <join|add|list|force|announce|install_intercult> "
-            "[cult] [owner|target|message]`",
+            f"You're the figurehead of `{owned.name}`. Figureheads can't join cult "
+            "threads, but you can visit yours from here.",
+            view=view if link is not None else None,
             ephemeral=True,
         )
         return
 
-    action = action.lower()
+    # States B / C: caller is already in a cult
+    disc = await DiscordAccount.filter(disc_uuid=str(user_id)).first()
+    membership: Optional[CultMembership] = None
+    if disc is not None:
+        membership = await CultMembership.filter(discord_account=disc).first()
 
-    if action == "announce":
-        if not message:
-            await ctx.reply("`announce` requires a `message`.", ephemeral=True)
+    if membership is not None:
+        cult = await Cult.filter(id=membership.cult_id).prefetch_related("owner").first()
+        if cult is None:
+            # Defensive: membership row points at a deleted cult.
+            await membership.delete()
+            membership = None
+        else:
+            days_remaining = _switch_remaining_days(membership)
+            if days_remaining == 0:
+                body = (
+                    f"You're in `{cult.name}`. The switch cooldown has elapsed — "
+                    "you can move to another cult if you want."
+                )
+            else:
+                body = (
+                    f"You're in `{cult.name}`. You can't change cults for "
+                    f"~{days_remaining} day(s)."
+                )
+            view = _build_in_cult_view(membership, cult, guild_id=guild_id)
+            await ctx.reply(body, view=view, ephemeral=True)
             return
-        await _do_announce(ctx, message)
-        return
 
-    if action == "install_intercult":
-        await _do_install_intercult(ctx)
-        return
-
-    if not cult:
-        await ctx.reply(f"`{action}` requires a cult name.", ephemeral=True)
-        return
-
-    if action == "join":
-        await _do_join(ctx, cult)
-    elif action == "add":
-        if not owner:
-            await ctx.reply("`add` requires an owner (Discord mention, MC username, or MC UUID).", ephemeral=True)
-            return
-        await _do_add(ctx, cult, owner)
-    elif action == "list":
-        await _do_list(ctx, cult)
-    elif action == "force":
-        if target is None:
-            await ctx.reply("`force` requires a `target` user.", ephemeral=True)
-            return
-        await do_force_join_by_name(ctx, target, cult)
-    else:
+    # State A: no cult yet
+    view = await _build_no_cult_view()
+    if view is None:
         await ctx.reply(
-            f"Unknown action `{action}`. Use `join`, `add`, `list`, `force`, "
-            "`announce`, or `install_intercult`.",
+            f"{_CULT_DESCRIPTION}\n\n"
+            "_(No cults are configured yet — ask an operator to create one with "
+            "`~manage_return 0 createCult`.)_",
             ephemeral=True,
         )
+        return
+    await ctx.reply(
+        f"{_CULT_DESCRIPTION}\n\nPick a cult to join:",
+        view=view,
+        ephemeral=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ~manage_return 0 subcommands
+# ---------------------------------------------------------------------------
+
+
+@register_manage(
+    0, "createCult", tier=Tier.OPERATOR,
+    help="Create a new cult.",
+    usage="<name> <figurehead> <thread_id>",
+)
+async def _manage_create_cult(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    if len(args) < 3:
+        await send_feedback(
+            ctx,
+            "Usage: `~manage_return 0 createCult <name> <figurehead> <thread_id>`",
+            persist=persist,
+        )
+        return
+    name, figurehead, thread_id_str = args[0], args[1], args[2]
+    name_key = name.lower()
+    try:
+        thread_id = int(thread_id_str)
+    except ValueError:
+        await send_feedback(
+            ctx, f"`thread_id` must be an integer; got `{thread_id_str}`.", persist=persist
+        )
+        return
+    if await Cult.filter(name=name_key).exists():
+        await send_feedback(ctx, f"A cult named `{name}` already exists.", persist=persist)
+        return
+    mc = await _resolve_owner_mc(ctx, figurehead)
+    if mc is None:
+        await send_feedback(
+            ctx,
+            f"Could not resolve figurehead `{figurehead}` to a Minecraft account "
+            "(tried Discord mention, MC username, and MC UUID).",
+            persist=persist,
+        )
+        return
+    thread = await _resolve_thread(ctx.bot, thread_id)
+    if thread is None:
+        await send_feedback(
+            ctx,
+            f"Could not resolve thread id `{thread_id}` to a Discord thread the bot can see.",
+            persist=persist,
+        )
+        return
+    await Cult.create(name=name_key, owner=mc, thread_id=thread_id)
+
+    # Wire up the cross-cult messaging button. Late import keeps the
+    # week_0 module import-time cheap and side-effect-free.
+    from lib.discord_utils.intercult_view import install_intercult_in_thread
+    install_result = await install_intercult_in_thread(ctx.bot, thread)
+    button_note = {
+        "posted": "Intercult button installed and pinned.",
+        "skipped": "Intercult button was already pinned in that thread.",
+        "failed": (
+            "⚠️ Intercult button install failed — retry with "
+            "`/script install_intercult` once the issue is resolved."
+        ),
+    }[install_result]
+
+    await send_feedback(
+        ctx,
+        f"✅ Created cult `{name}` with figurehead `{mc.mc_username}` "
+        f"(thread `{thread_id}`). {button_note}",
+        persist=persist,
+    )
+
+
+@register_manage(
+    0, "listMembers", tier=Tier.ADMIN,
+    help="Show the figurehead, staff, and members of a cult.",
+    usage="<cult>",
+)
+async def _manage_list_members(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    if not args:
+        await send_feedback(ctx, "Usage: `~manage_return 0 listMembers <cult>`", persist=persist)
+        return
+    cult_name = args[0]
+    cult = await Cult.filter(name=cult_name.lower()).prefetch_related("owner").first()
+    if cult is None:
+        await send_feedback(ctx, f"No cult named `{cult_name}`.", persist=persist)
+        return
+    text = await _render_cult_listing(ctx.bot, ctx.guild, cult)
+    await send_feedback(ctx, text, persist=persist)
+
+
+@register_manage(
+    0, "broadcastMessage", tier=Tier.ADMIN,
+    help="Send an announcement to every cult's thread.",
+    usage="<message>",
+)
+async def _manage_broadcast(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    if not args:
+        await send_feedback(
+            ctx, "Usage: `~manage_return 0 broadcastMessage <message>`", persist=persist
+        )
+        return
+    # Re-join args; the literal ``\n`` two-character sequence converts to a real
+    # newline (text args otherwise can't carry a line break).
+    text = " ".join(args).replace("\\n", "\n")
+    sent = failed = missing = 0
+    for cult in await Cult.all():
+        if not cult.thread_id:
+            missing += 1
+            continue
+        thread = await _resolve_thread(ctx.bot, cult.thread_id)
+        if thread is None:
+            missing += 1
+            continue
+        try:
+            await thread.send(
+                f"**📢 Announcement:**\n{text}",
+                allowed_mentions=discord.AllowedMentions(
+                    users=True, roles=False, everyone=False
+                ),
+            )
+            sent += 1
+        except discord.HTTPException as e:
+            logger.warning(
+                "broadcast: send to %s (%s) failed: %s", cult.thread_id, cult.name, e
+            )
+            failed += 1
+    await send_feedback(
+        ctx,
+        f"✅ Sent to {sent} thread(s). ({failed} failed, {missing} unresolved)",
+        persist=persist,
+    )
+
+
+@register_manage(
+    0, "cultMessage", tier=Tier.ADMIN,
+    help="Send an announcement to a single cult's thread.",
+    usage="<cult> <message>",
+)
+async def _manage_cult_message(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    if len(args) < 2:
+        await send_feedback(
+            ctx, "Usage: `~manage_return 0 cultMessage <cult> <message>`", persist=persist
+        )
+        return
+    cult_name, *rest = args
+    cult = await Cult.filter(name=cult_name.lower()).first()
+    if cult is None:
+        await send_feedback(ctx, f"No cult named `{cult_name}`.", persist=persist)
+        return
+    if not cult.thread_id:
+        await send_feedback(ctx, f"`{cult.name}` has no thread configured.", persist=persist)
+        return
+    thread = await _resolve_thread(ctx.bot, cult.thread_id)
+    if thread is None:
+        await send_feedback(ctx, f"Couldn't resolve thread for `{cult.name}`.", persist=persist)
+        return
+    text = " ".join(rest).replace("\\n", "\n")
+    try:
+        await thread.send(
+            f"**📢 Announcement:**\n{text}",
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+    except discord.HTTPException as e:
+        await send_feedback(ctx, f"Send failed: {e}", persist=persist)
+        return
+    await send_feedback(ctx, f"✅ Sent to `{cult.name}`.", persist=persist)
+
+
+@register_manage(
+    0, "addressOwnCult", tier=Tier.ADMIN,
+    custom_check=is_figurehead,
+    help="Figurehead-only: send a message to your own cult, attributed to you.",
+    usage="<message>",
+)
+async def _manage_address_own(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    if not args:
+        await send_feedback(
+            ctx, "Usage: `~manage_return 0 addressOwnCult <message>`", persist=persist
+        )
+        return
+    cult = await lookup_owned_cult(ctx.author.id)
+    if cult is None:
+        # Should be unreachable thanks to is_figurehead, but guard anyway.
+        await send_feedback(ctx, "You don't own a cult.", persist=persist)
+        return
+    if not cult.thread_id:
+        await send_feedback(ctx, f"`{cult.name}` has no thread configured.", persist=persist)
+        return
+    thread = await _resolve_thread(ctx.bot, cult.thread_id)
+    if thread is None:
+        await send_feedback(ctx, f"Couldn't resolve thread for `{cult.name}`.", persist=persist)
+        return
+    await cult.fetch_related("owner")
+    figurehead_name = cult.owner.mc_username
+    text = " ".join(args).replace("\\n", "\n")
+    try:
+        await thread.send(
+            f"**Message from `{figurehead_name}`:**\n{text}",
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+    except discord.HTTPException as e:
+        await send_feedback(ctx, f"Send failed: {e}", persist=persist)
+        return
+    await send_feedback(
+        ctx, f"✅ Sent to `{cult.name}` as `{figurehead_name}`.", persist=persist
+    )
+
+
+@register_manage(
+    0, "force", tier=Tier.STAFF,
+    help="Force-move a user to a cult, bypassing the switch cooldown.",
+    usage="<@target|id> <cult>",
+)
+async def _manage_force(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    if len(args) < 2:
+        await send_feedback(
+            ctx, "Usage: `~manage_return 0 force <@target|id> <cult>`", persist=persist
+        )
+        return
+    target_str, cult_name = args[0], args[1]
+    try:
+        member = await CaseInsensitiveMember().convert(ctx, target_str)
+    except commands.MemberNotFound:
+        await send_feedback(ctx, f"Could not find member `{target_str}`.", persist=persist)
+        return
+    cult = await Cult.filter(name=cult_name.lower()).first()
+    if cult is None:
+        await send_feedback(ctx, f"No cult named `{cult_name}`.", persist=persist)
+        return
+    _ok, msg = await _force_move(ctx.bot, member.id, cult)
+    await send_feedback(ctx, msg, persist=persist)
+
+

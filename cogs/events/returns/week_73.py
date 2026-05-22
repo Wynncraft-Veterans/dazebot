@@ -3,19 +3,19 @@
 A single shared story is built one fragment at a time. Each contributor sees
 the most recent segment, then clicks a button to add the next little bit.
 
-Commands (all routed through ``/return 73 ...`` by the generic Returns cog):
+Surfaces:
 
-* ``/return 73``                 — show the most recent segment in an
-                                   ephemeral reply with an **Add to the
-                                   story** button. The button opens a Discord
-                                   Modal where the fragment is typed; the
-                                   text never appears in the channel UI.
-* ``/return 73 message:<text>``  — rejected. Discord's "used /return" hover
-                                   exposes every slash parameter, so passing
-                                   the fragment as ``message:`` would leak it
-                                   publicly. The user is redirected to the
-                                   button flow above.
-* ``/return 73 action:full``     — ADMIN: dump the entire story (paginated).
+* ``/return 73``                       — show the most recent segment in
+                                         an ephemeral reply with an **Add
+                                         to the story** button. The button
+                                         opens a Discord Modal where the
+                                         fragment is typed; the text never
+                                         appears in the channel UI.
+* ``~manage_return 73 showMessage``    — ADMIN: dump the entire story
+                                         (paginated). Replaces the legacy
+                                         ``/return 73 action:full`` slash
+                                         path, which is gone with the
+                                         shared-param overhaul.
 
 Contribution is gated to the three event roles in ``STORY_ROLE_IDS`` (admins
 and operators always pass). Rules enforced on a submission:
@@ -43,7 +43,7 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
-from cogs.events.returns import register
+from cogs.events.returns import Tier, register, register_manage
 from lib.auth import _has_admin_perm, _is_operator
 from lib.discord_utils.paginated_embed import Paginator
 from orm import DiscordAccount, Score, StorySegment, WeeklyEvent
@@ -64,9 +64,6 @@ MAX_LEN = 125
 
 # How many trailing segments the tail view (and post-submit confirmation) show.
 TAIL_SEGMENTS = 1
-
-# Action keywords that mean "dump the whole story" (admin only).
-FULL_ACTIONS = {"full", "story", "all", "view", "dump"}
 
 _FULL_EMBED_CHUNK = 1000  # chars per page in the admin full-story view
 
@@ -415,27 +412,16 @@ async def _show_full(ctx: commands.Context) -> None:
 # ---------------------------------------------------------------------------
 
 
-@register(73)
-async def handle(
-    ctx: commands.Context,
-    *,
-    flag: bool = False,
-    action: Optional[str] = None,
-    cult: Optional[str] = None,
-    owner: Optional[str] = None,
-    target: Optional[discord.Member] = None,
-    message: Optional[str] = None,
-    **kwargs,
-) -> None:
-    if action is not None and action.lower() in FULL_ACTIONS:
-        await _show_full(ctx)
-        return
-    if message:
-        await _private(
-            ctx,
-            "❌ `/return 73 message:` has been removed in favour of a better system: "
-            "Simply run `/return 73` (no arguments) and "
-            "click the **Add to the story** button instead.",
-        )
-        return
+@register(73, custom_check=_can_contribute)
+async def handle(ctx: commands.Context) -> None:
     await _show_tail(ctx)
+
+
+@register_manage(
+    73, "showMessage", tier=Tier.ADMIN,
+    help="Dump the entire Return 73 story (paginated).",
+    usage="",
+)
+async def _manage_show_message(ctx: commands.Context, args: list[str]) -> None:
+    # _show_full handles its own admin gate, ephemeral/DM routing, and pagination.
+    await _show_full(ctx)

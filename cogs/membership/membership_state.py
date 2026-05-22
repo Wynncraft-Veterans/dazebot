@@ -185,7 +185,7 @@ class MembershipState(commands.Cog):
         if ctx.invoked_subcommand is None:
             await ctx.reply(
                 "Available scripts: `/script edit_welcome <channel> <message_id>`, "
-                "`/script rename_cult`."
+                "`/script rename_cult`, `/script install_intercult`."
             )
 
     @script_group.command(
@@ -257,8 +257,31 @@ class MembershipState(commands.Cog):
         cult.name = new
         await cult.save(update_fields=["name"])
         await ctx.reply(
-            f"✅ Renamed `{old}` → `{new}`. "
-            "Remember to update `CULT_THREADS` in `cogs/returns/week_0.py` to match.",
+            f"✅ Renamed `{old}` → `{new}`. (Thread mapping lives on the row "
+            "itself in `Cult.thread_id`; no code change needed.)",
+            ephemeral=True,
+        )
+
+    @script_group.command(
+        name="install_intercult",
+        description="(Operator) Reinstall the intercult button in every cult thread (idempotent).",
+    )
+    @is_operator()
+    async def script_install_intercult(self, ctx: commands.Context):
+        """Bulk reinstall of the cross-cult messaging button.
+
+        Routine cult creation already installs the button via
+        ``~manage_return 0 createCult``; this command is the one-off
+        recovery path for re-pinning after the original message was
+        deleted, or for bootstrapping a backfilled DB.
+        """
+        from lib.discord_utils.intercult_view import install_intercult_button
+
+        await ctx.defer(ephemeral=True)
+        posted, skipped, failed, unresolved = await install_intercult_button(self.bot)
+        await ctx.reply(
+            f"✅ intercult install: posted={posted} skipped={skipped} "
+            f"failed={failed} unresolved={unresolved}",
             ephemeral=True,
         )
 

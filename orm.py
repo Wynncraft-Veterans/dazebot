@@ -340,7 +340,14 @@ class Cult(Model):
     """A `/return 0` cult: a mutually-exclusive team a Discord user can join.
 
     The owner ("figurehead") is a MinecraftAccount, identified by an
-    in-game username or UUID at creation time.
+    in-game username or UUID at creation time. ``thread_id`` is the Discord
+    private-thread the cult lives in — used by ``cogs.events.returns.week_0``
+    for membership sync and by ``lib.discord_utils.intercult_view`` for
+    cross-cult messaging. Nullable so the column can be added by the
+    idempotent ALTER in :func:`init_db` without a default; the per-row
+    backfill from the legacy
+    ``cogs.events.returns.lib.cult_threads.CULT_THREADS`` map runs on
+    startup (see ``Returns.cog_load``).
     """
 
     id = fields.UUIDField(pk=True)
@@ -349,6 +356,7 @@ class Cult(Model):
     owner: fields.ForeignKeyRelation[MinecraftAccount] = fields.ForeignKeyField(
         "models.MinecraftAccount", related_name="owned_cults", on_delete=fields.RESTRICT
     )
+    thread_id: Optional[int] = fields.BigIntField(null=True)  # type: ignore
     created_at = fields.DatetimeField(auto_now_add=True)
 
     memberships: fields.ReverseRelation[CultMembership]
@@ -524,6 +532,39 @@ async def init_db():
     db_url = f"sqlite://{db_path}"
     await Tortoise.init(db_url=db_url, modules={"models": ["orm"]})
     await Tortoise.generate_schemas()
+    await _ensure_added_columns()
+
+
+async def _ensure_added_columns() -> None:
+    """Apply schema additions that ``generate_schemas(safe=True)`` skips.
+
+    ``Tortoise.generate_schemas`` only ever emits ``CREATE TABLE IF NOT
+    EXISTS``. New *columns* on existing tables therefore need an explicit
+    ``ALTER TABLE`` (see ``.claude/data_model.md``). This helper performs
+    those alters idempotently — it inspects ``PRAGMA table_info`` and only
+    emits ``ALTER TABLE ... ADD COLUMN`` if the column is missing. SQLite's
+    ``ADD COLUMN`` is fast (metadata-only) and safe under WAL.
+
+    Add a new entry below whenever you add a nullable column to an existing
+    model. Removing a column still requires a manual one-shot.
+    """
+    from tortoise import Tortoise
+
+    # (table, column, sql_type) — sql_type must match what Tortoise would
+    # have generated for the field.
+    added_columns: list[tuple[str, str, str]] = [
+        ("cults", "thread_id", "BIGINT"),
+    ]
+
+    conn = Tortoise.get_connection("default")
+    for table, column, sql_type in added_columns:
+        info = await conn.execute_query_dict(f"PRAGMA table_info({table})")
+        existing = {row["name"] for row in info}
+        if column in existing:
+            continue
+        await conn.execute_script(
+            f"ALTER TABLE {table} ADD COLUMN {column} {sql_type};"
+        )
 
 
 # Close connections helper

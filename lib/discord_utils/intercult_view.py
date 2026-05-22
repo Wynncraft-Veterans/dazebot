@@ -1,7 +1,9 @@
 """Persistent button + ephemeral select + modal for cross-cult messaging.
 
-Pinned by ``/return 0 install_intercult`` in each of the six cult threads
-(see :mod:`lib.cult_threads`). Any cult member can click the button to
+The pinned button is installed in each cult's thread at cult-creation
+time (``~manage_return 0 createCult`` calls :func:`install_intercult_in_thread`)
+and can be bulk-reinstalled across all cult threads via
+``/script install_intercult``. Any cult member can click the button to
 deliver one message to another cult's thread; the same text is mirrored
 back into the sender's own thread so everyone in the sending cult sees
 what was sent on their behalf. Each cult is rate-limited to one outbound
@@ -10,6 +12,10 @@ intercult message per 24 hours, regardless of which member sent it.
 The button itself is persistent (registered with ``bot.add_view`` in
 ``bot.py:setup_hook``). The select menu and modal are per-click; if the
 bot restarts mid-flow the user just re-clicks the button.
+
+Thread mapping is read from the ``Cult.thread_id`` column. Cults without a
+thread_id set are silently skipped (they aren't valid recipients/senders
+for cross-cult messaging until an operator configures the thread).
 """
 
 from __future__ import annotations
@@ -20,7 +26,6 @@ from typing import Optional
 
 import discord
 
-from lib.cult_threads import CULT_THREADS
 from orm import Cult, CultMembership, DiscordAccount, IntercultMessage
 
 logger = logging.getLogger("dazebot.lib.discord_utils.intercult_view")
@@ -117,9 +122,11 @@ class _IntercultMessageModal(discord.ui.Modal):
             )
             return
 
-        target_thread_id = CULT_THREADS.get(self.target_cult)
-        sender_thread_id = CULT_THREADS.get(self.sender_cult)
-        if target_thread_id is None or sender_thread_id is None:
+        target_row = await Cult.filter(name=self.target_cult).first()
+        sender_row = await Cult.filter(name=self.sender_cult).first()
+        target_thread_id = target_row.thread_id if target_row else None
+        sender_thread_id = sender_row.thread_id if sender_row else None
+        if not target_thread_id or not sender_thread_id:
             await interaction.followup.send(
                 "Internal error: one of the cult threads is no longer configured.",
                 ephemeral=True,
@@ -188,13 +195,13 @@ class _IntercultCultSelectView(discord.ui.View):
     clicker's flow finishes (or after timeout).
     """
 
-    def __init__(self, sender_cult: str):
+    def __init__(self, sender_cult: str, candidate_names: list[str]):
         super().__init__(timeout=300)
         self.sender_cult = sender_cult
+        self._candidate_names = set(candidate_names)
         options = [
             discord.SelectOption(label=name.capitalize(), value=name)
-            for name in CULT_THREADS.keys()
-            if name != sender_cult
+            for name in candidate_names
         ]
         select: discord.ui.Select = discord.ui.Select(
             placeholder="Pick a cult to message",
@@ -208,7 +215,7 @@ class _IntercultCultSelectView(discord.ui.View):
 
     async def _on_select(self, interaction: discord.Interaction):
         target = interaction.data["values"][0]  # type: ignore[index]
-        if target not in CULT_THREADS or target == self.sender_cult:
+        if target not in self._candidate_names or target == self.sender_cult:
             await interaction.response.send_message(
                 "Invalid target cult.", ephemeral=True,
             )
@@ -241,14 +248,27 @@ class IntercultButtonView(discord.ui.View):
         if cult is None:
             await interaction.response.send_message(
                 "You aren't in a cult, so you can't send an intercult message. "
-                "Join one with `/joincult <name>` first.",
+                "Use `/joincult` or `/return 0` to join one first.",
                 ephemeral=True,
             )
             return
 
-        if cult.name not in CULT_THREADS:
+        if not cult.thread_id:
             await interaction.response.send_message(
                 f"Your cult `{cult.name}` has no thread configured for intercult messaging.",
+                ephemeral=True,
+            )
+            return
+
+        # Build the candidate list: every other cult with a thread_id.
+        candidates = [
+            c.name
+            for c in await Cult.filter(thread_id__not_isnull=True).order_by("name")
+            if c.name != cult.name
+        ]
+        if not candidates:
+            await interaction.response.send_message(
+                "No other cult is configured for intercult messaging yet.",
                 ephemeral=True,
             )
             return
@@ -264,7 +284,7 @@ class IntercultButtonView(discord.ui.View):
 
         await interaction.response.send_message(
             f"You're sending on behalf of `{cult.name}`. Pick a recipient cult:",
-            view=_IntercultCultSelectView(sender_cult=cult.name),
+            view=_IntercultCultSelectView(sender_cult=cult.name, candidate_names=candidates),
             ephemeral=True,
         )
 
@@ -277,40 +297,66 @@ INTERCULT_PINNED_BODY = (
 )
 
 
-async def install_intercult_button(bot) -> tuple[int, int, int, int]:
-    """Post the persistent intercult button into each cult thread and pin it.
+async def install_intercult_in_thread(
+    bot, thread: discord.Thread
+) -> str:
+    """Idempotently install + pin the intercult button in one thread.
 
-    Idempotent: if a pinned message in the thread already carries our
-    button (matched by ``custom_id``), the thread is skipped. Returns
-    ``(posted, skipped, failed, unresolved)``.
+    Returns one of ``"posted"`` (sent and pinned now), ``"skipped"`` (a
+    pinned button with our ``custom_id`` was already present), or
+    ``"failed"`` (send raised). A pin failure after a successful send still
+    reports ``"posted"`` — the button itself is in place; only the pin is
+    missing, which staff can fix manually.
+
+    ``createCult`` calls this with the new cult's thread to wire the
+    button up on first creation. ``install_intercult_button`` (below) is
+    just a bulk wrapper for one-shot reinstalls via ``/script``.
+    """
+    if await _intercult_button_already_pinned(thread):
+        return "skipped"
+    try:
+        msg = await thread.send(INTERCULT_PINNED_BODY, view=IntercultButtonView())
+    except discord.HTTPException as e:
+        logger.warning(
+            "intercult install: send to %s failed: %s", thread.id, e,
+        )
+        return "failed"
+    try:
+        await msg.pin(reason="intercult bootstrap")
+    except discord.HTTPException as e:
+        logger.warning(
+            "intercult install: pin in %s failed: %s", thread.id, e,
+        )
+    return "posted"
+
+
+async def install_intercult_button(bot) -> tuple[int, int, int, int]:
+    """Bulk-install the intercult button across every cult thread.
+
+    Idempotent (delegates per-thread to :func:`install_intercult_in_thread`).
+    Cults with no ``thread_id`` or an unresolvable thread are counted as
+    ``unresolved``. Returns ``(posted, skipped, failed, unresolved)``.
+
+    Bootstrap-only — call from ``/script install_intercult``. Routine cult
+    creation goes through ``createCult`` which installs the button at
+    creation time.
     """
     posted = skipped = failed = unresolved = 0
-    for cult_name, thread_id in CULT_THREADS.items():
-        thread = await _resolve_thread(bot, thread_id)
+    for cult in await Cult.all():
+        if not cult.thread_id:
+            unresolved += 1
+            continue
+        thread = await _resolve_thread(bot, cult.thread_id)
         if thread is None:
             unresolved += 1
             continue
-        if await _intercult_button_already_pinned(thread):
+        result = await install_intercult_in_thread(bot, thread)
+        if result == "posted":
+            posted += 1
+        elif result == "skipped":
             skipped += 1
-            continue
-        try:
-            msg = await thread.send(INTERCULT_PINNED_BODY, view=IntercultButtonView())
-        except discord.HTTPException as e:
-            logger.warning(
-                "intercult install: send to %s (%s) failed: %s",
-                thread_id, cult_name, e,
-            )
+        else:
             failed += 1
-            continue
-        try:
-            await msg.pin(reason="intercult bootstrap")
-        except discord.HTTPException as e:
-            # Send succeeded; leaving it unpinned is recoverable manually.
-            logger.warning(
-                "intercult install: pin in %s (%s) failed: %s",
-                thread_id, cult_name, e,
-            )
-        posted += 1
     return posted, skipped, failed, unresolved
 
 

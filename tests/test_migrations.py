@@ -41,7 +41,43 @@ from orm import (
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-EPHEMERAL_DB = REPO_ROOT / ".claude" / "ephemeral" / "dazebot-2026-05-22.db"
+
+
+def _find_ephemeral_snapshot() -> Path | None:
+    """Pick whichever pre-aerich DB snapshot is present in ``.claude/ephemeral``.
+
+    Snapshots get renamed / refreshed over time (e.g. ``dazebot-<date>.db``,
+    ``BACKUP-PRE-AERICH.db``, ``DUMP-POST-MIGRATION.db``). We pick the
+    largest non-empty ``.db`` file that has a ``minecraft_accounts`` table
+    and no ``aerich`` table — the pre-aerich production shape. Returns
+    ``None`` if no usable snapshot exists, so the dependent tests can skip.
+    """
+    import sqlite3
+
+    eph = REPO_ROOT / ".claude" / "ephemeral"
+    if not eph.is_dir():
+        return None
+    candidates: list[tuple[int, Path]] = []
+    for p in eph.glob("*.db"):
+        if p.stat().st_size < 1024:
+            continue
+        try:
+            conn = sqlite3.connect(p)
+            try:
+                names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            continue
+        if "minecraft_accounts" in names and "aerich" not in names:
+            candidates.append((p.stat().st_size, p))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+EPHEMERAL_DB = _find_ephemeral_snapshot()
 
 
 # All model tables that the initial migration creates. Used to assert
@@ -113,6 +149,10 @@ async def _isolated_db(tmp_path, monkeypatch):
     await _reset()
     db_path = tmp_path / "test.db"
     monkeypatch.setenv("DAZEBOT_DB_PATH", str(db_path))
+    # Tests intentionally start from empty tmp_path DBs (or seed one by
+    # copying the ephemeral snapshot). The fresh-DB guard in init_db is a
+    # prod safety mechanism that would otherwise refuse all these tests.
+    monkeypatch.setenv("DAZEBOT_ALLOW_FRESH_DB", "1")
     yield db_path
     await _reset()
 
@@ -141,6 +181,39 @@ def _row_counts(db_path: Path, tables: list[str]) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 # Detection helper
 # ---------------------------------------------------------------------------
+
+
+async def test_init_db_refuses_missing_file_without_opt_in(tmp_path, monkeypatch):
+    """The 2026-05-23 regression: init_db must NOT silently treat a missing
+    DB file as "fresh install" and create a new schema. Without the explicit
+    ``DAZEBOT_ALLOW_FRESH_DB=1`` opt-in, missing the file at the configured
+    path must raise.
+
+    Bypassing this guard is what wiped prod when a bind-mount glitch left
+    ``/app/data/dazebot.db`` invisible to the new container at deploy time.
+    """
+    db_path = tmp_path / "nonexistent.db"
+    monkeypatch.setenv("DAZEBOT_DB_PATH", str(db_path))
+    monkeypatch.delenv("DAZEBOT_ALLOW_FRESH_DB", raising=False)
+
+    with pytest.raises(RuntimeError, match="DAZEBOT_ALLOW_FRESH_DB"):
+        await init_db()
+
+
+async def test_init_db_creates_pre_migration_backup(_isolated_db):
+    """Every init_db run that touches an existing DB file leaves a
+    timestamped backup beside it. This makes post-incident recovery a file
+    copy instead of a forensic exercise.
+    """
+    from orm import _backup_db_before_migration
+
+    # Seed the path with a tiny existing file so the backup helper has
+    # something to copy.
+    _isolated_db.write_bytes(b"not-real-sqlite-but-non-empty")
+    backup = _backup_db_before_migration(str(_isolated_db))
+    assert backup is not None
+    assert Path(backup).exists()
+    assert Path(backup).read_bytes() == b"not-real-sqlite-but-non-empty"
 
 
 def test_detect_fresh_db_does_not_need_fake_apply(tmp_path):
@@ -241,8 +314,8 @@ async def test_fresh_db_round_trip(_isolated_db):
 
 
 @pytest.mark.skipif(
-    not EPHEMERAL_DB.exists(),
-    reason="Ephemeral DB snapshot not present; this test is local-only.",
+    EPHEMERAL_DB is None,
+    reason="No pre-aerich DB snapshot in .claude/ephemeral; this test is local-only.",
 )
 async def test_bootstrap_on_existing_db(_isolated_db):
     """Copy the ephemeral snapshot to a tmp_path, run ``init_db``, and
@@ -296,8 +369,8 @@ async def test_bootstrap_on_existing_db(_isolated_db):
 
 
 @pytest.mark.skipif(
-    not EPHEMERAL_DB.exists(),
-    reason="Ephemeral DB snapshot not present; this test is local-only.",
+    EPHEMERAL_DB is None,
+    reason="No pre-aerich DB snapshot in .claude/ephemeral; this test is local-only.",
 )
 async def test_bootstrap_is_idempotent(_isolated_db):
     """Calling ``init_db`` twice on a now-bootstrapped DB is a no-op: same
@@ -323,8 +396,8 @@ async def test_bootstrap_is_idempotent(_isolated_db):
 
 
 @pytest.mark.skipif(
-    not EPHEMERAL_DB.exists(),
-    reason="Ephemeral DB snapshot not present; this test is local-only.",
+    EPHEMERAL_DB is None,
+    reason="No pre-aerich DB snapshot in .claude/ephemeral; this test is local-only.",
 )
 async def test_orm_queries_against_migrated_db(_isolated_db):
     """After bootstrap on the ephemeral snapshot, every model declared in

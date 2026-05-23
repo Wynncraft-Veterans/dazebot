@@ -114,7 +114,7 @@ Optional: `MC_PUBLIC_HOST` (default `verify.wynnvets.org`), `DEBUG`, `DAZEBOT_DB
 
 ## Schema migrations
 
-Managed by [aerich](https://github.com/tortoise/aerich). Migration files live in [`migrations/models/`](../migrations/models/). `init_db()` applies pending migrations at boot — fresh DBs get the full initial CREATE TABLE pass; pre-aerich production DBs are auto-detected and the initial migration is fake-applied (recorded as applied without re-running DDL). New change: `uv run aerich migrate --name "describe"` then commit the generated file. See [data_model.md](data_model.md).
+Managed by [aerich](https://github.com/tortoise/aerich). Migration files live in [`migrations/models/`](../migrations/models/). `init_db()` applies pending migrations at boot — pre-aerich production DBs are auto-detected and the initial migration is fake-applied (recorded as applied without re-running DDL). Fresh-DB creation is **refused** unless `DAZEBOT_ALLOW_FRESH_DB=1` is set (operator opt-in only — required because a missing prod file caused a total data wipe on 2026-05-23; see [data_model.md](data_model.md) §"2026-05-23 incident"). Every schema-touching boot leaves a `dazebot.db.pre-migration-<epoch>` backup beside the live file. New change: `uv run aerich migrate --name "describe"` then commit the generated file.
 
 ## Building / deploying
 

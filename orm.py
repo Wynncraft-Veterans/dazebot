@@ -570,23 +570,20 @@ class StorySegment(Model):
         table = "story_segments"
 
 
-def _existing_db_needs_fake_apply(db_path: str) -> bool:
-    """Return True iff the DB file exists, has at least one non-``sqlite_*``
-    non-``aerich`` table, and does NOT have an ``aerich`` tracking table.
+def _inspect_db_state(db_path: str) -> tuple[bool, set[str]]:
+    """Return ``(file_exists, table_names)`` for the SQLite file at ``db_path``.
 
-    This is the pre-aerich production-DB state: schema is already correct
-    (every column the models declare is present, because we got here via the
-    legacy ``generate_schemas`` + ``_ensure_added_columns`` path), but aerich
-    has no record of which migrations have been applied. We want to record
-    the initial migration as applied without re-running its CREATE TABLE
-    statements (which would fail with "table already exists"). Detection is
-    read-only (``sqlite_master`` query); the actual fake-apply happens via
-    ``Command.upgrade(fake=True)``.
+    Raises ``RuntimeError`` if the file exists but can't be opened (corruption,
+    permissions, etc.) — we explicitly *don't* swallow that into "fresh DB",
+    because doing so would silently re-create the schema and wipe data on a
+    transient read failure. Caller decides what to do based on the returned
+    tuple. On 2026-05-23 the prior, error-swallowing version of this function
+    contributed to a total prod data wipe — see ``.claude/data_model.md``.
     """
     import sqlite3
 
     if not os.path.isfile(db_path):
-        return False
+        return False, set()
     try:
         conn = sqlite3.connect(db_path)
         try:
@@ -596,9 +593,25 @@ def _existing_db_needs_fake_apply(db_path: str) -> bool:
             names = {row[0] for row in cur.fetchall()}
         finally:
             conn.close()
-    except sqlite3.Error:
-        return False
-    return bool(names - {"aerich"}) and "aerich" not in names
+    except sqlite3.Error as e:
+        raise RuntimeError(
+            f"Failed to inspect SQLite file at {db_path}: {e!r}. Refusing to "
+            "continue — letting init_db proceed would treat this as a fresh "
+            "DB and run all migrations from scratch, wiping any data the "
+            "file actually contained."
+        ) from e
+    return True, names
+
+
+def _existing_db_needs_fake_apply(db_path: str) -> bool:
+    """Legacy boolean shim over :func:`_inspect_db_state` retained for tests
+    that assert the per-DB-state decision directly. Production code in
+    :func:`init_db` uses :func:`_inspect_db_state` so it can distinguish
+    "missing file" from "empty file" from "pre-aerich DB" and refuse the
+    silent-wipe path.
+    """
+    file_exists, names = _inspect_db_state(db_path)
+    return file_exists and bool(names - {"aerich"}) and "aerich" not in names
 
 
 def _create_aerich_tracking_table(db_path: str) -> None:
@@ -626,6 +639,43 @@ def _create_aerich_tracking_table(db_path: str) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _backup_db_before_migration(db_path: str) -> str | None:
+    """Copy the existing DB to a timestamped sibling before any migration
+    runs. Returns the backup path (or ``None`` if there's nothing to back
+    up). Caller logs the path so an operator can find it after a wipe.
+
+    Added 2026-05-23 after a deploy that silently wiped the prod DB —
+    schema-touching code now leaves a side-channel backup so recovery is a
+    file copy rather than a forensic exercise.
+    """
+    import shutil
+    import time
+
+    if not os.path.isfile(db_path):
+        return None
+    backup_path = f"{db_path}.pre-migration-{int(time.time())}"
+    shutil.copy2(db_path, backup_path)
+    wal = db_path + "-wal"
+    if os.path.isfile(wal):
+        shutil.copy2(wal, backup_path + "-wal")
+    return backup_path
+
+
+# Names of every model table the bot expects (kept here, in orm.py, so
+# init_db can sanity-check the on-disk schema without running model queries).
+# Update this list whenever a table is added or removed.
+_EXPECTED_MODEL_TABLES = frozenset({
+    "blocklist", "bot_config_overrides", "build_promotions", "cult_memberships",
+    "cults", "dead_guild_alerts", "discord_accounts", "dm_sent_log",
+    "first_install_monitors", "guild_capacity_alerts", "intercult_messages",
+    "janitor_alerts", "link_code", "link_requests", "minecraft_accounts",
+    "minecraft_alts", "mojang_name_cache", "profession_categories",
+    "recruitment_queries", "scores", "shouts", "staff_action_entries",
+    "story_segments", "user_vanity_choices", "verify_keys", "waitlist",
+    "weekly_events",
+})
 
 
 async def _fake_apply_initial_migration(app: str) -> None:
@@ -660,28 +710,63 @@ async def _fake_apply_initial_migration(app: str) -> None:
 async def init_db():
     """Initialise Tortoise and apply pending aerich migrations.
 
-    Three branches:
+    Branches:
 
-    * **Fresh DB** (file absent, or no model tables) — aerich's ``upgrade``
-      runs every migration's DDL normally.
+    * **Empty/fresh DB** (file absent, OR exists with no model tables and
+      no ``aerich`` table) — refused unless ``DAZEBOT_ALLOW_FRESH_DB=1`` is
+      set. A missing file at the prod path almost always means a broken
+      bind mount / lost data rather than legitimate first-time setup; the
+      flag is the operator stating "yes, I really mean a clean install."
+      With the flag set, ``upgrade`` creates everything from scratch.
     * **Existing pre-aerich DB** (model tables present, ``aerich`` table
-      absent) — provision the tracking table, fake-apply ONLY the initial
-      migration (its DDL would conflict with existing tables), then run
-      ``upgrade`` to apply any follow-up migrations for real. This is
-      where backfill migrations (like
+      absent) — back up the file, provision the tracking table, fake-apply
+      ONLY the initial migration, then ``upgrade`` to apply any follow-up
+      migrations for real. This is where backfill migrations (like
       ``1_*_backfill_fk_unique_indexes.py``) actually take effect on prod.
     * **Already-bootstrapped DB** (model tables + ``aerich`` table present)
-      — ``upgrade`` applies any pending follow-up migrations; no-op when
-      up-to-date.
+      — back up the file, run ``upgrade`` for any pending follow-up
+      migrations; no-op when up-to-date.
+
+    The pre-migration backup ends up at ``{db_path}.pre-migration-{epoch}``
+    so any deploy that goes wrong can be reversed with a file copy.
 
     ``aerich.Command.init`` calls ``Tortoise.init`` internally (guarded by
     ``Tortoise._inited``), so the connection it opens is the same one the
     bot uses for queries afterwards.
     """
+    import logging
+
     from aerich import Command
 
+    logger = logging.getLogger("dazebot.orm")
+
     db_path = _resolve_db_path()
-    needs_fake_apply = _existing_db_needs_fake_apply(db_path)
+    file_exists, table_names = _inspect_db_state(db_path)
+    has_aerich = "aerich" in table_names
+    model_tables_present = bool(table_names & _EXPECTED_MODEL_TABLES)
+
+    if not file_exists or (not model_tables_present and not has_aerich):
+        if os.environ.get("DAZEBOT_ALLOW_FRESH_DB") != "1":
+            raise RuntimeError(
+                f"No existing dazebot DB at {db_path!r} "
+                f"(file_exists={file_exists}, model_tables_present={model_tables_present}). "
+                "Refusing to create a fresh DB and lose any data that may "
+                "have been at this path. If this is genuinely first-time "
+                "setup, set DAZEBOT_ALLOW_FRESH_DB=1 and restart."
+            )
+        logger.warning(
+            "DAZEBOT_ALLOW_FRESH_DB=1 set; creating fresh DB at %s", db_path
+        )
+        needs_fake_apply = False
+    elif model_tables_present and not has_aerich:
+        needs_fake_apply = True
+    else:
+        needs_fake_apply = False
+
+    backup_path = _backup_db_before_migration(db_path)
+    if backup_path is not None:
+        logger.info("Backed up pre-migration DB to %s", backup_path)
+
     if needs_fake_apply:
         _create_aerich_tracking_table(db_path)
 
@@ -689,7 +774,9 @@ async def init_db():
     await command.init()
     if needs_fake_apply:
         await _fake_apply_initial_migration(command.app)
-    await command.upgrade(fake=False)
+    applied = await command.upgrade(fake=False)
+    if applied:
+        logger.info("Applied aerich migration(s): %s", applied)
 
 
 async def close_db():

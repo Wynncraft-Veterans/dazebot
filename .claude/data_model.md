@@ -100,14 +100,28 @@ All changes — new tables, new columns, renames, removals — go through aerich
 
 `init_db()` (in [`orm.py`](../orm.py)) handles three states:
 
-- **Fresh DB** (file absent / no model tables): `aerich.Command.upgrade()` runs the initial migration's `CREATE TABLE`s normally.
-- **Existing pre-aerich DB** (model tables present, no `aerich` table): `_create_aerich_tracking_table` provisions the tracking table, then `upgrade(fake=True)` records the initial migration as applied without re-running its DDL. This is the one-time bootstrap path on first deploy after this rollout.
-- **Already-bootstrapped DB**: `upgrade()` applies any pending follow-up migrations; no-op when up-to-date.
+- **Fresh DB** (file absent / no model tables): refused unless `DAZEBOT_ALLOW_FRESH_DB=1` is set in the environment. The flag is the operator stating "yes, I really mean a clean install" — without it a missing prod DB file aborts startup instead of silently re-creating empty tables (see §"2026-05-23 incident" below). With the flag, `aerich.Command.upgrade()` runs the initial migration's `CREATE TABLE`s normally.
+- **Existing pre-aerich DB** (model tables present, no `aerich` table): back up the file to `{db_path}.pre-migration-{epoch}`, provision the tracking table directly, fake-apply ONLY the initial migration via `_fake_apply_initial_migration`, then run `upgrade(fake=False)` so any follow-up migrations execute for real. This is the one-time bootstrap path on first deploy after the aerich rollout.
+- **Already-bootstrapped DB**: back up the file, then `upgrade()` applies any pending follow-up migrations; no-op when up-to-date.
 
-The detection is read-only (`sqlite_master` query) and the fake-apply path is idempotent. If you want to inspect manually:
+The detection is read-only (`sqlite_master` query). The fake-apply path is idempotent. Inspect manually:
 
 ```bash
 docker exec dazebot sqlite3 /app/data/dazebot.db 'SELECT version, app FROM aerich;'
 ```
+
+Every schema-touching boot leaves `dazebot.db.pre-migration-<epoch>` and (if present) `dazebot.db.pre-migration-<epoch>-wal` siblings beside the live DB. They accumulate; rotate them by hand if disk is tight.
+
+## 2026-05-23 incident — total prod data wipe on aerich rollout
+
+What happened: the first deploy of the aerich-wired `init_db` started against a container whose `/app/data/dazebot.db` was momentarily unreadable (likely a bind-mount race during `docker compose up -d`, never definitively root-caused). The old `_existing_db_needs_fake_apply` swallowed the underlying `sqlite3.OperationalError` and returned `False`. `init_db` therefore took the "fresh DB" branch, the initial migration's `CREATE TABLE IF NOT EXISTS` ran (no-op on existing tables — except those tables had vanished from the bot's view), and the bot started up with an empty schema. The activity loop then began repopulating `minecraft_accounts` from the WAPI within seconds, masking the wipe with fake-looking activity.
+
+Three changes prevent a repeat:
+
+1. `_inspect_db_state` (new) — raises `RuntimeError` on `sqlite3.Error` instead of falling through to "fresh DB". A transient read failure now aborts the boot.
+2. `init_db` requires `DAZEBOT_ALLOW_FRESH_DB=1` to take the fresh-install branch. Missing file → boot fails loudly; operator must explicitly opt in.
+3. `_backup_db_before_migration` runs before any DDL, leaving a timestamped backup beside the live file. Recovery from a future incident is `cp` + restart instead of forensics.
+
+Recovery script: [`vets-deploy/scripts/restore-dazebot-db.sh`](../../vets-deploy/scripts/restore-dazebot-db.sh). Takes a backup file as input, stops the stack, preserves the wiped DB at `dazebot.db.wiped-<timestamp>`, installs the backup, restarts, prints aerich state + row counts.
 
 Production safety: The `dazebot.db-wal` sidecar can hold uncommitted writes if the container exits via SIGKILL. `runtime_config.set_override` issues a `PRAGMA wal_checkpoint(TRUNCATE)` after every write to mitigate this. Other write-heavy cogs *should* but don't always do the same; on a restart-during-write you may see a small recent change "rollback".

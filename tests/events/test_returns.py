@@ -184,6 +184,8 @@ def test_autoloaded_manage_subcommands_match_expected_set():
         "broadcastMessage",
         "cultMessage",
         "addressOwnCult",
+        "cultDistribution",
+        "listOnlineUnaffiliated",
         "force",
     }
     assert set(MANAGE_REGISTRY[73]) == {"showMessage"}

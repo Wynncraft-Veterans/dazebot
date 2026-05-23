@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -10,6 +11,41 @@ from lib.util import ProfCategory
 from lib.mc.wynn_api.player_models import CharacterProfessionsType
 
 import uuid
+
+
+def _resolve_db_path() -> str:
+    """Resolve the dazebot SQLite path. Production mounts ``/app/data``; locally
+    we fall back to ``dazebot.db`` in the working directory. ``DAZEBOT_DB_PATH``
+    overrides both — set in tests to point at a tmp_path copy.
+    """
+    p = os.environ.get("DAZEBOT_DB_PATH")
+    if p is None:
+        p = "/app/data/dazebot.db" if os.path.isdir("/app/data") else "dazebot.db"
+    return p
+
+
+def _build_tortoise_config(db_path: str | None = None) -> dict:
+    """Build a tortoise config dict pointing at ``db_path`` (or the resolved
+    default). Built fresh per call so test monkeypatching of
+    ``DAZEBOT_DB_PATH`` takes effect — the module-level ``TORTOISE_ORM``
+    below is for aerich CLI use and is frozen at import time.
+    """
+    path = db_path if db_path is not None else _resolve_db_path()
+    return {
+        "connections": {"default": f"sqlite://{path}"},
+        "apps": {
+            "models": {
+                "models": ["orm", "aerich.models"],
+                "default_connection": "default",
+            }
+        },
+    }
+
+
+# Aerich's CLI resolves this dotted path via ``pyproject.toml [tool.aerich]``.
+# Frozen at module import — runtime users (``init_db``) build their own via
+# ``_build_tortoise_config`` so test-time env vars take effect.
+TORTOISE_ORM = _build_tortoise_config()
 
 
 # Sentinel value written to ``MinecraftAccount.last_online`` when the upstream
@@ -77,8 +113,12 @@ class ProfessionCategories(Model):
 
 class DiscordAccount(Model):
     id = fields.UUIDField(pk=True)
-    minecraft_account: fields.ForeignKeyNullableRelation[MinecraftAccount] = fields.ForeignKeyField(
-        "models.MinecraftAccount", related_name="discord_account", null=True, on_delete=fields.SET_NULL, unique=True
+    # OneToOneField instead of ForeignKeyField(..., unique=True): the latter
+    # accepts unique=True but silently drops it at the DDL layer, leaving
+    # ``minecraft_account_id`` non-unique on disk. OneToOneField generates
+    # the same FK plus an actual UNIQUE constraint.
+    minecraft_account: fields.OneToOneNullableRelation[MinecraftAccount] = fields.OneToOneField(
+        "models.MinecraftAccount", related_name="discord_account", null=True, on_delete=fields.SET_NULL
     )
     minecraft_account_id: uuid.UUID | None
 
@@ -130,8 +170,7 @@ class JanitorAlert(Model):
     summary (cogs/maintenance/janitor.py). One row per posted summary; the
     janitor reads the most recent ``created_at`` to decide whether the
     JANITOR_ALERT_DELTA window has elapsed. Mirrors DeadGuildAlert/
-    GuildCapacityAlert exactly. Created automatically by
-    ``Tortoise.generate_schemas()`` in ``init_db`` — no migration."""
+    GuildCapacityAlert exactly."""
 
     id = fields.UUIDField(pk=True)
     created_at = fields.DatetimeField(auto_now_add=True)
@@ -170,8 +209,8 @@ class LinkRequest(Model):
 
 class Waitlist(Model):
     id = fields.UUIDField(pk=True)
-    minecraft_account: fields.ForeignKeyRelation[MinecraftAccount] = fields.ForeignKeyField(
-        "models.MinecraftAccount", related_name="waitlist", on_delete=fields.CASCADE, unique=True
+    minecraft_account: fields.OneToOneRelation[MinecraftAccount] = fields.OneToOneField(
+        "models.MinecraftAccount", related_name="waitlist", on_delete=fields.CASCADE
     )
     created_at = fields.DatetimeField(auto_now_add=True)
 
@@ -185,8 +224,8 @@ class Blocklist(Model):
     """
 
     id = fields.UUIDField(pk=True)
-    minecraft_account: fields.ForeignKeyRelation[MinecraftAccount] = fields.ForeignKeyField(
-        "models.MinecraftAccount", related_name="blocklist", on_delete=fields.CASCADE, unique=True
+    minecraft_account: fields.OneToOneRelation[MinecraftAccount] = fields.OneToOneField(
+        "models.MinecraftAccount", related_name="blocklist", on_delete=fields.CASCADE
     )
     reason: Optional[str] = fields.CharField(max_length=500, null=True)  # type: ignore
     blocked_by_disc_uuid = fields.CharField(max_length=255, null=True)
@@ -367,15 +406,16 @@ class Cult(Model):
 
 class CultMembership(Model):
     """A Discord user's active cult. Mutually exclusive: at most one row per
-    DiscordAccount, enforced by ``unique=True`` on ``discord_account``.
+    DiscordAccount, enforced by the UNIQUE constraint on the
+    ``discord_account`` FK (via OneToOneField).
     """
 
     id = fields.UUIDField(pk=True)
     cult: fields.ForeignKeyRelation[Cult] = fields.ForeignKeyField(
         "models.Cult", related_name="memberships", on_delete=fields.CASCADE
     )
-    discord_account: fields.ForeignKeyRelation[DiscordAccount] = fields.ForeignKeyField(
-        "models.DiscordAccount", related_name="cult_membership", on_delete=fields.CASCADE, unique=True
+    discord_account: fields.OneToOneRelation[DiscordAccount] = fields.OneToOneField(
+        "models.DiscordAccount", related_name="cult_membership", on_delete=fields.CASCADE
     )
     joined_at = fields.DatetimeField(auto_now_add=True)
 
@@ -530,61 +570,128 @@ class StorySegment(Model):
         table = "story_segments"
 
 
-# Database initialization helper
-async def init_db():
-    """Initialise the Tortoise ORM connection.
+def _existing_db_needs_fake_apply(db_path: str) -> bool:
+    """Return True iff the DB file exists, has at least one non-``sqlite_*``
+    non-``aerich`` table, and does NOT have an ``aerich`` tracking table.
 
-    The DB path defaults to the mounted ``/app/data`` volume in the docker
-    deployment so the file survives container recreation
-    (``manage update dazebot``); falls back to a working-dir file for local
-    development. Override with ``DAZEBOT_DB_PATH`` if needed.
+    This is the pre-aerich production-DB state: schema is already correct
+    (every column the models declare is present, because we got here via the
+    legacy ``generate_schemas`` + ``_ensure_added_columns`` path), but aerich
+    has no record of which migrations have been applied. We want to record
+    the initial migration as applied without re-running its CREATE TABLE
+    statements (which would fail with "table already exists"). Detection is
+    read-only (``sqlite_master`` query); the actual fake-apply happens via
+    ``Command.upgrade(fake=True)``.
     """
-    import os
-    from tortoise import Tortoise
+    import sqlite3
 
-    db_path = os.environ.get("DAZEBOT_DB_PATH")
-    if db_path is None:
-        db_path = "/app/data/dazebot.db" if os.path.isdir("/app/data") else "dazebot.db"
+    if not os.path.isfile(db_path):
+        return False
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            cur = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+            names = {row[0] for row in cur.fetchall()}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+    return bool(names - {"aerich"}) and "aerich" not in names
 
-    db_url = f"sqlite://{db_path}"
-    await Tortoise.init(db_url=db_url, modules={"models": ["orm"]})
-    await Tortoise.generate_schemas()
-    await _ensure_added_columns()
 
+def _create_aerich_tracking_table(db_path: str) -> None:
+    """Create the ``aerich`` migration-tracking table directly via sqlite3.
 
-async def _ensure_added_columns() -> None:
-    """Apply schema additions that ``generate_schemas(safe=True)`` skips.
+    Only invoked on the pre-aerich-DB bootstrap path: the initial migration's
+    ``upgrade()`` would create this table as a side effect, but we're about
+    to ``upgrade(fake=True)`` which skips DDL — and ``Aerich.create`` then
+    tries to INSERT into a table that doesn't exist. So we provision it
+    once, by hand, with the same shape ``aerich.models.Aerich`` declares.
 
-    ``Tortoise.generate_schemas`` only ever emits ``CREATE TABLE IF NOT
-    EXISTS``. New *columns* on existing tables therefore need an explicit
-    ``ALTER TABLE`` (see ``.claude/data_model.md``). This helper performs
-    those alters idempotently — it inspects ``PRAGMA table_info`` and only
-    emits ``ALTER TABLE ... ADD COLUMN`` if the column is missing. SQLite's
-    ``ADD COLUMN`` is fast (metadata-only) and safe under WAL.
-
-    Add a new entry below whenever you add a nullable column to an existing
-    model. Removing a column still requires a manual one-shot.
+    Idempotent: ``CREATE TABLE IF NOT EXISTS``. Safe to call on any DB.
     """
-    from tortoise import Tortoise
+    import sqlite3
 
-    # (table, column, sql_type) — sql_type must match what Tortoise would
-    # have generated for the field.
-    added_columns: list[tuple[str, str, str]] = [
-        ("cults", "thread_id", "BIGINT"),
-    ]
-
-    conn = Tortoise.get_connection("default")
-    for table, column, sql_type in added_columns:
-        info = await conn.execute_query_dict(f"PRAGMA table_info({table})")
-        existing = {row["name"] for row in info}
-        if column in existing:
-            continue
-        await conn.execute_script(
-            f"ALTER TABLE {table} ADD COLUMN {column} {sql_type};"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            'CREATE TABLE IF NOT EXISTS "aerich" ('
+            '"id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, '
+            '"version" VARCHAR(255) NOT NULL, '
+            '"app" VARCHAR(100) NOT NULL, '
+            '"content" JSON NOT NULL)'
         )
+        conn.commit()
+    finally:
+        conn.close()
 
 
-# Close connections helper
+async def _fake_apply_initial_migration(app: str) -> None:
+    """Record the ``0_*_init.py`` migration as applied without running its
+    DDL. Used in the pre-aerich-DB bootstrap path so subsequent migrations
+    (which DO need to run, because they add schema not in the legacy
+    ``generate_schemas`` output) execute for real.
+
+    We can't use ``aerich.Command.upgrade(fake=True)`` here because that
+    forwards ``fake=True`` to *every* pending migration, including the
+    backfill migrations we explicitly want applied. Instead, pre-fill the
+    tracking row for the initial migration only; the subsequent normal
+    ``upgrade(fake=False)`` will skip it (already-applied) and run the rest.
+    """
+    from aerich.migrate import Migrate
+    from aerich.models import Aerich
+    from aerich.utils import decompress_dict, get_models_describe, import_py_module
+
+    for vm in sorted(Migrate.get_all_version_modules(), key=lambda v: v.name):
+        if not vm.name.startswith("0_"):
+            continue
+        m = import_py_module(vm)
+        model_state_str = getattr(m, "MODELS_STATE", None)
+        models_state = (
+            decompress_dict(model_state_str) if model_state_str else get_models_describe(app)
+        )
+        await Aerich.create(version=vm.name + ".py", app=app, content=models_state)
+        return
+    raise RuntimeError("No initial 0_*_init.py migration found in migrations/models/")
+
+
+async def init_db():
+    """Initialise Tortoise and apply pending aerich migrations.
+
+    Three branches:
+
+    * **Fresh DB** (file absent, or no model tables) — aerich's ``upgrade``
+      runs every migration's DDL normally.
+    * **Existing pre-aerich DB** (model tables present, ``aerich`` table
+      absent) — provision the tracking table, fake-apply ONLY the initial
+      migration (its DDL would conflict with existing tables), then run
+      ``upgrade`` to apply any follow-up migrations for real. This is
+      where backfill migrations (like
+      ``1_*_backfill_fk_unique_indexes.py``) actually take effect on prod.
+    * **Already-bootstrapped DB** (model tables + ``aerich`` table present)
+      — ``upgrade`` applies any pending follow-up migrations; no-op when
+      up-to-date.
+
+    ``aerich.Command.init`` calls ``Tortoise.init`` internally (guarded by
+    ``Tortoise._inited``), so the connection it opens is the same one the
+    bot uses for queries afterwards.
+    """
+    from aerich import Command
+
+    db_path = _resolve_db_path()
+    needs_fake_apply = _existing_db_needs_fake_apply(db_path)
+    if needs_fake_apply:
+        _create_aerich_tracking_table(db_path)
+
+    command = Command(tortoise_config=_build_tortoise_config(db_path), app="models", location="./migrations")
+    await command.init()
+    if needs_fake_apply:
+        await _fake_apply_initial_migration(command.app)
+    await command.upgrade(fake=False)
+
+
 async def close_db():
     from tortoise import Tortoise
 

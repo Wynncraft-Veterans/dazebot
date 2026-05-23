@@ -114,7 +114,7 @@ Optional: `MC_PUBLIC_HOST` (default `verify.wynnvets.org`), `DEBUG`, `DAZEBOT_DB
 
 ## Schema migrations
 
-There are **none**. `Tortoise.generate_schemas()` runs in `init_db()` and only ever *adds* tables/columns. Removing fields requires either dropping the DB or wiring in Aerich. New tables appear automatically on next boot after the model exists. See [data_model.md](data_model.md).
+Managed by [aerich](https://github.com/tortoise/aerich). Migration files live in [`migrations/models/`](../migrations/models/). `init_db()` applies pending migrations at boot — fresh DBs get the full initial CREATE TABLE pass; pre-aerich production DBs are auto-detected and the initial migration is fake-applied (recorded as applied without re-running DDL). New change: `uv run aerich migrate --name "describe"` then commit the generated file. See [data_model.md](data_model.md).
 
 ## Building / deploying
 
@@ -123,7 +123,7 @@ There are **none**. `Tortoise.generate_schemas()` runs in `init_db()` and only e
 
 ## Things to know
 
-- **No schema migrations.** `Tortoise.generate_schemas()` only adds tables/columns. See [data_model.md](data_model.md) for the consequences.
+- **Schema migrations via aerich.** `init_db()` auto-applies pending migrations on boot. See [data_model.md](data_model.md) for the workflow and the pre-aerich-DB bootstrap path.
 - **Persistent views must be re-registered every boot** in `setup_hook` or buttons silently break on every restart. See [cogs.md](cogs.md).
 - **The membership-state machine is the only safe path to mutate state-roles.** Don't call `member.add_roles(REGISTERED, …)` directly; go through [role_state.md](role_state.md).
 - **Auth-side gotchas** (fail-closed introspection, picolimbo trust model, SQLite single-writer constraint) are in [auth.md](auth.md).

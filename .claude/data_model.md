@@ -2,7 +2,7 @@
 
 Reference for [orm.py](../orm.py) — every table, its purpose, and which subsystem owns it.
 
-DB engine: SQLite at `/app/data/dazebot.db` (production) or `dev.db` at the repo root (local). WAL mode. **No migrations** — `Tortoise.generate_schemas(safe=True)` runs in `init_db()` and only ever emits `CREATE TABLE IF NOT EXISTS`. It does **not** alter existing tables. New tables work automatically; new columns require a one-shot manual `ALTER TABLE`. To remove a field, drop the table or wire in Aerich.
+DB engine: SQLite at `/app/data/dazebot.db` (production) or `dev.db` at the repo root (local). WAL mode. Schema is managed by [aerich](https://github.com/tortoise/aerich) — migrations live in [migrations/models/](../migrations/models/) and are applied automatically at boot by `init_db()`. Adding/renaming/removing columns is supported via `uv run aerich migrate --name "..."`; see "When to add a new table" below.
 
 ## Identity
 
@@ -89,13 +89,25 @@ DiscordAccount ──disc_uuid─► VerifyKey (1:1, unique on disc_uuid)
 LinkCode (no FK; matched by mc_username + code at consume time)
 ```
 
-## When to add a new table
+## Changing the schema
 
-`init_db()` calls `Tortoise.generate_schemas(safe=True)` which only emits `CREATE TABLE IF NOT EXISTS`. Existing tables are completely untouched — no `ALTER TABLE` is ever issued. So:
+All changes — new tables, new columns, renames, removals — go through aerich:
 
-- **Adding a table?** Add the model, restart the bot, you're done.
-- **Adding a column?** Tortoise will *not* add it for you. The model will reference a column that doesn't exist, every query that selects it will fail (`OperationalError: no such column`), and every `.save()` on that table will then fail with `IncompleteInstanceError` because Tortoise falls back to partial-loading. You MUST run `ALTER TABLE <table> ADD COLUMN <name> <type>;` on every DB (production + every dev DB) before deploying the model change. Use the canonical type Tortoise would have generated — inspect via `Tortoise.get_connection('default').schema_generator(conn).get_create_schema_sql(safe=True)`.
-- **Renaming a column?** Doesn't work via `generate_schemas`. Either drop the table or write a one-shot migration script. Aerich is in the dependency tree but not wired up.
-- **Removing a column?** Same — either ignore it (the column lingers) or do a manual schema bump.
+1. Edit the model in [`orm.py`](../orm.py).
+2. `uv run aerich migrate --name "describe_change"` — generates a new file under `migrations/models/`.
+3. Inspect the generated file (`upgrade()` and `downgrade()` SQL); commit it.
+4. Restart the bot; `init_db()` applies pending migrations automatically.
+
+`init_db()` (in [`orm.py`](../orm.py)) handles three states:
+
+- **Fresh DB** (file absent / no model tables): `aerich.Command.upgrade()` runs the initial migration's `CREATE TABLE`s normally.
+- **Existing pre-aerich DB** (model tables present, no `aerich` table): `_create_aerich_tracking_table` provisions the tracking table, then `upgrade(fake=True)` records the initial migration as applied without re-running its DDL. This is the one-time bootstrap path on first deploy after this rollout.
+- **Already-bootstrapped DB**: `upgrade()` applies any pending follow-up migrations; no-op when up-to-date.
+
+The detection is read-only (`sqlite_master` query) and the fake-apply path is idempotent. If you want to inspect manually:
+
+```bash
+docker exec dazebot sqlite3 /app/data/dazebot.db 'SELECT version, app FROM aerich;'
+```
 
 Production safety: The `dazebot.db-wal` sidecar can hold uncommitted writes if the container exits via SIGKILL. `runtime_config.set_override` issues a `PRAGMA wal_checkpoint(TRUNCATE)` after every write to mitigate this. Other write-heavy cogs *should* but don't always do the same; on a restart-during-write you may see a small recent change "rollback".

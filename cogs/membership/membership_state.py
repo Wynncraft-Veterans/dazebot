@@ -763,31 +763,32 @@ class MembershipState(commands.Cog):
                 last_online__gt=UNKNOWN_LAST_ONLINE + timedelta(days=1),
             ).prefetch_related("discord_account")
             for mc in members:
-                disc_list = await mc.discord_account.all()
-                for d in disc_list:
-                    member = guild.get_member(int(d.disc_uuid))
-                    if member is None:
+                d = await DiscordAccount.get_or_none(minecraft_account_id=mc.id)
+                if d is None:
+                    continue
+                member = guild.get_member(int(d.disc_uuid))
+                if member is None:
+                    continue
+                # DM warning, no role change.
+                existing = await DMSentLog.filter(
+                    disc_uuid=str(member.id), kind="member_inactivity"
+                ).first()
+                if existing is not None:
+                    # Already warned in the last cycle window; refresh after 30 days.
+                    if (datetime.now(timezone.utc) - existing.sent_at) < timedelta(days=30):
                         continue
-                    # DM warning, no role change.
-                    existing = await DMSentLog.filter(
-                        disc_uuid=str(member.id), kind="member_inactivity"
-                    ).first()
-                    if existing is not None:
-                        # Already warned in the last cycle window; refresh after 30 days.
-                        if (datetime.now(timezone.utc) - existing.sent_at) < timedelta(days=30):
-                            continue
-                        await existing.delete()
-                    try:
-                        dm = await member.create_dm()
-                        await dm.send(
-                            f"Hi {member.display_name}! You've been inactive in VETS for "
-                            f"{int(CurrConfig.INACTIVITY_MEMBER_DAYS)}+ days.\n\n"
-                            "Inactive slots are a strain on the guild — if you don't plan on returning soon, "
-                            "consider stepping down. You can always rejoin at any time when you get back!"
-                        )
-                        await DMSentLog.create(disc_uuid=str(member.id), kind="member_inactivity")
-                    except discord.Forbidden:
-                        logger.info(f"inactivity DM blocked for {member}")
+                    await existing.delete()
+                try:
+                    dm = await member.create_dm()
+                    await dm.send(
+                        f"Hi {member.display_name}! You've been inactive in VETS for "
+                        f"{int(CurrConfig.INACTIVITY_MEMBER_DAYS)}+ days.\n\n"
+                        "Inactive slots are a strain on the guild — if you don't plan on returning soon, "
+                        "consider stepping down. You can always rejoin at any time when you get back!"
+                    )
+                    await DMSentLog.create(disc_uuid=str(member.id), kind="member_inactivity")
+                except discord.Forbidden:
+                    logger.info(f"inactivity DM blocked for {member}")
 
 
 async def setup(bot: Bot):

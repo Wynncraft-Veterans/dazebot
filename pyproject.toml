@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "aerich>=0.8",
     "aiohttp>=3.13.0",
     "aiosqlite>=0.21.0",
     "dateparser>=1.2.2",
@@ -32,3 +33,8 @@ line-length = 120
 testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["."]
+
+[tool.aerich]
+tortoise_orm = "orm.TORTOISE_ORM"
+location = "./migrations"
+src_folder = "./."

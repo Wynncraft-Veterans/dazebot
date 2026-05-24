@@ -28,9 +28,11 @@ from lib.discord_utils.first_install_view import post_fallback_completion
 from lib.mc import mojang as mc
 from lib.mc.linking import dm_or_log, try_consume_code
 from lib.mc.wynn_api.errors import WynnApiError
+from lib.role_state import RoleState, state_of
 from lib.staff import staff_actions
 from lib.staff.rank_alerts import post_rank_alert
 from lib.staff.verify_keys import _find_member, introspect, resolve_tier
+from orm import Blocklist, DiscordAccount, VerifyKey
 
 if TYPE_CHECKING:
     from bot import Bot
@@ -359,6 +361,129 @@ def create_app(bot: Bot) -> FastAPI:
                 }
                 for r in rows
             ],
+        }
+
+    @app.get("/api/internal/check-snapshot/{name_or_uuid}")
+    async def check_snapshot(
+        name_or_uuid: str,
+        x_introspect_secret: str | None = Header(default=None),
+    ):
+        """Return a membership snapshot for a Minecraft player by name or UUID.
+
+        Used by vetsmod's ``/wv check`` (forwarded via ``temporary-server``)
+        to render Discord-link / tier / blocklist / vetsmod-key status in
+        one chat response. Read-only; all fields derived from existing DB
+        rows + live Discord role state.
+
+        Response::
+
+            {
+              "target_uuid":   str,
+              "target_username": str,
+              "discord": {
+                "linked":              bool,
+                "disc_uuid":           str | null,
+                "disc_display":        str | null,   # best-effort
+                "tier":                str | null,   # member|waitlist|honourary|other
+                "waitlisted_modifier": bool,         # RoleState.WAITLISTED
+                "hiatus":              bool,         # RoleState.HIATUS
+                "in_guild":            bool          # false = link exists but left vetscord
+              },
+              "stage_2_active":      bool,           # vetsmod key tied to this MC
+              "blocklisted":         bool,
+              "blocklist_reason":    str | null,
+              "in_returners_guild":  bool            # MinecraftAccount.guild == "Returners"
+            }
+
+        ``404`` when the target cannot be resolved (no MinecraftAccount,
+        Wynncraft API doesn't recognise them either).
+        """
+        expected = os.environ.get("DAZEBOT_INTROSPECT_SECRET")
+        if not expected:
+            logger.error(
+                "check_snapshot: DAZEBOT_INTROSPECT_SECRET not set; refusing"
+            )
+            raise HTTPException(status_code=503, detail="check-snapshot disabled")
+        if x_introspect_secret != expected:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+        try:
+            target_uuid, canonical, mc_row = await staff_actions.resolve_target(name_or_uuid)
+        except WynnApiError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"could not resolve target {name_or_uuid!r}: {exc.message}",
+            )
+        except Exception:  # noqa: BLE001 - third-party API
+            logger.exception("check_snapshot: resolve failed")
+            raise HTTPException(status_code=502, detail="resolve failed")
+
+        # Discord-link snapshot. A resolved MC may have no DiscordAccount;
+        # an existing link's user may have left vetscord (in_guild=False).
+        disc_row = await DiscordAccount.filter(minecraft_account=mc_row).first()
+        if disc_row is None:
+            discord_payload = {
+                "linked": False,
+                "disc_uuid": None,
+                "disc_display": None,
+                "tier": None,
+                "waitlisted_modifier": False,
+                "hiatus": False,
+                "in_guild": False,
+            }
+        else:
+            disc_uuid_str = disc_row.disc_uuid
+            try:
+                disc_uuid_int: int | None = int(disc_uuid_str)
+            except (TypeError, ValueError):
+                disc_uuid_int = None
+            member = _find_member(bot, disc_uuid_int) if disc_uuid_int is not None else None
+            in_guild = member is not None
+            if member is not None:
+                resolved = await resolve_tier(member)
+                tier = resolved.tier
+                state = state_of(member)
+                waitlisted_modifier = RoleState.WAITLISTED in state
+                hiatus = RoleState.HIATUS in state
+                disc_display: str | None = member.display_name
+            else:
+                tier = None
+                waitlisted_modifier = False
+                hiatus = False
+                disc_display = None
+                if disc_uuid_int is not None:
+                    user = bot.get_user(disc_uuid_int)
+                    if user is None:
+                        try:
+                            user = await bot.fetch_user(disc_uuid_int)
+                        except Exception:  # noqa: BLE001 - best-effort only
+                            user = None
+                    if user is not None:
+                        disc_display = user.name
+            discord_payload = {
+                "linked": True,
+                "disc_uuid": disc_uuid_str,
+                "disc_display": disc_display,
+                "tier": tier,
+                "waitlisted_modifier": waitlisted_modifier,
+                "hiatus": hiatus,
+                "in_guild": in_guild,
+            }
+
+        stage_2_active = await VerifyKey.filter(
+            mc_uuid=target_uuid, revoked_at__isnull=True
+        ).exists()
+
+        block_row = await Blocklist.filter(minecraft_account=mc_row).first()
+
+        return {
+            "target_uuid": target_uuid,
+            "target_username": canonical,
+            "discord": discord_payload,
+            "stage_2_active": stage_2_active,
+            "blocklisted": block_row is not None,
+            "blocklist_reason": block_row.reason if block_row is not None else None,
+            "in_returners_guild": mc_row.guild == "Returners",
         }
 
     @app.post("/api/internal/anni-identity")

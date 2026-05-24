@@ -22,17 +22,27 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
+import discord
 from fastapi import Body, FastAPI, Header, HTTPException
 
 from lib.discord_utils.first_install_view import post_fallback_completion
 from lib.mc import mojang as mc
 from lib.mc.linking import dm_or_log, try_consume_code
+from lib.mc.resolve import refresh_mc_guild
 from lib.mc.wynn_api.errors import WynnApiError
-from lib.role_state import RoleState, state_of
+from lib.role_state import RoleState, ensure_linked_baseline, state_of
 from lib.staff import staff_actions
 from lib.staff.rank_alerts import post_rank_alert
 from lib.staff.verify_keys import _find_member, introspect, resolve_tier
-from orm import Blocklist, Cult, CultMembership, DiscordAccount, VerifyKey, Waitlist
+from orm import (
+    Blocklist,
+    Cult,
+    CultMembership,
+    DiscordAccount,
+    VerifyKey,
+    Waitlist,
+    is_last_online_unknown,
+)
 
 if TYPE_CHECKING:
     from bot import Bot
@@ -397,6 +407,11 @@ def create_app(bot: Bot) -> FastAPI:
               "cult": {                              # null when not in any cult
                 "name":          str,
                 "is_figurehead": bool                # owns the cult (vs just a member)
+              },
+              "last_seen_observed": {                # server_watcher best-guess
+                "ts":                    int,        # unix seconds; 0 = never observed
+                "server_at_observation": str | null,
+                "observed_at":           int | null
               }
             }
 
@@ -423,9 +438,41 @@ def create_app(bot: Bot) -> FastAPI:
             logger.exception("check_snapshot: resolve failed")
             raise HTTPException(status_code=502, detail="resolve failed")
 
-        # Discord-link snapshot. A resolved MC may have no DiscordAccount;
-        # an existing link's user may have left vetscord (in_guild=False).
+        # /wv check is interactive and rare; staff are explicitly asking
+        # "what's the freshest snapshot we can give?". Refresh mc.guild
+        # from live Wynncraft (no periodic path clears a stale guild --
+        # see refresh_mc_guild docstring), then reconcile Discord roles
+        # against it. This is what fixes stale HIATUS for a member who
+        # rejoined Returners before the next janitor pass.
+        await refresh_mc_guild(mc_row)
         disc_row = await DiscordAccount.filter(minecraft_account=mc_row).first()
+        if disc_row is not None:
+            try:
+                disc_uuid_int_pre: int | None = int(disc_row.disc_uuid)
+            except (TypeError, ValueError):
+                disc_uuid_int_pre = None
+            member_pre = (
+                _find_member(bot, disc_uuid_int_pre)
+                if disc_uuid_int_pre is not None else None
+            )
+            if member_pre is not None:
+                blocked_pre = await Blocklist.filter(minecraft_account=mc_row).exists()
+                try:
+                    await ensure_linked_baseline(
+                        member_pre,
+                        in_returners=(mc_row.guild == "Returners"),
+                        in_other_guild=(
+                            mc_row.guild is not None and mc_row.guild != "Returners"
+                        ),
+                        blocked=blocked_pre,
+                        reason=f"/wv check refresh for {canonical}",
+                    )
+                except discord.HTTPException as e:
+                    # Fall through with stale state rather than 5xx the check.
+                    logger.warning(
+                        "check_snapshot: ensure_linked_baseline failed for %s: %s",
+                        canonical, e,
+                    )
         if disc_row is None:
             discord_payload = {
                 "linked": False,
@@ -503,6 +550,23 @@ def create_app(bot: Bot) -> FastAPI:
             if cult_mem is not None and cult_mem.cult is not None:
                 cult_payload = {"name": cult_mem.cult.name, "is_figurehead": False}
 
+        # Best-guess "last observed online" derived from server_watcher.
+        # For API-disabled players (mc.last_online == epoch sentinel),
+        # ts is 0 and the renderer falls back to `(hidden)`. For everyone
+        # else (including privacy-on players whose server-field flapped
+        # since their last poll), this is the freshest signal we have.
+        last_seen_observed_payload = {
+            "ts": (
+                0 if is_last_online_unknown(mc_row.last_online)
+                else int(mc_row.last_online.timestamp())
+            ),
+            "server_at_observation": mc_row.last_seen_server,
+            "observed_at": (
+                int(mc_row.server_observed_at.timestamp())
+                if mc_row.server_observed_at is not None else None
+            ),
+        }
+
         return {
             "target_uuid": target_uuid,
             "target_username": canonical,
@@ -513,6 +577,7 @@ def create_app(bot: Bot) -> FastAPI:
             "in_returners_guild": mc_row.guild == "Returners",
             "waitlist_count": waitlist_count,
             "cult": cult_payload,
+            "last_seen_observed": last_seen_observed_payload,
         }
 
     @app.post("/api/internal/anni-identity")

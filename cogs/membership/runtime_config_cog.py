@@ -117,7 +117,7 @@ class RuntimeConfigCog(commands.Cog):
     )
     async def alerts_status(self, ctx: commands.Context):
         dead_when = runtime_config.get_value("GUILD_DEAD_WHEN")
-        full_when = runtime_config.get_value("GUILD_FULL_WHEN")
+        full_slots_remaining = runtime_config.get_value("GUILD_FULL_SLOTS_REMAINING")
         dead_delta = runtime_config.get_value("GUILD_DEAD_ALERT_DELTA")
         full_delta = runtime_config.get_value("GUILD_FULL_ALERT_DELTA")
         hiatus_enabled = runtime_config.get_value("HIATUS_ALERTS_ENABLED")
@@ -130,8 +130,8 @@ class RuntimeConfigCog(commands.Cog):
             "**Guild alert config**\n"
             f"• Dead alert: fires when online ≤ `{dead_when}`, "
             f"throttled `{dead_delta}`{_muted(dead_delta)}\n"
-            f"• Full alert: fires when members ≥ `{full_when}`, "
-            f"throttled `{full_delta}`{_muted(full_delta)}\n"
+            f"• Full alert: fires when ≤ `{full_slots_remaining}` slot(s) remain "
+            f"(cap derived from guild level), throttled `{full_delta}`{_muted(full_delta)}\n"
             f"• Hiatus-spotted alert: {hiatus_state} (24h per-user cooldown)"
         )
 
@@ -194,29 +194,29 @@ class RuntimeConfigCog(commands.Cog):
 
     @alerts_group.command(
         name="thresholds",
-        description="Set dead-when (online <=) and full-when (members >=) thresholds.",
+        description="Set dead-when (online <=) and full-slots-remaining (n) thresholds.",
     )
     @app_commands.describe(
         dead_when="Online-player count at or below which the dead alert fires.",
-        full_when="Member count at or above which the full alert fires.",
+        full_slots_remaining="Open-slot count at or below which the full alert fires. Cap is derived per-tick from guild level.",
     )
     async def alerts_thresholds(
         self,
         ctx: commands.Context,
         dead_when: Optional[int] = None,
-        full_when: Optional[int] = None,
+        full_slots_remaining: Optional[int] = None,
     ):
-        if dead_when is None and full_when is None:
-            await ctx.reply("Provide at least one of `dead_when` or `full_when`.")
+        if dead_when is None and full_slots_remaining is None:
+            await ctx.reply("Provide at least one of `dead_when` or `full_slots_remaining`.")
             return
         changes: list[str] = []
         try:
             if dead_when is not None:
                 v = await runtime_config.set_override("GUILD_DEAD_WHEN", str(dead_when))
                 changes.append(f"`GUILD_DEAD_WHEN` = `{v}`")
-            if full_when is not None:
-                v = await runtime_config.set_override("GUILD_FULL_WHEN", str(full_when))
-                changes.append(f"`GUILD_FULL_WHEN` = `{v}`")
+            if full_slots_remaining is not None:
+                v = await runtime_config.set_override("GUILD_FULL_SLOTS_REMAINING", str(full_slots_remaining))
+                changes.append(f"`GUILD_FULL_SLOTS_REMAINING` = `{v}`")
         except (KeyError, PermissionError, ValueError) as e:
             await ctx.reply(f"❌ {e}")
             return

@@ -103,7 +103,8 @@ class Config:
 
     GUILD_FULL_ALERT_ROLE = 1313778812361904188
     GUILD_DEAD_WHEN = 2
-    GUILD_FULL_WHEN = 92 - 1
+    # Alert fires when ≤ this many slots remain. Cap is derived per-tick from guild.level via get_max_guild_members.
+    GUILD_FULL_SLOTS_REMAINING = 2
     GUILD_DEAD_ALERT_DELTA = timedelta(hours=4)
     GUILD_FULL_ALERT_DELTA = timedelta(hours=8)
 
@@ -159,7 +160,8 @@ class DevConfig(Config):
     JANITOR_ALERT_CHANNEL = 1407388410393399494  # general (never post into prod from dev)
     GUILD_FULL_ALERT_ROLE = 1409300773439012874  # @aaaaa
     GUILD_DEAD_WHEN = 10
-    GUILD_FULL_WHEN = 10
+    # n is huge so threshold = max-n <= 0; the test guild always triggers the full-alert path.
+    GUILD_FULL_SLOTS_REMAINING = 100
     ADMINS = {
         174134334628823041  # @sjourd
     }

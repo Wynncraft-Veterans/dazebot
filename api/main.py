@@ -32,7 +32,7 @@ from lib.role_state import RoleState, state_of
 from lib.staff import staff_actions
 from lib.staff.rank_alerts import post_rank_alert
 from lib.staff.verify_keys import _find_member, introspect, resolve_tier
-from orm import Blocklist, DiscordAccount, VerifyKey, Waitlist
+from orm import Blocklist, Cult, CultMembership, DiscordAccount, VerifyKey, Waitlist
 
 if TYPE_CHECKING:
     from bot import Bot
@@ -393,7 +393,11 @@ def create_app(bot: Bot) -> FastAPI:
               "blocklisted":         bool,
               "blocklist_reason":    str | null,
               "in_returners_guild":  bool,           # MinecraftAccount.guild == "Returners"
-              "waitlist_count":      int             # total Waitlist rows (guild-wide stat)
+              "waitlist_count":      int,            # total Waitlist rows (guild-wide stat)
+              "cult": {                              # null when not in any cult
+                "name":          str,
+                "is_figurehead": bool                # owns the cult (vs just a member)
+              }
             }
 
         ``404`` when the target cannot be resolved (no MinecraftAccount,
@@ -482,6 +486,23 @@ def create_app(bot: Bot) -> FastAPI:
         # round-trip. Cheap: indexed COUNT(*) over a small table.
         waitlist_count = await Waitlist.all().count()
 
+        # /return 0 cult affiliation. Ownership (figurehead) is keyed on
+        # MinecraftAccount; membership is keyed on DiscordAccount (and is
+        # one-to-one per the OneToOne FK). Prefer the owned cult when both
+        # exist -- figurehead label is the more informative one.
+        cult_payload = None
+        owned_cult = await Cult.filter(owner=mc_row).first()
+        if owned_cult is not None:
+            cult_payload = {"name": owned_cult.name, "is_figurehead": True}
+        elif disc_row is not None:
+            cult_mem = (
+                await CultMembership.filter(discord_account=disc_row)
+                .select_related("cult")
+                .first()
+            )
+            if cult_mem is not None and cult_mem.cult is not None:
+                cult_payload = {"name": cult_mem.cult.name, "is_figurehead": False}
+
         return {
             "target_uuid": target_uuid,
             "target_username": canonical,
@@ -491,6 +512,7 @@ def create_app(bot: Bot) -> FastAPI:
             "blocklist_reason": block_row.reason if block_row is not None else None,
             "in_returners_guild": mc_row.guild == "Returners",
             "waitlist_count": waitlist_count,
+            "cult": cult_payload,
         }
 
     @app.post("/api/internal/anni-identity")

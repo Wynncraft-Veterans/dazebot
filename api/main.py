@@ -32,7 +32,7 @@ from lib.role_state import RoleState, state_of
 from lib.staff import staff_actions
 from lib.staff.rank_alerts import post_rank_alert
 from lib.staff.verify_keys import _find_member, introspect, resolve_tier
-from orm import Blocklist, DiscordAccount, VerifyKey
+from orm import Blocklist, DiscordAccount, VerifyKey, Waitlist
 
 if TYPE_CHECKING:
     from bot import Bot
@@ -392,7 +392,8 @@ def create_app(bot: Bot) -> FastAPI:
               "stage_2_active":      bool,           # vetsmod key tied to this MC
               "blocklisted":         bool,
               "blocklist_reason":    str | null,
-              "in_returners_guild":  bool            # MinecraftAccount.guild == "Returners"
+              "in_returners_guild":  bool,           # MinecraftAccount.guild == "Returners"
+              "waitlist_count":      int             # total Waitlist rows (guild-wide stat)
             }
 
         ``404`` when the target cannot be resolved (no MinecraftAccount,
@@ -476,6 +477,11 @@ def create_app(bot: Bot) -> FastAPI:
 
         block_row = await Blocklist.filter(minecraft_account=mc_row).first()
 
+        # Guild-wide stat included on every per-target snapshot so vetsmod's
+        # /gu invite gate can decide "do we have room?" without a second
+        # round-trip. Cheap: indexed COUNT(*) over a small table.
+        waitlist_count = await Waitlist.all().count()
+
         return {
             "target_uuid": target_uuid,
             "target_username": canonical,
@@ -484,6 +490,7 @@ def create_app(bot: Bot) -> FastAPI:
             "blocklisted": block_row is not None,
             "blocklist_reason": block_row.reason if block_row is not None else None,
             "in_returners_guild": mc_row.guild == "Returners",
+            "waitlist_count": waitlist_count,
         }
 
     @app.post("/api/internal/anni-identity")

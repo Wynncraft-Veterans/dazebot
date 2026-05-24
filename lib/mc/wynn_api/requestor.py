@@ -1,9 +1,11 @@
 """Singleton aiohttp client for the Wynncraft v3 API.
 
-Maintains two priority queues (normal + priority) and respects the
-upstream ``RateLimit-*`` headers, falling back to a defensive 1s sleep
-when they're missing. ``get0`` pushes a request to the front of the
-priority queue.
+Maintains three priority queues (priority > normal > background) and
+respects the upstream ``RateLimit-*`` headers, falling back to a
+defensive 1s sleep when they're missing. ``get0`` pushes a request to
+the front of the priority queue; ``get_background`` pushes to the
+background queue, which only drains when both higher-priority queues
+are empty.
 """
 
 import asyncio
@@ -31,6 +33,7 @@ class Requestor(metaclass=SingletonMeta):
     def __init__(self):
         self.deq: collections.deque[tuple[UUID, str, dict[str, Any]]] = collections.deque()
         self.prio_deq: collections.deque[tuple[UUID, str, dict[str, Any]]] = collections.deque()
+        self.background_deq: collections.deque[tuple[UUID, str, dict[str, Any]]] = collections.deque()
         self.out: dict[UUID, ClientResponse] = {}
         self._session: Optional[aiohttp.ClientSession] = None
         self._task: Optional[asyncio.Task] = None
@@ -67,12 +70,16 @@ class Requestor(metaclass=SingletonMeta):
     async def _loop(self):
         session = await self._get_session()
         while True:
-            if (not self.deq) and (not self.prio_deq):
+            if (not self.deq) and (not self.prio_deq) and (not self.background_deq):
                 # check 20 times a second
                 # TODO: maybe replace with asyncio.Event? idk, too lazy to check it out
                 await asyncio.sleep(1 / 20)
                 continue
-            deq = self.prio_deq or self.deq
+            # Strict priority fallthrough: prio first, then normal, then
+            # background. A non-empty higher tier always preempts lower
+            # tiers, so background requests can only drain in the gaps
+            # between higher-priority work.
+            deq = self.prio_deq or self.deq or self.background_deq
             # probe a single request first, to get current ratelimit capacity (completes first request in line)
             uuid, url, kwargs = deq.popleft()
             probe = await self._probe(url, **kwargs)
@@ -133,6 +140,11 @@ class Requestor(metaclass=SingletonMeta):
         self.prio_deq.append((uuid, url, kwargs))
         return uuid
 
+    async def _add_request_background(self, url: str, **kwargs: Any) -> UUID:
+        uuid = uuid4()
+        self.background_deq.append((uuid, url, kwargs))
+        return uuid
+
     # TODO: could probably use res.headers.Expires to also cache locally, but meh, it's unlikely we'll request cached data very often
     async def get(self, url: str, **kwargs: Any) -> ClientResponse:
         await self._ensure_loop()
@@ -150,6 +162,21 @@ class Requestor(metaclass=SingletonMeta):
         await self._ensure_loop()
 
         uuid = await self._add_request_important(url, **kwargs)
+        while uuid not in self.out:
+            await asyncio.sleep(1 / 20)
+
+        res = self.out.pop(uuid)
+
+        return res
+
+    # get, but enqueue at the lowest priority tier. Drains only when no
+    # higher-priority calls are pending. Used for opportunistic polls
+    # (e.g. hiatus-user server-transition inference) that must yield to
+    # the existing Unknown-bucket scope.
+    async def get_background(self, url: str, **kwargs: Any) -> ClientResponse:
+        await self._ensure_loop()
+
+        uuid = await self._add_request_background(url, **kwargs)
         while uuid not in self.out:
             await asyncio.sleep(1 / 20)
 

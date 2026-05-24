@@ -371,3 +371,38 @@ async def ensure_linked_baseline(
         "ensure_linked_baseline: %s (%s) +%s -%s",
         member, member.id, [r.name for r in add_roles], [r.name for r in rem_roles],
     )
+
+
+async def hiatus_member_uuids(bot) -> set[str]:
+    """Resolve every MC UUID (primary + alts) belonging to a Discord user
+    in the configured guild who currently holds the HIATUS role.
+
+    Returns an empty set if the guild isn't cached yet (callers polling
+    in a ``tasks.loop`` should gate on ``wait_until_ready`` first) or no
+    HIATUS members are present. Walks both the primary-link path on
+    ``DiscordAccount`` and the ``MinecraftAlt`` table so a hiatus user
+    with multiple linked MC accounts is fully covered.
+    """
+    from orm import DiscordAccount, MinecraftAlt  # local: orm may import lib
+
+    guild = bot.get_guild(bot.config.GUILD)
+    if guild is None:
+        return set()
+    hiatus_role_id = bot.config.ROLE_HIATUS
+    disc_uuids = [
+        str(m.id) for m in guild.members
+        if any(r.id == hiatus_role_id for r in m.roles)
+    ]
+    if not disc_uuids:
+        return set()
+    discs = await DiscordAccount.filter(
+        disc_uuid__in=disc_uuids
+    ).select_related("minecraft_account")
+    alts = await MinecraftAlt.filter(
+        discord_account__disc_uuid__in=disc_uuids
+    ).select_related("minecraft_account")
+    out: set[str] = {
+        d.minecraft_account.uuid for d in discs if d.minecraft_account is not None
+    }
+    out.update(a.minecraft_account.uuid for a in alts)
+    return out

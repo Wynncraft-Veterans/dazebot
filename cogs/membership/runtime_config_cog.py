@@ -101,34 +101,38 @@ class RuntimeConfigCog(commands.Cog):
 
     # ---------- /alerts (shortcuts on top of /config for the guild dead/full alerts) ----------
 
-    @commands.hybrid_group(name="alerts", description="(Admin) Mute / unmute / tune guild dead+full alerts.")
+    @commands.hybrid_group(name="alerts", description="(Admin) Mute / unmute / tune guild dead+full+hiatus alerts.")
     @is_admin()
     async def alerts_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
             await ctx.reply(
                 "Use `/alerts status`, `/alerts mute [duration_hours]`, `/alerts unmute`, "
-                "`/alerts thresholds <dead_when> <full_when>`."
+                "`/alerts thresholds <dead_when> <full_when>`, "
+                "`/alerts hiatus_mute`, `/alerts hiatus_unmute`."
             )
 
     @alerts_group.command(
         name="status",
-        description="Show current dead/full alert thresholds and throttle deltas.",
+        description="Show current dead/full alert thresholds, throttle deltas, and hiatus alert state.",
     )
     async def alerts_status(self, ctx: commands.Context):
         dead_when = runtime_config.get_value("GUILD_DEAD_WHEN")
         full_when = runtime_config.get_value("GUILD_FULL_WHEN")
         dead_delta = runtime_config.get_value("GUILD_DEAD_ALERT_DELTA")
         full_delta = runtime_config.get_value("GUILD_FULL_ALERT_DELTA")
+        hiatus_enabled = runtime_config.get_value("HIATUS_ALERTS_ENABLED")
 
         def _muted(delta: timedelta) -> str:
             return " ⛔ muted" if delta.total_seconds() >= 365 * 24 * 3600 else ""
 
+        hiatus_state = "🔊 enabled" if hiatus_enabled else "🔇 muted"
         await ctx.reply(
             "**Guild alert config**\n"
             f"• Dead alert: fires when online ≤ `{dead_when}`, "
             f"throttled `{dead_delta}`{_muted(dead_delta)}\n"
             f"• Full alert: fires when members ≥ `{full_when}`, "
-            f"throttled `{full_delta}`{_muted(full_delta)}"
+            f"throttled `{full_delta}`{_muted(full_delta)}\n"
+            f"• Hiatus-spotted alert: {hiatus_state} (24h per-user cooldown)"
         )
 
     @alerts_group.command(
@@ -159,6 +163,34 @@ class RuntimeConfigCog(commands.Cog):
             "Compiled defaults take effect after the next bot restart; "
             "the running process keeps the muted values until then."
         )
+
+    @alerts_group.command(
+        name="hiatus_mute",
+        description="Silence hiatus-spotted alerts (stops the bulk /v3/player poll too).",
+    )
+    async def alerts_hiatus_mute(self, ctx: commands.Context):
+        try:
+            await runtime_config.set_override("HIATUS_ALERTS_ENABLED", "false")
+        except (KeyError, PermissionError, ValueError) as e:
+            await ctx.reply(f"❌ {e}")
+            return
+        await ctx.reply(
+            "🔇 Muted hiatus-spotted alerts. The bulk-endpoint poll is suspended; "
+            "the server_watcher HIATUS scope continues writing activity data but "
+            "won't post alerts. Use `/alerts hiatus_unmute` to restore."
+        )
+
+    @alerts_group.command(
+        name="hiatus_unmute",
+        description="Re-enable hiatus-spotted alerts.",
+    )
+    async def alerts_hiatus_unmute(self, ctx: commands.Context):
+        try:
+            await runtime_config.set_override("HIATUS_ALERTS_ENABLED", "true")
+        except (KeyError, PermissionError, ValueError) as e:
+            await ctx.reply(f"❌ {e}")
+            return
+        await ctx.reply("🔊 Re-enabled hiatus-spotted alerts.")
 
     @alerts_group.command(
         name="thresholds",

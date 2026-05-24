@@ -15,7 +15,8 @@ server values, infers in-interval activity and bumps ``last_online =
 now``. The existing ``/purgelist`` logic then surfaces them out of the
 Unknown section.
 
-Scope is **Returners *and* waitlisted accounts**. Returners is the
+Scope is **Returners *and* waitlisted accounts** at normal priority,
+**and HIATUS-role accounts at background priority**. Returners is the
 original Unknown-bucket use case; waitlisted accounts were added because
 ``waitlist_cleanup`` no longer purges the sentinel (an API-hidden
 waitlisted player would otherwise sit at epoch forever, untracked) — this
@@ -23,16 +24,40 @@ watch is their only path to a real ``last_online`` and thus to the normal
 inactivity rule. The waitlist is small, so the extra rows are a rounding
 error against the rate budget below.
 
+HIATUS-role accounts (ex-members, currently guildless) were added so a
+"hiatus user is online" alert fires even when the bulk ``/v3/player``
+endpoint can't see them (privacy-hidden ``onlineStatus``). They poll via
+the Requestor's background queue, which only drains when no normal- or
+priority-tier requests are pending — so this scope can never starve the
+existing Unknown-bucket polls or interactive lookups. A 120s TTL guard
+on ``server_observed_at`` further prevents us from spending a background
+slot on a guaranteed upstream cache hit. Two layers of "background only
+when no useful normal work pending" are in effect:
+
+  1. Cog-level: ``poll()`` ``await``s the normal-tier ``gather`` to
+     completion before enqueuing any background calls. Within one tick
+     of this cog, background never runs alongside foreground.
+  2. Requestor-level: ``prio_deq → deq → background_deq`` strict
+     fallthrough. Even if another cog enqueues a normal call while our
+     background calls are in flight, the Requestor still drains higher
+     tiers first on every subsequent loop iteration.
+
+Successful detections funnel through
+``lib/mc/hiatus_alerts.maybe_alert_hiatus`` (24h per-UUID cooldown,
+``HIATUS_ALERTS_ENABLED`` kill-switch). The DB writes on
+``last_online``/``server_observed_at`` continue regardless of the alert
+toggle since they feed other features (purgelist, /info, etc.).
+
 First observation just records the baseline; we cannot date a change we
 have not yet seen happen. Asymmetric transitions involving ``None``
 (``EU37 → None`` or ``None → EU37``) are treated as state-only
 observations because a privacy toggle is at least as plausible as real
 activity.
 
-Cadence: 3 minutes. The PLAYER bucket is 50 req/45s with a 120s upstream
-cache TTL. Polling at 180s guarantees uncached responses (no
-cache-thrashing waste) while leaving >95% of the bucket free for
-interactive lookups.
+Cadence: 2 minutes — exactly the upstream cache TTL. Each tick all
+Unknown-bucket candidates draw fresh data; polling faster would hit the
+shared cache. PLAYER bucket is 50/60s, so per-tick spend (N_unknown +
+the optional HIATUS background pass) sits well under bucket capacity.
 """
 
 from __future__ import annotations
@@ -45,7 +70,9 @@ from discord.ext import commands, tasks
 from tortoise.expressions import Q
 
 from bot import Bot
+from lib.mc.hiatus_alerts import maybe_alert_hiatus
 from lib.mc.wynn_api.player import get_player_stats
+from lib.role_state import hiatus_member_uuids
 from orm import UNKNOWN_LAST_ONLINE, MinecraftAccount, is_last_online_unknown
 
 logger = logging.getLogger("dazebot.cogs.activity.server_watcher")
@@ -53,17 +80,25 @@ logger = logging.getLogger("dazebot.cogs.activity.server_watcher")
 
 class ServerWatcher(commands.Cog):
     bot: Bot
+    _hiatus_uuid_set: set[str]
 
     def __init__(self, bot: Bot):
         self.bot = bot
+        self._hiatus_uuid_set = set()
         self.poll.start()
         logger.info("ServerWatcher cog initialized")
 
     def cog_unload(self):
         self.poll.cancel()
 
-    @tasks.loop(minutes=3)
+    @tasks.loop(minutes=2)
     async def poll(self):
+        # Resolve the current HIATUS-role MC UUID set once per tick;
+        # ``_check_one`` consults it after a successful last_online bump
+        # to decide whether to fire a hiatus-spotted alert. Also used to
+        # gate the lower-priority second pass below.
+        self._hiatus_uuid_set = await hiatus_member_uuids(self.bot)
+
         # Server-side filter for the unknown sentinel: matches
         # ``is_last_online_unknown`` (anything within 24h of epoch).
         # Scope: Returners (original use case) OR waitlisted — see module
@@ -73,10 +108,35 @@ class ServerWatcher(commands.Cog):
             Q(last_online__lte=UNKNOWN_LAST_ONLINE + timedelta(days=1))
             & (Q(guild="Returners") | Q(waitlist__isnull=False))
         )
-        if not candidates:
+        if candidates:
+            logger.debug(f"polling {len(candidates)} unknown-bucket player(s)")
+            await asyncio.gather(*(self._check_one(a) for a in candidates))
+
+        # Lower-priority pass: HIATUS-role users with hidden lastJoin who
+        # aren't already in the Returners/waitlist scope above. Dispatched
+        # via the Requestor's background queue so non-HIATUS Unknown-bucket
+        # polls (above) and any priority lookups always preempt. TTL guard
+        # skips anything we polled within the upstream cache window (120s)
+        # so we never spend a background slot on a guaranteed cache hit.
+        if not self._hiatus_uuid_set:
             return
-        logger.debug(f"polling {len(candidates)} unknown-bucket player(s)")
-        await asyncio.gather(*(self._check_one(a) for a in candidates))
+        now = datetime.now(timezone.utc)
+        ttl_cutoff = now - timedelta(seconds=120)
+        existing_uuids = {a.uuid for a in candidates}
+        hiatus_candidates = await MinecraftAccount.filter(
+            Q(last_online__lte=UNKNOWN_LAST_ONLINE + timedelta(days=1))
+            & Q(uuid__in=list(self._hiatus_uuid_set))
+            & ~Q(guild="Returners")
+            & (Q(server_observed_at__isnull=True) | Q(server_observed_at__lt=ttl_cutoff))
+        )
+        hiatus_candidates = [a for a in hiatus_candidates if a.uuid not in existing_uuids]
+        if not hiatus_candidates:
+            return
+        logger.debug(
+            f"polling {len(hiatus_candidates)} hiatus unknown-bucket player(s) "
+            "via background queue"
+        )
+        await asyncio.gather(*(self._check_one(a, background=True) for a in hiatus_candidates))
 
     @poll.before_loop
     async def _before_poll(self):
@@ -87,9 +147,9 @@ class ServerWatcher(commands.Cog):
         # root cause and fix as activity.py's _before_check_guild.
         await self.bot.wait_until_ready()
 
-    async def _check_one(self, account: MinecraftAccount):
+    async def _check_one(self, account: MinecraftAccount, *, background: bool = False):
         try:
-            player = await get_player_stats(account.uuid)
+            player = await get_player_stats(account.uuid, background=background)
         except Exception:
             logger.exception(f"lookup failed for {account.mc_username}")
             return
@@ -111,6 +171,11 @@ class ServerWatcher(commands.Cog):
                 f"{account.mc_username}: un-hid lastJoin ({player.lastJoin.isoformat()}); "
                 "cleared from Unknown bucket"
             )
+            # A hiatus user who just exposed a real lastJoin is, by
+            # definition, observably online (or has been recently). Treat
+            # as a spot. ``maybe_alert_hiatus`` enforces the 24h cooldown.
+            if account.uuid in self._hiatus_uuid_set:
+                await maybe_alert_hiatus(self.bot, account.uuid)
             return
 
         prev_server = account.last_seen_server
@@ -136,6 +201,8 @@ class ServerWatcher(commands.Cog):
                 f"{account.mc_username}: server {prev_server!r} -> {observed!r}; "
                 "bumping last_online=now"
             )
+            if account.uuid in self._hiatus_uuid_set:
+                await maybe_alert_hiatus(self.bot, account.uuid)
             return
 
         # No actionable change (same server, or asymmetric None). Touch the

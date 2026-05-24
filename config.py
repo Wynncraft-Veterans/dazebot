@@ -7,6 +7,12 @@ class Config:
     GUILD = 1313769181321236490
     GUILD_DEAD_ALERT_CHANNEL = 1401676479300898939
     GUILD_FULL_ALERT_CHANNEL = 1401676479300898939
+    HIATUS_SPOTTED_ALERT_CHANNEL = 1401676479300898939
+    # Master kill-switch for hiatus-spotted alerts. When False, the bulk
+    # /v3/player poll short-circuits (no API spend) and the server_watcher
+    # HIATUS scope still runs (its DB writes feed other features) but the
+    # alert post is suppressed. Toggle via /alerts hiatus_mute / hiatus_unmute.
+    HIATUS_ALERTS_ENABLED = True
 
     # --- VETS membership-state roles (see .claude/membership_spec.md §6) ---
     ROLE_REGISTERED = 1407078577450520637  # Never been a vets member
@@ -148,6 +154,7 @@ class Config:
 class DevConfig(Config):
     GUILD = 1407388408472666243
     GUILD_DEAD_ALERT_CHANNEL = GUILD_FULL_ALERT_CHANNEL = 1407388410393399494  # general
+    HIATUS_SPOTTED_ALERT_CHANNEL = 1407388410393399494  # general (never post into prod from dev)
     LINK_FALLBACK_CHANNEL = 1407388410393399494  # general
     JANITOR_ALERT_CHANNEL = 1407388410393399494  # general (never post into prod from dev)
     GUILD_FULL_ALERT_ROLE = 1409300773439012874  # @aaaaa

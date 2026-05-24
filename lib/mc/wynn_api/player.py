@@ -12,6 +12,7 @@ async def get_player_stats(
     *,
     full: bool = False,
     important: bool = False,
+    background: bool = False,
 ) -> WynncraftPlayer:
     """Fetch a Wynncraft player envelope and parse it.
 
@@ -23,10 +24,23 @@ async def get_player_stats(
     ``important=True`` pushes the request to the front of the singleton
     Requestor queue; reserved for hot-path lookups (e.g. server-watcher
     join probes) that race against the background activity loop.
+
+    ``background=True`` enqueues at the lowest priority tier; the request
+    only drains when no normal- or priority-tier calls are pending. Used
+    by opportunistic scope extensions (e.g. hiatus-user server-transition
+    inference) that must yield to the existing Unknown-bucket scope.
+    ``important`` and ``background`` are mutually exclusive.
     """
+    if important and background:
+        raise ValueError("important and background are mutually exclusive")
     suffix = "?fullResult" if full else ""
     url = f"https://api.wynncraft.com/v3/player/{username_or_uuid}{suffix}"
-    response = await (requestor.get0(url) if important else requestor.get(url))
+    if important:
+        response = await requestor.get0(url)
+    elif background:
+        response = await requestor.get_background(url)
+    else:
+        response = await requestor.get(url)
     data = await response.json()
     raise_for_error_envelope(data, url=url)
     if isinstance(data, list):

@@ -43,19 +43,14 @@ async def get_server_players(server: str):
 
 class Activity(commands.Cog):
     bot: Bot
-    queue: set[str]
 
     def __init__(self, bot: Bot):
         self.bot = bot
         self.check_guild.start()
-        self.queue = set()
         logger.info("Activity cog initialized")
 
     async def cog_unload(self):
         await mc.unload()
-
-    @tasks.loop(minutes=1)
-    async def eat_queue(self): ...
 
     async def _apply_guild(self, guild: Guild, member: BaseMember):
         # Resolve the canonical Minecraft username. We have two independent
@@ -219,7 +214,12 @@ class Activity(commands.Cog):
             except discord.HTTPException as e:
                 logger.warning(f"automation: failed transition {_trigger} for {member}: {e}")
 
-    @tasks.loop(minutes=11)
+    # Cadence matches the /v3/guild upstream cache TTL (120s) — polling
+    # any faster just hits the shared cache, any slower leaves freshness
+    # on the table. GUILD bucket is 50/60s, so ~30 req/hour from this
+    # loop is <1% utilization. See the bucket-utilization audit in
+    # server_watcher.py / hiatus_watcher.py for the full inventory.
+    @tasks.loop(minutes=2)
     async def check_guild(self):
         logger.info("Doing check_guild task")
         guild = await self._check_guild("Returners")

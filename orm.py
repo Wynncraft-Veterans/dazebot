@@ -179,6 +179,21 @@ class JanitorAlert(Model):
         table = "janitor_alerts"
 
 
+class HiatusSpottedAlert(Model):
+    """Restart-safe per-UUID cooldown marker for hiatus-spotted alerts.
+    One row per posted alert; the watcher cogs query the most recent row
+    per ``uuid`` to enforce a 24h cooldown between repeat alerts about
+    the same player. Mirrors DeadGuildAlert/GuildCapacityAlert + a uuid
+    column for the per-player keying."""
+
+    id = fields.UUIDField(pk=True)
+    uuid = fields.CharField(max_length=36, index=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "hiatus_spotted_alerts"
+
+
 class Shout(Model):
     id = fields.UUIDField(pk=True)
     shouter = fields.ForeignKeyField("models.DiscordAccount", related_name="shouts", on_delete=fields.CASCADE)

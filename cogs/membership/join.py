@@ -43,7 +43,12 @@ class Join(commands.Cog):
         ).values_list("id", flat=True)
         await LinkRequest.filter(id__in=to_delete).delete()
 
-    @tasks.loop(minutes=1)
+    # Cadence matches the PLAYER cache TTL (120s) so the per-row
+    # ``check_player_full`` calls below (gated independently by a 1-day
+    # ``last_manual_check`` TTL) always see fresh upstream data when
+    # they do fire, and downstream observation of Activity.check_guild's
+    # ``guild`` writes is aligned to the same window.
+    @tasks.loop(minutes=2)
     async def waitlist_cleanup(self):
         now = datetime.now(tz=timezone.utc)
 

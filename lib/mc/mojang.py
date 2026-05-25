@@ -110,6 +110,149 @@ async def _try_mojang(uuid: str) -> str | None:
         return None
 
 
+_HEX_CHARS = frozenset("0123456789abcdef")
+
+
+def _to_dashed_uuid(value: str | None) -> str | None:
+    """Normalise an undashed (32-char) or dashed (36-char) UUID string to the
+    canonical dashed lowercase form. Returns ``None`` if not a valid UUID.
+    """
+    if not value:
+        return None
+    cleaned = value.replace("-", "").lower()
+    if len(cleaned) != 32 or not all(c in _HEX_CHARS for c in cleaned):
+        return None
+    return f"{cleaned[0:8]}-{cleaned[8:12]}-{cleaned[12:16]}-{cleaned[16:20]}-{cleaned[20:32]}"
+
+
+def _looks_like_uuid(value: str) -> bool:
+    """Return ``True`` if ``value`` looks UUID-shaped (so we can skip
+    name-based upstream calls that would 404).
+    """
+    cleaned = value.replace("-", "")
+    return len(cleaned) == 32 and all(c in _HEX_CHARS for c in cleaned.lower())
+
+
+async def _try_playerdb_name(username: str) -> str | None:
+    """PlayerDB name → UUID. Returns canonical dashed UUID, or ``None``.
+
+    PlayerDB accepts both names and UUIDs on the same endpoint; this is the
+    name-direction call. The response's ``username`` field is ignored — see
+    :func:`get_mc_uuid` for the canonical-name confirmation pattern.
+    """
+    session = await get_session()
+    try:
+        async with session.get(
+            f"https://playerdb.co/api/player/minecraft/{username}",
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as res:
+            if res.status != 200:
+                logger.debug(f"playerdb name returned {res.status} for {username!r}")
+                return None
+            data = await res.json(content_type=None)
+            if not data.get("success"):
+                logger.debug(
+                    f"playerdb name returned success=false for {username!r}: {data.get('code')}"
+                )
+                return None
+            raw = (data.get("data") or {}).get("player", {}).get("id")
+            return _to_dashed_uuid(raw)
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logger.warning(f"playerdb name lookup failed for {username!r}: {e}")
+        return None
+
+
+async def _try_mojang_name(username: str) -> str | None:
+    """Mojang official name → UUID. Returns canonical dashed UUID, or ``None``.
+
+    Source of truth for *current* names. 404s on old names (Mojang doesn't
+    track name history) — those are PlayerDB's territory.
+    """
+    session = await get_session()
+    try:
+        async with session.get(
+            f"https://api.minecraftservices.com/minecraft/profile/lookup/name/{username}",
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as res:
+            if res.status != 200:
+                logger.debug(f"Mojang name returned {res.status} for {username!r}")
+                return None
+            data = await res.json()
+            return _to_dashed_uuid(data.get("id"))
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logger.warning(f"Mojang name lookup failed for {username!r}: {e}")
+        return None
+
+
+async def get_mc_uuid(username: str) -> str | None:
+    """Resolve a Minecraft username → UUID. The inverse of :func:`get_mc_username`.
+
+    Lookup order (server-side application of the reliability ladder — see
+    ``.claude/CLAUDE.md``):
+
+    1. Local ``MojangNameCache`` row matching the username case-insensitively.
+    2. PlayerDB (permissive, retains old-name → UUID mappings).
+    3. Mojang official (authoritative, restrictive rate limit).
+
+    ashcon is intentionally excluded — PlayerDB does the same job at higher
+    accuracy. Wynncraft is excluded too because the canonical caller
+    (:func:`lib.mc.resolve.ensure_mc_account`'s ``WynnApiError`` handler)
+    has just exhausted that source on the same name.
+
+    Returns the canonical dashed-form UUID, or ``None`` if every provider
+    misses. **Never raises** — failures are logged and surface as ``None``
+    so callers can fall through to their original error path.
+
+    On a successful upstream resolution, fires a *single* :func:`_try_mojang`
+    (UUID → name) call to get the canonical current name, then writes it to
+    ``MojangNameCache``. PlayerDB's own ``username`` field is often stale, so
+    we never persist it directly. If the Mojang refresh fails, return the
+    UUID without writing the cache — better empty than wrong.
+    """
+    if not username:
+        return None
+    cleaned = username.strip()
+    if not cleaned:
+        return None
+    # UUID-shape gate: name endpoints would 404, save the round-trip.
+    if _looks_like_uuid(cleaned):
+        return None
+
+    from orm import MojangNameCache  # local import: ORM not always initialised at import time
+
+    cached = await MojangNameCache.filter(username__iexact=cleaned).first()
+    if cached is not None:
+        return cached.uuid
+
+    resolved_uuid = await _try_playerdb_name(cleaned)
+    provider = "playerdb" if resolved_uuid else None
+    if resolved_uuid is None:
+        resolved_uuid = await _try_mojang_name(cleaned)
+        provider = "mojang" if resolved_uuid else None
+
+    if resolved_uuid is None:
+        return None
+
+    # Confirm the canonical Mojang name before writing the cache. PlayerDB's
+    # `username` field may itself be stale; defence-in-depth like
+    # `resolve_canonical_username`.
+    canonical = await _try_mojang(resolved_uuid)
+    if canonical:
+        await MojangNameCache.update_or_create(
+            uuid=resolved_uuid, defaults={"username": canonical}
+        )
+        logger.debug(
+            "get_mc_uuid: %r -> %s via %s (cached canonical %r)",
+            cleaned, resolved_uuid, provider, canonical,
+        )
+    else:
+        logger.debug(
+            "get_mc_uuid: %r -> %s via %s (canonical refresh failed; cache write skipped)",
+            cleaned, resolved_uuid, provider,
+        )
+    return resolved_uuid
+
+
 async def get_mc_username(uuid: str, *, force_refresh: bool = False) -> str:
     """Return the current Minecraft username for ``uuid``.
 

@@ -140,3 +140,20 @@ Managed by [aerich](https://github.com/tortoise/aerich). Migration files live in
 - **Persistent views must be re-registered every boot** in `setup_hook` or buttons silently break on every restart. See [cogs.md](cogs.md).
 - **The membership-state machine is the only safe path to mutate state-roles.** Don't call `member.add_roles(REGISTERED, …)` directly; go through [role_state.md](role_state.md).
 - **Auth-side gotchas** (fail-closed introspection, picolimbo trust model, SQLite single-writer constraint) are in [auth.md](auth.md).
+
+## External name-resolution providers
+
+Reliability ladder: `ashcon < wynncraft < playerdb < mojang`.
+
+| Provider | Accuracy | Rate limit |
+|---|---|---|
+| ashcon | low (frequently stale) | very permissive |
+| PlayerDB | medium | medium-permissive (not unlimited) |
+| Wynncraft `/v3/player` | only authoritative for Wynncraft-internal state | shared with the rest of dazebot's traffic |
+| Mojang | source of truth | very restrictive |
+
+**This repo is server-side.** We own the Mojang and PlayerDB quotas exclusively on this box, so load is predictable. Prefer accuracy when we have headroom — PlayerDB as the primary upstream, Mojang reserved for authoritative tiebreaks and writing fresh names to the cache. Skip ashcon (PlayerDB does the same job better). Stay well below each tier's budget so it's always available when truly needed.
+
+Implementation: [`lib/mc/mojang.py`](../lib/mc/mojang.py) owns the helpers. UUID → name goes through `get_mc_username` (cascade: cache → `_try_mojang` → `_try_playerdb` → `_try_ashcon`, with the existing UUID-only direction kept for compatibility). Name → UUID goes through `get_mc_uuid` (cache → `_try_playerdb_name` → `_try_mojang_name`, with a one-shot `_try_mojang(uuid)` confirm before writing the canonical name to `MojangNameCache`). Both are reused by `lib/mc/resolve.ensure_mc_account`.
+
+When a permissive provider returns a player record, treat its `username` field as potentially stale (PlayerDB and ashcon are observed to retain old names). Before writing a name to `MojangNameCache`, confirm against Mojang; if that fails, skip the cache write rather than persisting a known-stale value.

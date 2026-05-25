@@ -31,6 +31,8 @@ from tortoise.expressions import Q
 
 from config import CurrConfig
 from lib.discord_utils.converters import CaseInsensitiveMember
+from lib.mc.mojang import get_mc_uuid
+from lib.mc.wynn_api.errors import WynnApiError
 from lib.mc.wynn_api.player import get_player_stats
 from orm import DiscordAccount, MinecraftAccount, UNKNOWN_LAST_ONLINE
 
@@ -64,13 +66,45 @@ async def ensure_mc_account(value: str) -> MinecraftAccount:
     loop's next tick.
 
     Raises :class:`lib.wynn_api.errors.WynnApiError` (and any underlying
-    network exception) if the Wynncraft API can't resolve the value;
-    callers handle this with a user-facing error message.
+    network exception) if neither the Wynncraft API nor a Mojang
+    name->UUID fallback can resolve the value; callers handle this with a
+    user-facing error message.
+
+    Old-name fallback: when Wynncraft 404s on ``value``, we try to translate
+    it to a UUID via Mojang/PlayerDB (see :func:`lib.mc.mojang.get_mc_uuid`).
+    If the resulting UUID matches an existing MinecraftAccount row, that row
+    is returned -- this catches Mojang renames where Wynncraft only knows
+    the player by their new name but our DB still records the old one.
+    This branch never creates new rows; it only finds existing ones.
     """
     existing = await resolve_mc_account_loose(value)
     if existing is not None:
         return existing
-    fs = await get_player_stats(value, full=True)
+    try:
+        fs = await get_player_stats(value, full=True)
+    except WynnApiError as wynn_exc:
+        try:
+            resolved_uuid = await get_mc_uuid(value)
+        except Exception:  # noqa: BLE001 - guard against helper bugs
+            logger.exception(
+                "ensure_mc_account: get_mc_uuid raised for %r; "
+                "re-raising original WynnApiError",
+                value,
+            )
+            raise wynn_exc from None
+        if resolved_uuid:
+            existing_by_uuid = await MinecraftAccount.filter(
+                uuid=resolved_uuid
+            ).first()
+            if existing_by_uuid is not None:
+                logger.info(
+                    "ensure_mc_account: matched %r to existing MinecraftAccount "
+                    "%s via Mojang name fallback (Wynncraft did not recognise "
+                    "the name)",
+                    value, resolved_uuid,
+                )
+                return existing_by_uuid
+        raise
     return await MinecraftAccount.create(
         uuid=fs.uuid,
         wynn_username=fs.username,

@@ -11,6 +11,19 @@ In-house Discord bot for the Wynncraft "Returners" veterans community. Responsib
 
 > The Python package name in `pyproject.toml` is `nazbot` for historical reasons, but the bot itself is **dazebot**. *nazbot* is the separate Discord bot in `../temporary-server` that handles the in-game ↔ Discord chat bridge — don't conflate the two.
 
+## Discord bots in this workspace — command prefixes
+
+dazebot's prefix-command leader is **`~`** (set via the `PREFIX` env var). The vets ecosystem runs four Discord bots, each with its own prefix. The table is duplicated across each bot's repo to keep the mapping discoverable from any vantage point:
+
+| Bot | Repo | Prefix |
+|-----|------|--------|
+| **dazebot** | `dazebot` (this repo) | `~` |
+| nazbot | `../temporary-server` | `!` |
+| fishbot | `../vets-anni` | `\` |
+| dynobot | (third-party, no repo) | `?` |
+
+Slash commands are unprefixed. The prefix only applies to text/message commands.
+
 > Canonical membership requirements: [membership_spec.md](membership_spec.md). Subsystem references: [role-state machine](role_state.md), [auth flows](auth.md) ([VerifyKey](verify_keys.md), [linking](linking.md)), [runtime config](runtime_config.md), [data model](data_model.md), [cogs map](cogs.md). [`MEMORY.md`](MEMORY.md) is the index.
 
 ## Key facts

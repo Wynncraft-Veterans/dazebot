@@ -8,10 +8,22 @@ DB engine: SQLite at `/app/data/dazebot.db` (production) or `dev.db` at the repo
 
 | Table | Owner | Purpose |
 |---|---|---|
-| `MinecraftAccount` | `lib/mc/linking.py`, activity loop | UUID-keyed MC profile. Holds `wynn_username` (cached from API, stale-tolerant) + `mc_username` + `guild` + `last_online` + `first_join`. Also carries `last_seen_server` + `server_observed_at`, written by `cogs/server_watcher.py` to infer activity for privacy-hidden players (see [cogs.md](cogs.md)). |
+| `MinecraftAccount` | `lib/mc/linking.py`, activity loop | UUID-keyed MC profile. Holds `wynn_username` (cached from API, stale-tolerant) + `mc_username` + `guild` + `last_online` + `first_join`. Also carries `last_seen_server` + `server_observed_at`, written by `cogs/server_watcher.py` to infer activity for privacy-hidden players (see [cogs.md](cogs.md)). See "**`last_online` sentinel — API-disabled players**" below for the epoch-sentinel semantics. |
 | `DiscordAccount` | `lib/mc/linking.py` | `disc_uuid` + nullable FK to the *primary* `MinecraftAccount`. One row per Discord user. |
 | `MinecraftAlt` | `cogs/moderation/admin.py` (`/link alt`) | Additional MC accounts beyond the primary. The primary lives on `DiscordAccount.minecraft_account`; the alts live here. |
 | `MojangNameCache` | `lib/mc/mojang.py` | Persistent UUID → username cache. Refreshed after `MAX_AGE` to handle name changes. Distinct from the per-account `MinecraftAccount.mc_username` snapshot. |
+
+### `last_online` sentinel — API-disabled players
+
+`MinecraftAccount.last_online == UNKNOWN_LAST_ONLINE` (the Unix epoch, defined in [`orm.py`](../orm.py)) is the in-band sentinel for **"this Wynncraft player has their API/profile disabled"** (the WAPI returns `lastJoin=null`, so no real timestamp is knowable). `first_join` is also `None` for these accounts.
+
+Canonical handling — don't invent new logic, follow this:
+
+- Test with `orm.is_last_online_unknown(dt)` (true if `dt` is within 24h of the epoch). `orm.py` explicitly comments: **"never compare directly."**
+- `/purgelist` ([`cogs/activity/activity.py`](../cogs/activity/activity.py)) segregates these rows into an "Unknown (API disabled)" bucket — never "inactive".
+- [`cogs/server_watcher.py`](../cogs/server_watcher.py) (3-min loop) tracks them via Wynn `server`-field world-change observation and bumps `last_online=now` when it sees activity. As of 2026-05-16 it covers Returners **and** waitlisted accounts (was Returners-only).
+
+**Bug class:** any `last_online__lt=cutoff` / `last_online < cutoff` filter without a matching `last_online__gt=UNKNOWN_LAST_ONLINE + timedelta(days=1)` lower bound will treat every API-disabled player as "inactive ~56 years" — silently purging or flagging them. This was the root cause of "waitlisted user vanishes after every restart" in `waitlist_cleanup` ([`cogs/membership/join.py`](../cogs/membership/join.py)). When debugging a dazebot vanish/inactive-flag bug, **check `last_online` for the epoch sentinel first**.
 
 ## Membership state
 

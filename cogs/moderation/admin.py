@@ -14,7 +14,7 @@ from lib.auth import is_admin, is_operator, is_staff, is_registered
 from lib.discord_utils.converters import CaseInsensitiveMember
 from lib.discord_utils.paginated_embed import Paginator, from_lines
 from lib.mc.linking import dm_or_log, get_or_issue_code
-from lib.mc.resolve import ensure_mc_account
+from lib.mc.resolve import ensure_mc_account, resolve_target
 from lib.mc.wynn_api.errors import WynnApiError
 from lib.role_state import ensure_linked_baseline
 from orm import Blocklist, DiscordAccount, LinkRequest, MinecraftAccount, MinecraftAlt
@@ -328,21 +328,39 @@ class Admin(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    @link.command(name="check", description="(Staff) Check a Discord user's linked Minecraft account")
+    @link.command(name="check", description="(Staff) Check a linked account by Discord member or Minecraft username")
     @is_staff()
-    async def link_check(self, ctx: commands.Context, user: Annotated[discord.Member, CaseInsensitiveMember]):
-        disc = await DiscordAccount.filter(disc_uuid=str(user.id)).select_related("minecraft_account").first()
+    async def link_check(self, ctx: commands.Context, target: str):
+        member, mc = await resolve_target(ctx, target)
 
-        if disc is None or disc.minecraft_account is None:
+        if member is None and mc is None:
             await ctx.reply(
-                f"{user.mention} is not linked to any Minecraft account.",
-                allowed_mentions=discord.AllowedMentions.none(),
+                f"Could not find a Discord member or Minecraft account matching `{target}`."
             )
             return
 
-        mc = disc.minecraft_account
+        # If only a member was resolved, surface the linked MC (or bail if unlinked).
+        if member is not None and mc is None:
+            disc = await DiscordAccount.filter(disc_uuid=str(member.id)).select_related("minecraft_account").first()
+            if disc is None or disc.minecraft_account is None:
+                await ctx.reply(
+                    f"{member.mention} is not linked to any Minecraft account.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
+            mc = disc.minecraft_account
+
         embed = discord.Embed(title="Linked Account", color=discord.Color.blue())
-        embed.add_field(name="Discord", value=user.mention, inline=True)
+        if member is not None:
+            embed.add_field(name="Discord", value=member.mention, inline=True)
+        else:
+            # MC-only path: resolve_target couldn't find the member in the guild cache.
+            disc = await DiscordAccount.filter(minecraft_account_id=mc.id).first()
+            embed.add_field(
+                name="Discord",
+                value=f"<@{disc.disc_uuid}>" if disc is not None else "_(not linked)_",
+                inline=True,
+            )
         embed.add_field(
             name="Minecraft",
             value=f"`{mc.mc_username}` {f'(`{mc.wynn_username}`)' if mc.wynn_username != mc.mc_username else ''}",

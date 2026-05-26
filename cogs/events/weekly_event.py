@@ -2,12 +2,12 @@
 ``/count`` for forum-channel reaction tallies."""
 
 import logging
-from typing import Annotated, TypedDict
+from typing import TypedDict
 import discord
 from discord.ext import commands
 from lib.auth import is_staff
-from lib.discord_utils.converters import CaseInsensitiveMember
 from lib.discord_utils.paginated_embed import Paginator, from_lines
+from lib.mc.resolve import resolve_target
 from orm import DiscordAccount, Score, WeeklyEvent as WeeklyEventTable
 
 # logger = Logger()
@@ -16,6 +16,31 @@ from bot import Bot
 
 WeekRange = commands.Range[int, 0]
 ValueRange = commands.Range[int, 0]
+
+
+async def _resolve_score_target(
+    ctx: commands.Context, target: str
+) -> tuple[str, DiscordAccount] | None:
+    """Resolve ``target`` (Discord ping/id/name OR Minecraft username/UUID) to
+    ``(mention, DiscordAccount)`` for score-table operations. Replies with a
+    user-facing error and returns ``None`` if no DiscordAccount can be
+    attached (unknown target, or MC account exists but isn't linked).
+    """
+    member, mc = await resolve_target(ctx, target)
+    if member is not None:
+        disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(member.id))
+        return member.mention, disc
+    if mc is not None:
+        disc = await DiscordAccount.filter(minecraft_account_id=mc.id).first()
+        if disc is None:
+            await ctx.reply(
+                f"Minecraft account `{mc.mc_username}` is registered but not "
+                "linked to a Discord account."
+            )
+            return None
+        return f"<@{disc.disc_uuid}>", disc
+    await ctx.reply(f"Could not find a Discord member or Minecraft account matching `{target}`.")
+    return None
 
 
 class WeeklyEvent(commands.Cog):
@@ -36,32 +61,37 @@ class WeeklyEvent(commands.Cog):
     async def score_set(
         self,
         ctx: commands.Context,
-        user: Annotated[discord.Member, CaseInsensitiveMember],
+        target: str,
         week: WeekRange,
         value: ValueRange,
     ):
-        """Set user's points"""
+        """Set user's points. ``target`` accepts a Discord ping/id/name or a Minecraft username/UUID."""
 
-        logger.debug(f"Setting {user.id=} score in {week=} to {value=}")
+        resolved = await _resolve_score_target(ctx, target)
+        if resolved is None:
+            return
+        mention, disc_account = resolved
 
-        disc_account, _ = await DiscordAccount.get_or_create(disc_uuid=str(user.id))
+        logger.debug(f"Setting {disc_account.disc_uuid=} score in {week=} to {value=}")
 
         event, _ = await WeeklyEventTable.get_or_create(week=week)
-
         await Score.update_or_create(event=event, discord_account=disc_account, defaults={"score": value})
 
         await ctx.send(
-            f"Set {user.mention}'s score to {value} for week {week}", allowed_mentions=discord.AllowedMentions.none()
+            f"Set {mention}'s score to {value} for week {week}", allowed_mentions=discord.AllowedMentions.none()
         )
 
     @score.command(name="add")
     @is_staff()
     async def score_add(
-        self, ctx, user: Annotated[discord.Member, CaseInsensitiveMember], week: WeekRange, value: ValueRange
+        self, ctx: commands.Context, target: str, week: WeekRange, value: ValueRange
     ):
-        """Add points to a user"""
+        """Add points to a user. ``target`` accepts a Discord ping/id/name or a Minecraft username/UUID."""
 
-        disc_account, _ = await DiscordAccount.get_or_create(disc_uuid=str(user.id))
+        resolved = await _resolve_score_target(ctx, target)
+        if resolved is None:
+            return
+        mention, disc_account = resolved
 
         event, _ = await WeeklyEventTable.get_or_create(week=week)
 
@@ -74,12 +104,16 @@ class WeeklyEvent(commands.Cog):
             await score_obj.save(update_fields=["score"])
 
         await ctx.send(
-            f"Added {value} points to {user.mention} for week {week}", allowed_mentions=discord.AllowedMentions.none()
+            f"Added {value} points to {mention} for week {week}", allowed_mentions=discord.AllowedMentions.none()
         )
 
     @score.command(name="print")
-    async def score_print(self, ctx, user: Annotated[discord.Member, CaseInsensitiveMember], week: WeekRange):
-        disc_account, _ = await DiscordAccount.get_or_create(disc_uuid=str(user.id))
+    async def score_print(self, ctx: commands.Context, target: str, week: WeekRange):
+        """Print a user's score. ``target`` accepts a Discord ping/id/name or a Minecraft username/UUID."""
+        resolved = await _resolve_score_target(ctx, target)
+        if resolved is None:
+            return
+        mention, disc_account = resolved
 
         event, _ = await WeeklyEventTable.get_or_create(week=week)
 
@@ -87,12 +121,12 @@ class WeeklyEvent(commands.Cog):
 
         if score:
             await ctx.send(
-                f"{user.mention} has {score.score} points for week {week}",
+                f"{mention} has {score.score} points for week {week}",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         else:
             await ctx.send(
-                f"{user.mention} does not have any points registered for week {week}",
+                f"{mention} does not have any points registered for week {week}",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 

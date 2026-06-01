@@ -18,15 +18,20 @@ async def check_player_full(uuid: str) -> tuple[str, WynncraftPlayer, MinecraftA
     account = await MinecraftAccount.get(uuid=player.uuid)
     # if player.guild is None:
     #     account.guild = None
+    # update_fields is built dynamically to avoid clobbering concurrent
+    # writers (e.g. server_watcher) on the columns we don't touch.
+    fields = ["wynn_username", "mc_username", "last_manual_check"]
     # Wynncraft privacy: lastJoin/firstJoin can be None. Skip update in that case.
     if player.lastJoin is not None and account.last_online < player.lastJoin:
         account.last_online = player.lastJoin
+        fields.append("last_online")
     if player.firstJoin is not None:
         account.first_join = player.firstJoin
+        fields.append("first_join")
     account.wynn_username = player.username
     account.mc_username = mc_username
     account.last_manual_check = datetime.now(timezone.utc)
-    await account.save()
+    await account.save(update_fields=fields)
     # if guild_name is not None:
     #     await self._check_guild(guild_name)
 

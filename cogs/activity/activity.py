@@ -125,12 +125,16 @@ class Activity(commands.Cog):
             account.guild = guild.name
             account.wynn_username = member.username
             account.mc_username = mc_username
-            # Only advance ``last_online``; never roll it back, and never
-            # overwrite a real timestamp with the unknown sentinel.
+            # update_fields is built dynamically so a concurrent writer's
+            # last_online bump (e.g. server_watcher detecting a transition)
+            # isn't clobbered by our stale in-memory copy. Only include
+            # last_online when we actually mutate it.
+            fields = ["guild", "wynn_username", "mc_username"]
             if not is_last_online_unknown(api_last_online):
                 if is_last_online_unknown(account.last_online) or account.last_online < api_last_online:
                     account.last_online = api_last_online
-            await account.save()
+                    fields.append("last_online")
+            await account.save(update_fields=fields)
 
     async def _check_guild(self, guild_name_full: str) -> Guild:
         guild = await get_guild(guild_name_full)
@@ -184,7 +188,7 @@ class Activity(commands.Cog):
             left_uuids = [a.uuid for a in accounts]
             for account in accounts:
                 account.guild = None
-                await account.save()
+                await account.save(update_fields=["guild"])
 
         await asyncio.gather(*tasks)
 

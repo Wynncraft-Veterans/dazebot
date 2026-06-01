@@ -162,11 +162,13 @@ class ServerWatcher(commands.Cog):
         # without needing to wait for a server transition. Same monotonic
         # discipline as ``lib/mc/wynn.py``: never roll back.
         if player.lastJoin is not None:
+            fields = ["last_seen_server", "server_observed_at"]
             if is_last_online_unknown(account.last_online) or account.last_online < player.lastJoin:
                 account.last_online = player.lastJoin
+                fields.append("last_online")
             account.last_seen_server = observed
             account.server_observed_at = now
-            await account.save()
+            await account.save(update_fields=fields)
             logger.info(
                 f"{account.mc_username}: un-hid lastJoin ({player.lastJoin.isoformat()}); "
                 "cleared from Unknown bucket"
@@ -185,7 +187,7 @@ class ServerWatcher(commands.Cog):
             # Baseline only — we have nothing to compare against yet.
             account.last_seen_server = observed
             account.server_observed_at = now
-            await account.save()
+            await account.save(update_fields=["last_seen_server", "server_observed_at"])
             logger.debug(f"{account.mc_username}: baseline server={observed!r}")
             return
 
@@ -196,7 +198,7 @@ class ServerWatcher(commands.Cog):
             account.last_online = now
             account.last_seen_server = observed
             account.server_observed_at = now
-            await account.save()
+            await account.save(update_fields=["last_online", "last_seen_server", "server_observed_at"])
             logger.info(
                 f"{account.mc_username}: server {prev_server!r} -> {observed!r}; "
                 "bumping last_online=now"
@@ -210,7 +212,7 @@ class ServerWatcher(commands.Cog):
         # this poll rather than from the original baseline.
         account.last_seen_server = observed
         account.server_observed_at = now
-        await account.save()
+        await account.save(update_fields=["last_seen_server", "server_observed_at"])
 
 
 async def setup(bot: Bot):

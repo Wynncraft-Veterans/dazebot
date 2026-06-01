@@ -86,6 +86,13 @@ class MinecraftAccount(Model):
     # bumps ``last_online``. NULL = never observed.
     last_seen_server: Optional[str] = fields.CharField(max_length=16, null=True, default=None)  # type: ignore
     server_observed_at: datetime | None = fields.DatetimeField(use_tz=True, null=True)  # type: ignore
+    # Monotonic stat-delta signals — strict increases between
+    # server_watcher ticks are positive proof of online activity, even
+    # when the player keeps logging into the same world (no server
+    # transition). The /v3/player envelope already carries these;
+    # tracking adds no API spend.
+    last_total_levels: int | None = fields.IntField(null=True, default=None)  # type: ignore
+    last_content_completion: int | None = fields.IntField(null=True, default=None)  # type: ignore
     first_join: datetime | None = fields.DatetimeField(use_tz=True, null=True)  # type: ignore
     token: Optional[str] = fields.CharField(max_length=6, null=True, default=None)  # type: ignore
     is_honourary = fields.BooleanField(default=False)

@@ -82,3 +82,7 @@ If you add a button that needs to survive a restart, register it in `setup_hook`
 If your cog has a persistent view, register it in `bot.py:setup_hook`. Otherwise the buttons silently break on every restart.
 
 If the new file is a helper that should NOT be loaded as a cog (no `setup()`), either place its parent directory in `bot.COG_SKIP_DIRS` (currently just `returns`) or rely on the `NoEntryPointError` safety net which logs at DEBUG and moves on.
+
+## Pitfalls
+
+- **`ctx.reply(..., ephemeral=True)` only honors `ephemeral` for slash invocations.** For `@commands.hybrid_command` cogs, the prefix path (e.g. `~return 75`) silently ignores the flag and posts the reply *publicly* in the channel — including any data you assumed was private. This is privacy-critical for surfaces that carry user-only data (guesses, link codes, key material). Route those through a DM-or-ephemeral helper instead — `cogs/events/returns/week_75.py:_private` is the reference pattern: ephemeral when `ctx.interaction is not None`, DM the author and delete the invoking message otherwise, with a non-revealing channel fallback if DMs are closed. The same trap applies to `ctx.send(..., ephemeral=True)`.

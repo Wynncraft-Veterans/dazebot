@@ -417,9 +417,11 @@ async def handle(ctx: commands.Context) -> None:
 
     lines.append("_Guesses are private. Only staff can see the full list._")
 
-    await ctx.reply(
-        "\n".join(lines), view=_build_guess_view(existing), ephemeral=True
-    )
+    # Critical: must route through _private so prefix invocations (~return 75)
+    # don't leak the listing. ``ctx.reply(ephemeral=True)`` is silently a
+    # no-op for non-interaction contexts and would dump every guess into the
+    # channel.
+    await _private(ctx, "\n".join(lines), view=_build_guess_view(existing))
 
 
 # ---------------------------------------------------------------------------

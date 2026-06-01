@@ -20,9 +20,16 @@ logger = logging.getLogger("dazebot.lib.mc.hiatus_alerts")
 HIATUS_ALERT_COOLDOWN = timedelta(hours=24)
 
 
-async def maybe_alert_hiatus(bot, uuid: str) -> bool:
+async def maybe_alert_hiatus(bot, uuid: str, *, server: str | None = None) -> bool:
     """Post a hiatus-spotted alert if the 24h cooldown for ``uuid`` has
     elapsed. Returns True if a message was posted, False otherwise.
+
+    ``server`` is the world string from the live observation that triggered
+    this call (e.g. ``hiatus_watcher``'s bulk-endpoint dict value). It
+    takes precedence in the alert text; if not provided or falsy, falls
+    back to the persisted ``account.last_seen_server``, then to ``"?"``.
+    The persisted value is stale or missing for the non-privacy-hidden
+    cohort that ``server_watcher`` never polls.
 
     Belt-and-suspenders: an account whose ``guild`` column is currently
     ``"Returners"`` is skipped even if the caller asserts HIATUS, since
@@ -48,7 +55,7 @@ async def maybe_alert_hiatus(bot, uuid: str) -> bool:
         )
         return False
 
-    server = account.last_seen_server or "?"
+    server = server or account.last_seen_server or "?"
     try:
         await channel.send(
             f"Hiatus user `{account.mc_username}` ({uuid}) is currently online on {server}.",

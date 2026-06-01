@@ -175,7 +175,7 @@ class ServerWatcher(commands.Cog):
             # definition, observably online (or has been recently). Treat
             # as a spot. ``maybe_alert_hiatus`` enforces the 24h cooldown.
             if account.uuid in self._hiatus_uuid_set:
-                await maybe_alert_hiatus(self.bot, account.uuid)
+                await maybe_alert_hiatus(self.bot, account.uuid, server=observed)
             return
 
         prev_server = account.last_seen_server
@@ -202,7 +202,7 @@ class ServerWatcher(commands.Cog):
                 "bumping last_online=now"
             )
             if account.uuid in self._hiatus_uuid_set:
-                await maybe_alert_hiatus(self.bot, account.uuid)
+                await maybe_alert_hiatus(self.bot, account.uuid, server=observed)
             return
 
         # No actionable change (same server, or asymmetric None). Touch the

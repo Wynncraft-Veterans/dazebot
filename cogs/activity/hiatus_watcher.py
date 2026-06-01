@@ -92,8 +92,7 @@ class HiatusWatcher(commands.Cog):
             logger.warning("bulk /v3/player returned unexpected shape; skipping tick")
             return
 
-        online = set(players)
-        online_hiatus = hiatus_uuids & online
+        online_hiatus = hiatus_uuids & players.keys()
         newly_online = online_hiatus - self._prev_online
         self._prev_online = online_hiatus
 
@@ -101,7 +100,7 @@ class HiatusWatcher(commands.Cog):
             return
         logger.debug(f"newly-online hiatus uuids: {newly_online}")
         for uuid in newly_online:
-            await maybe_alert_hiatus(self.bot, uuid)
+            await maybe_alert_hiatus(self.bot, uuid, server=players.get(uuid))
 
     @poll.before_loop
     async def _before_poll(self):

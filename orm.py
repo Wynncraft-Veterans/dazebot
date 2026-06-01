@@ -560,6 +560,34 @@ class BuildPromotion(Model):
         table = "build_promotions"
 
 
+class ReturnGuess(Model):
+    """One user's emerald-price guess for a ``/return 75`` day-N slot.
+
+    Used by ``cogs/events/returns/week_75.py``: each accepted submission
+    appends one row. Unique per (``week``, ``day``, ``discord_account``) —
+    re-submission for the same day is rejected (the user must ask staff if
+    they want their guess cleared).
+
+    Keyed by ``week`` (not an FK to ``WeeklyEvent``) for the same reason
+    ``StorySegment`` is: a future price-guessing week picks a new int with
+    no schema change. ``day`` is 1-7. ``price`` is the guess in raw
+    emeralds; the manage view re-renders it as stx/le/e.
+    """
+
+    id = fields.UUIDField(pk=True)
+    week = fields.IntField(index=True)
+    day = fields.IntField()
+    discord_account: fields.ForeignKeyRelation[DiscordAccount] = fields.ForeignKeyField(
+        "models.DiscordAccount", related_name="return_guesses", on_delete=fields.CASCADE
+    )
+    price = fields.IntField()
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "return_guesses"
+        unique_together = (("week", "day", "discord_account"),)
+
+
 class StorySegment(Model):
     """One fragment of a collaborative ``/return`` story event.
 
@@ -687,9 +715,9 @@ _EXPECTED_MODEL_TABLES = frozenset({
     "first_install_monitors", "guild_capacity_alerts", "intercult_messages",
     "janitor_alerts", "link_code", "link_requests", "minecraft_accounts",
     "minecraft_alts", "mojang_name_cache", "profession_categories",
-    "recruitment_queries", "scores", "shouts", "staff_action_entries",
-    "story_segments", "user_vanity_choices", "verify_keys", "waitlist",
-    "weekly_events",
+    "recruitment_queries", "return_guesses", "scores", "shouts",
+    "staff_action_entries", "story_segments", "user_vanity_choices",
+    "verify_keys", "waitlist", "weekly_events",
 })
 
 

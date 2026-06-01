@@ -157,12 +157,37 @@ class ServerWatcher(commands.Cog):
         observed = player.server
         now = datetime.now(timezone.utc)
 
+        # Stat-delta activity signal: monotonically-increasing globalData
+        # counters are positive proof of online play even when the player
+        # keeps logging into the same world (no server transition for the
+        # transition branch below to catch). The /v3/player envelope
+        # already carries these — no extra API spend. Decreases are
+        # treated as "no signal" (rare; character deletion is the main
+        # cause), but the baseline is still refreshed so subsequent
+        # increases will register.
+        prev_total = account.last_total_levels
+        prev_content = account.last_content_completion
+        new_total = player.globalData.totalLevels if player.globalData else None
+        new_content = player.globalData.contentCompletion if player.globalData else None
+        stat_signal = (
+            (new_total is not None and prev_total is not None and new_total > prev_total)
+            or
+            (new_content is not None and prev_content is not None and new_content > prev_content)
+        )
+        stat_fields: list[str] = []
+        if new_total is not None and new_total != prev_total:
+            account.last_total_levels = new_total
+            stat_fields.append("last_total_levels")
+        if new_content is not None and new_content != prev_content:
+            account.last_content_completion = new_content
+            stat_fields.append("last_content_completion")
+
         # Free-win path: player un-hid lastJoin between ticks. Adopt the
         # real timestamp directly so they clear out of the Unknown bucket
         # without needing to wait for a server transition. Same monotonic
         # discipline as ``lib/mc/wynn.py``: never roll back.
         if player.lastJoin is not None:
-            fields = ["last_seen_server", "server_observed_at"]
+            fields = ["last_seen_server", "server_observed_at"] + stat_fields
             if is_last_online_unknown(account.last_online) or account.last_online < player.lastJoin:
                 account.last_online = player.lastJoin
                 fields.append("last_online")
@@ -187,7 +212,7 @@ class ServerWatcher(commands.Cog):
             # Baseline only — we have nothing to compare against yet.
             account.last_seen_server = observed
             account.server_observed_at = now
-            await account.save(update_fields=["last_seen_server", "server_observed_at"])
+            await account.save(update_fields=["last_seen_server", "server_observed_at"] + stat_fields)
             logger.debug(f"{account.mc_username}: baseline server={observed!r}")
             return
 
@@ -198,7 +223,7 @@ class ServerWatcher(commands.Cog):
             account.last_online = now
             account.last_seen_server = observed
             account.server_observed_at = now
-            await account.save(update_fields=["last_online", "last_seen_server", "server_observed_at"])
+            await account.save(update_fields=["last_online", "last_seen_server", "server_observed_at"] + stat_fields)
             logger.info(
                 f"{account.mc_username}: server {prev_server!r} -> {observed!r}; "
                 "bumping last_online=now"
@@ -207,12 +232,25 @@ class ServerWatcher(commands.Cog):
                 await maybe_alert_hiatus(self.bot, account.uuid, server=observed)
             return
 
-        # No actionable change (same server, or asymmetric None). Touch the
-        # observation timestamp so the *next* change interval starts from
-        # this poll rather than from the original baseline.
+        # No actionable change in the server field. Touch the observation
+        # timestamp so the *next* change interval starts from this poll
+        # rather than the original baseline. A stat-delta signal counts
+        # here as a stand-alone positive proof of activity — bump
+        # last_online=now even though no server transition was seen.
+        fields = ["last_seen_server", "server_observed_at"] + stat_fields
         account.last_seen_server = observed
         account.server_observed_at = now
-        await account.save(update_fields=["last_seen_server", "server_observed_at"])
+        if stat_signal:
+            account.last_online = now
+            fields.append("last_online")
+            logger.info(
+                f"{account.mc_username}: stat delta "
+                f"(total_levels {prev_total}->{new_total}, content {prev_content}->{new_content}); "
+                "bumping last_online=now"
+            )
+            if account.uuid in self._hiatus_uuid_set:
+                await maybe_alert_hiatus(self.bot, account.uuid, server=observed)
+        await account.save(update_fields=fields)
 
 
 async def setup(bot: Bot):

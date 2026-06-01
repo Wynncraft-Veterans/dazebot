@@ -55,10 +55,13 @@ def create_app(bot: Bot) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {
-            "status": "ok",
-            "bot_ready": bot.is_ready(),
-        }
+        # 503 when the Discord gateway is down so external uptime checks
+        # (phare.io, etc.) treat a disconnected-but-running bot as down.
+        # Bare process liveness without a Discord connection isn't useful
+        # to operators — that's the failure mode worth paging on.
+        if not bot.is_ready():
+            raise HTTPException(status_code=503, detail="bot not ready")
+        return {"status": "ok", "bot_ready": True}
 
     @app.get("/api/auth/{uuid}/{msg}")
     async def link_attempt(uuid: str, msg: str):

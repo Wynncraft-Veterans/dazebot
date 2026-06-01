@@ -31,7 +31,7 @@ Slash commands are unprefixed. The prefix only applies to text/message commands.
 - **Repo layout:** flat — repo root is `dazebot/`, with source files (`bot.py`, `cogs/`, `lib/`, `api/`, `orm.py`, etc.) sitting directly inside.
 - **Stack:** Python 3.13, discord.py, tortoise-orm (SQLite), FastAPI (sidecar HTTP for sibling services)
 - **DB:** SQLite at `/app/data/dazebot.db` in production (mounted via `./data:/app/data`), `dev.db` at the repo root locally
-- **Public surface:** none — Discord-only on the public side; HTTP sidecar bound to `127.0.0.1:${DAZEBOT_PORT}` and reachable on the internal `verify` Docker network
+- **Public surface:** `GET https://hegea.wynnvets.org/health` only (path-scoped Traefik route for phare.io uptime monitoring; returns 503 when `bot.is_ready()` is false so a disconnected gateway pages). Every other path on that host 404s at Traefik. The rest of the HTTP sidecar is bound to `127.0.0.1:${DAZEBOT_PORT}` and reachable to sibling services on the internal `verify` Docker network
 - **Repo on GitHub:** `Wynncraft-Veterans/dazebot` (private)
 
 ## Related repos (same workspace)

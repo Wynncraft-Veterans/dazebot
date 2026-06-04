@@ -31,6 +31,12 @@ class Config:
     # Staff role (members can run staff slash commands without having admin perm)
     STAFF_ROLE = 1337993168502788216
 
+    # Strategist: high-trust tier sitting above STAFF and below ADMIN in
+    # lib/auth's hierarchy. Reusable gate for commands that should outlive
+    # a single staff member's term but stop short of needing the Discord
+    # Administrator permission (initial consumer: ~apartment force/evict).
+    ROLE_STRATEGIST = 1313782599378010163
+
     # Channel where blocklist alerts are posted when a blocked user is currently in the in-game guild.
     BLOCKLIST_ALERT_CHANNEL = 1412981365179416616
 

@@ -595,6 +595,23 @@ class ReturnGuess(Model):
         unique_together = (("week", "day", "discord_account"),)
 
 
+class Apartment(Model):
+    """One Returners apartment row. ``number`` is unique — ``~apartment create``
+    refuses on collision. NULL ``owner_mc_username`` means VACANT. Each user is
+    expected to own at most one apartment; this is enforced by the cog logic
+    (``cogs/community/apartment.py``), not the schema.
+    """
+
+    id = fields.UUIDField(pk=True)
+    number = fields.CharField(max_length=16, unique=True)
+    owner_mc_username: Optional[str] = fields.CharField(max_length=64, null=True)  # type: ignore
+    created_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "apartments"
+
+
 class StorySegment(Model):
     """One fragment of a collaborative ``/return`` story event.
 
@@ -717,14 +734,14 @@ def _backup_db_before_migration(db_path: str) -> str | None:
 # init_db can sanity-check the on-disk schema without running model queries).
 # Update this list whenever a table is added or removed.
 _EXPECTED_MODEL_TABLES = frozenset({
-    "blocklist", "bot_config_overrides", "build_promotions", "cult_memberships",
-    "cults", "dead_guild_alerts", "discord_accounts", "dm_sent_log",
-    "first_install_monitors", "guild_capacity_alerts", "intercult_messages",
-    "janitor_alerts", "link_code", "link_requests", "minecraft_accounts",
-    "minecraft_alts", "mojang_name_cache", "profession_categories",
-    "recruitment_queries", "return_guesses", "scores", "shouts",
-    "staff_action_entries", "story_segments", "user_vanity_choices",
-    "verify_keys", "waitlist", "weekly_events",
+    "apartments", "blocklist", "bot_config_overrides", "build_promotions",
+    "cult_memberships", "cults", "dead_guild_alerts", "discord_accounts",
+    "dm_sent_log", "first_install_monitors", "guild_capacity_alerts",
+    "intercult_messages", "janitor_alerts", "link_code", "link_requests",
+    "minecraft_accounts", "minecraft_alts", "mojang_name_cache",
+    "profession_categories", "recruitment_queries", "return_guesses",
+    "scores", "shouts", "staff_action_entries", "story_segments",
+    "user_vanity_choices", "verify_keys", "waitlist", "weekly_events",
 })
 
 

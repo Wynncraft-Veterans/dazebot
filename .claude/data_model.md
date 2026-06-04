@@ -134,6 +134,6 @@ Three changes prevent a repeat:
 2. `init_db` requires `DAZEBOT_ALLOW_FRESH_DB=1` to take the fresh-install branch. Missing file → boot fails loudly; operator must explicitly opt in.
 3. `_backup_db_before_migration` runs before any DDL, leaving a timestamped backup beside the live file. Recovery from a future incident is `cp` + restart instead of forensics.
 
-Recovery script: [`vets-deploy/scripts/restore-dazebot-db.sh`](../../vets-deploy/scripts/restore-dazebot-db.sh). Takes a backup file as input, stops the stack, preserves the wiped DB at `dazebot.db.wiped-<timestamp>`, installs the backup, restarts, prints aerich state + row counts.
+Recovery script: [`vets-deploy/scripts/one-off/restore-dazebot-db.sh`](../../vets-deploy/scripts/one-off/restore-dazebot-db.sh). Takes a backup file as input, stops the stack, preserves the wiped DB at `dazebot.db.wiped-<timestamp>`, installs the backup, restarts, prints aerich state + row counts.
 
 Production safety: The `dazebot.db-wal` sidecar can hold uncommitted writes if the container exits via SIGKILL. `runtime_config.set_override` issues a `PRAGMA wal_checkpoint(TRUNCATE)` after every write to mitigate this. Other write-heavy cogs *should* but don't always do the same; on a restart-during-write you may see a small recent change "rollback".

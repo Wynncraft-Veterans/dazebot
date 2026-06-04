@@ -202,3 +202,5 @@ start.sh
 # user_profile.md is a Claude auto-memory file (type: user) — describes the
 # individual developer, not the codebase. Stays local.
 /.claude/user_profile.md
+*.db-shm
+*.db-wal

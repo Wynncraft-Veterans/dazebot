@@ -14,3 +14,7 @@
 - [Auth flows](auth.md) — the two `/api/auth/...` flows that share a URL prefix and nothing else; tier resolution; auth-related env vars; cross-repo trust model.
 - [VerifyKey / vetsmod auth](verify_keys.md) — bearer-key issuance, rotation, revocation, introspection contract.
 - [Account linking](linking.md) — `LinkCode` flow over auth-stack chat forwarding. Code shape, primary + fallback matching, the "keep row on enforcement failure" rule.
+
+## Features
+
+- [Chore-Torn Palace](ctp.md) — `cogs/rewards/`. Append-only points ledger, prize catalog, glint leaderboard. Schema invariants (no mutable balance column, prize snapshots), permission tiers, `~ctp board` overloaded syntax, MEMBER/WAITLIST/HONOURARY-only glints filter.

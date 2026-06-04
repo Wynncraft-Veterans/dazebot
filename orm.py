@@ -637,6 +637,119 @@ class StorySegment(Model):
         table = "story_segments"
 
 
+# --- Chore-Torn Palace (CTP) ----------------------------------------------
+# Points / rewards system surfaced via the ``~ctp`` cog group. See
+# ``cogs/rewards/`` for the command layer and ``.claude/ctp.md`` for the
+# schema invariants. The ledger is append-only: balance = SUM(amount_delta)
+# over a user's CTPLedger rows, mirroring the StaffActionEntry pattern.
+
+
+class CTPBoard(Model):
+    """One reward board (DEV / TXT / ART / OPS / ...). ``enum`` is the short
+    uppercase tag used everywhere in commands; ``board_number`` is the
+    tasks.wynnvets.org board id (formatted into the URL on display);
+    ``role_id`` is the optional Discord role that members of this board hold
+    (used by admins to find eligible reward recipients out-of-band).
+    """
+
+    id = fields.UUIDField(pk=True)
+    enum = fields.CharField(max_length=8, unique=True)
+    board_number = fields.IntField()
+    role_id: Optional[str] = fields.CharField(max_length=64, null=True)  # type: ignore
+    created_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "ctp_boards"
+
+
+class CTPPrize(Model):
+    """An entry in the redeemable-prize catalog. ``(category, enum_name)``
+    is the lookup key used in ``~ctp redeem`` / ``~ctp prize edit``.
+    ``duration_seconds`` null = one-time / no expiry; a positive value is
+    the active-access window. ``disabled`` (default False) hides the prize
+    from ``~ctp prize info`` and refuses new redemptions, but ledger rows
+    that snapshotted this prize survive unaffected.
+    """
+
+    id = fields.UUIDField(pk=True)
+    category = fields.CharField(max_length=16)  # "Access" | "Change" | "Service" | "Gift"
+    enum_name = fields.CharField(max_length=32)
+    cost = fields.IntField()
+    duration_seconds: Optional[int] = fields.IntField(null=True)  # type: ignore
+    display = fields.CharField(max_length=255)
+    disclaimer: Optional[str] = fields.TextField(null=True)  # type: ignore
+    disabled = fields.BooleanField(default=False)
+    created_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "ctp_prizes"
+        unique_together = (("category", "enum_name"),)
+
+
+class CTPLedger(Model):
+    """Append-only point ledger. Balance = SUM(amount_delta) per user.
+
+    ``source`` discriminates rendering in ``~ctp history`` and is one of:
+    ``reward`` | ``redeem`` | ``gift_sent`` | ``gift_received`` |
+    ``glint_invest`` | ``admin_set``.
+
+    For ``source='redeem'`` with a time-bound prize, ``expires_at`` is
+    snapshotted at redemption (computed from prize.duration_seconds +
+    created_at) so a later prize-duration edit doesn't retroactively move
+    anyone's active window. ``prize_display_at_time`` /
+    ``prize_category_at_time`` are also snapshotted so deleting or disabling
+    a prize doesn't corrupt history. Gift creates two rows (sender -delta,
+    receiver +delta) with matching counterparty_disc_uuids; glint
+    investments leave a negative row here plus a positive increment on
+    ``CTPGlintInvestment``.
+    """
+
+    id = fields.UUIDField(pk=True)
+    discord_account: fields.ForeignKeyRelation[DiscordAccount] = fields.ForeignKeyField(
+        "models.DiscordAccount", related_name="ctp_ledger", on_delete=fields.CASCADE
+    )
+    amount_delta = fields.IntField()
+    source = fields.CharField(max_length=16, index=True)
+    board: fields.ForeignKeyNullableRelation[CTPBoard] = fields.ForeignKeyField(
+        "models.CTPBoard", related_name="ledger_entries", null=True, on_delete=fields.SET_NULL
+    )
+    task_number: Optional[int] = fields.IntField(null=True)  # type: ignore
+    prize: fields.ForeignKeyNullableRelation[CTPPrize] = fields.ForeignKeyField(
+        "models.CTPPrize", related_name="ledger_entries", null=True, on_delete=fields.SET_NULL
+    )
+    prize_display_at_time: Optional[str] = fields.CharField(max_length=255, null=True)  # type: ignore
+    prize_category_at_time: Optional[str] = fields.CharField(max_length=16, null=True)  # type: ignore
+    expires_at: Optional[datetime] = fields.DatetimeField(null=True)  # type: ignore
+    counterparty_disc_uuid: Optional[str] = fields.CharField(max_length=255, null=True)  # type: ignore
+    actor_disc_uuid = fields.CharField(max_length=255)
+    comment: Optional[str] = fields.TextField(null=True)  # type: ignore
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "ctp_ledger"
+
+
+class CTPGlintInvestment(Model):
+    """Cumulative-only invested-points total per user. The spec is explicit:
+    'this number can only ever increase' (chore_torn_palace.md line 92).
+    Stored separately from the ledger so a single SELECT answers the
+    leaderboard query; the matching negative ledger row
+    (``source='glint_invest'``) is what debits the user's balance.
+    """
+
+    id = fields.UUIDField(pk=True)
+    discord_account: fields.OneToOneRelation[DiscordAccount] = fields.OneToOneField(
+        "models.DiscordAccount", related_name="ctp_glint_investment", on_delete=fields.CASCADE
+    )
+    total_invested = fields.IntField(default=0)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "ctp_glint_investments"
+
+
 def _inspect_db_state(db_path: str) -> tuple[bool, set[str]]:
     """Return ``(file_exists, table_names)`` for the SQLite file at ``db_path``.
 
@@ -735,6 +848,7 @@ def _backup_db_before_migration(db_path: str) -> str | None:
 # Update this list whenever a table is added or removed.
 _EXPECTED_MODEL_TABLES = frozenset({
     "apartments", "blocklist", "bot_config_overrides", "build_promotions",
+    "ctp_boards", "ctp_glint_investments", "ctp_ledger", "ctp_prizes",
     "cult_memberships", "cults", "dead_guild_alerts", "discord_accounts",
     "dm_sent_log", "first_install_monitors", "guild_capacity_alerts",
     "intercult_messages", "janitor_alerts", "link_code", "link_requests",

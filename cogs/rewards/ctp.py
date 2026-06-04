@@ -1,0 +1,564 @@
+"""The ``~ctp`` (Chore-Torn Palace) command cog.
+
+The cog is intentionally a thin shim layer: every command resolves the
+invoker / target into a ``DiscordAccount``, dispatches to a function in
+``cogs.rewards.lib``, and renders the result. The point math, the
+ledger writes, and the leaderboard eligibility logic all live in the
+service modules so they can be exercised without standing up a bot.
+
+Permission tiers (lib/auth.py): ``@is_registered`` for the user-facing
+core, ``@is_guild`` for glints, ``@is_staff`` for staff CRUD, and
+``@is_admin`` for board + prize catalog management.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+import discord
+from discord.ext import commands
+
+from bot import Bot
+from cogs.rewards.lib import balance as balance_svc
+from cogs.rewards.lib import boards as boards_svc
+from cogs.rewards.lib import formatting
+from cogs.rewards.lib import glints as glints_svc
+from cogs.rewards.lib import prizes as prizes_svc
+from cogs.rewards.lib.confirm_view import ConfirmView
+from config import CurrConfig
+from lib.auth import is_admin, is_guild, is_registered, is_staff
+from lib.discord_utils.converters import CaseInsensitiveMember
+from lib.discord_utils.paginated_embed import Paginator, from_lines
+from orm import CTPBoard, DiscordAccount
+
+logger = logging.getLogger("dazebot.cogs.rewards.ctp")
+
+
+HISTORY_LINES_PER_PAGE = 10
+GLINTS_LINES_PER_PAGE = 20
+INFO_HISTORY_LIMIT = 15  # how many recent rows ``~ctp info`` shows inline
+
+
+async def _resolve_target_disc(
+    ctx: commands.Context, value: str
+) -> tuple[Optional[discord.Member], Optional[DiscordAccount]]:
+    """Resolve a ``<user>`` command arg to a ``(member, DiscordAccount)``
+    pair. The Discord side may be ``None`` if the input matched only a
+    DB row (rare but supported); the DB side may be ``None`` only when
+    the input matched neither a member nor an existing account.
+    """
+    member: Optional[discord.Member] = None
+    try:
+        member = await CaseInsensitiveMember().convert(ctx, value)
+    except commands.MemberNotFound:
+        pass
+
+    if member is not None:
+        disc = await balance_svc.get_or_create_disc(str(member.id))
+        return member, disc
+
+    disc = await DiscordAccount.filter(disc_uuid=value).first()
+    if disc is not None:
+        return None, disc
+    return None, None
+
+
+async def _board_memberships(member: discord.Member) -> list[str]:
+    """Return the ``enum`` of every board whose role_id the member holds.
+    Used for the ``~ctp status`` body. Boards with no ``role_id`` set
+    are skipped (we can't claim membership we can't verify).
+    """
+    boards = await CTPBoard.filter(role_id__isnull=False).all()
+    held = {r.id for r in member.roles}
+    return [
+        b.enum for b in boards
+        if b.role_id is not None and int(b.role_id) in held
+    ]
+
+
+class CTPCog(commands.Cog):
+    bot: Bot
+
+    def __init__(self, bot: Bot):
+        self.bot = bot
+        logger.info("CTPCog initialized")
+
+    # --- Group root ---------------------------------------------------
+
+    @commands.hybrid_group(name="ctp", description="Chore-Torn Palace points & prizes.")
+    async def ctp_group(self, ctx: commands.Context) -> None:
+        if ctx.invoked_subcommand is not None:
+            return
+        await ctx.reply(
+            "Use `~ctp status` (registered), `~ctp history`, `~ctp gift <user> <points>`, "
+            "`~ctp prize info`, `~ctp glints bids` (guild), `~ctp glints bid <n>`, "
+            "`~ctp balance <user>` (staff), `~ctp info <user>`, "
+            "`~ctp reward <user> <board> <task#> <points> <comment>`, "
+            "`~ctp redeem <user> <category> <enum>`, `~ctp access`, "
+            "`~ctp board <ENUM> <num> [role_id]` (admin), "
+            "`~ctp prize add/edit/disable/remove/disclaim ...`, "
+            "or `~ctp set <user> <value>`."
+        )
+
+    # --- Registered tier ----------------------------------------------
+
+    @ctp_group.command(name="status", description="(Registered) Show your CTP balance and glint rank.")
+    @is_registered()
+    async def ctp_status(self, ctx: commands.Context) -> None:
+        disc = await balance_svc.get_or_create_disc(str(ctx.author.id))
+        bal = await balance_svc.compute_balance(disc)
+        rank, total, glinted = await glints_svc.rank_of(disc=disc, bot=self.bot)
+        member = ctx.author if isinstance(ctx.author, discord.Member) else None
+        board_enums = await _board_memberships(member) if member is not None else []
+        lines = formatting.format_status_lines(
+            balance=bal,
+            glint_rank=rank,
+            is_glinted=glinted,
+            glint_total=total,
+            board_enums=board_enums,
+        )
+        await ctx.reply("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
+
+    @ctp_group.command(name="history", description="(Registered) Show your full CTP history.")
+    @is_registered()
+    async def ctp_history(self, ctx: commands.Context) -> None:
+        disc = await balance_svc.get_or_create_disc(str(ctx.author.id))
+        entries = await balance_svc.list_history(disc)
+        if not entries:
+            await ctx.reply("You have no CTP history yet.")
+            return
+        lines = formatting.format_history_lines(entries)
+        embeds = from_lines("Your CTP history", lines, HISTORY_LINES_PER_PAGE, logger)
+        view = Paginator(embeds) if len(embeds) > 1 else None
+        await ctx.reply(embed=embeds[0], view=view, allowed_mentions=discord.AllowedMentions.none())
+
+    @ctp_group.command(name="gift", description="(Registered) Gift CTP points to another user.")
+    @is_registered()
+    async def ctp_gift(
+        self, ctx: commands.Context, user: CaseInsensitiveMember, points: int
+    ) -> None:
+        if points <= 0:
+            await ctx.reply("You can only gift a positive number of points.")
+            return
+        receiver_member: discord.Member = user  # type: ignore[assignment]
+        if receiver_member.id == ctx.author.id:
+            await ctx.reply("You can't gift points to yourself.")
+            return
+        sender = await balance_svc.get_or_create_disc(str(ctx.author.id))
+        receiver = await balance_svc.get_or_create_disc(str(receiver_member.id))
+        sender_balance = await balance_svc.compute_balance(sender)
+        if sender_balance < points:
+            await ctx.reply(
+                f"You only have {sender_balance} points — can't gift {points}.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        view = ConfirmView(author_id=ctx.author.id)
+        prompt = await ctx.reply(
+            f"Are you sure you wish to give **{points}** points to {receiver_member.mention}? "
+            f"This will leave you with **{sender_balance - points}** points.",
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await view.wait()
+        if not view.confirmed:
+            await prompt.edit(content="Cancelled.", view=None)
+            return
+        await balance_svc.transfer_points(
+            sender=sender, receiver=receiver, amount=points, actor_disc_uuid=str(ctx.author.id),
+        )
+        await prompt.edit(
+            content=f"Confirmed! Gifted **{points}** points to {receiver_member.mention}.",
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    # --- Guild tier (glints) ------------------------------------------
+
+    @ctp_group.group(name="glints", description="(Guild) Glint-investment standings.")
+    async def glints_group(self, ctx: commands.Context) -> None:
+        if ctx.invoked_subcommand is None:
+            await ctx.reply("Use `~ctp glints bids` or `~ctp glints bid <number>`.")
+
+    @glints_group.command(name="bids", description="(Guild) List the top glint bidders.")
+    @is_guild()
+    async def glints_bids(self, ctx: commands.Context) -> None:
+        glinted, standby = await glints_svc.leaderboard(self.bot)
+        if not glinted and not standby:
+            await ctx.reply("No glint investments yet.")
+            return
+        lines = formatting.format_glint_leaderboard_lines(glinted, standby)
+        embeds = from_lines("Invested Points in Glints", lines, GLINTS_LINES_PER_PAGE, logger)
+        view = Paginator(embeds) if len(embeds) > 1 else None
+        await ctx.reply(embed=embeds[0], view=view, allowed_mentions=discord.AllowedMentions.none())
+
+    @glints_group.command(name="bid", description="(Guild) Add to your glint investment (irreversible).")
+    @is_guild()
+    async def glints_bid(self, ctx: commands.Context, number: int) -> None:
+        if number <= 0:
+            await ctx.reply("You can only invest a positive number of points.")
+            return
+        disc = await balance_svc.get_or_create_disc(str(ctx.author.id))
+        bal = await balance_svc.compute_balance(disc)
+        if bal < number:
+            await ctx.reply(
+                f"You only have {bal} points — can't invest {number}.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        view = ConfirmView(author_id=ctx.author.id)
+        prompt = await ctx.reply(
+            f"Are you sure you would like to spend **{number}** of your **{bal}** points on glints?\n"
+            f"Only the top {glints_svc.GLINT_VISIBLE_CUTOFF} active glint investors will be glinted "
+            "(current vets members, waitlist, or honourary only).\n"
+            "Points invested this way are cumulative and will never expire.",
+            view=view,
+        )
+        await view.wait()
+        if not view.confirmed:
+            await prompt.edit(content="Cancelled.", view=None)
+            return
+        _, new_total = await glints_svc.invest(
+            disc=disc, amount=number, actor_disc_uuid=str(ctx.author.id),
+        )
+        rank, _, is_glinted = await glints_svc.rank_of(disc=disc, bot=self.bot)
+        if rank is None:
+            tail = "You currently aren't eligible for the leaderboard, but your investment is recorded."
+        else:
+            verb = "is" if is_glinted else "is not"
+            tail = (
+                f"This puts you in position **{rank}**, which **{verb}** enough to get your glint!"
+            )
+        await prompt.edit(
+            content=(
+                f"Confirmed! You have added **{number}** points to your **{new_total}** glint investment.\n{tail}"
+            ),
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    # --- Staff tier ---------------------------------------------------
+
+    @ctp_group.command(name="balance", description="(Staff) Show a user's CTP balance.")
+    @is_staff()
+    async def ctp_balance(self, ctx: commands.Context, *, user: str) -> None:
+        member, disc = await _resolve_target_disc(ctx, user)
+        if disc is None:
+            await ctx.reply(f"No CTP account found for `{user}`.")
+            return
+        bal = await balance_svc.compute_balance(disc)
+        who = member.mention if member is not None else f"<@{disc.disc_uuid}>"
+        await ctx.reply(f"{who} has **{bal}** CTP points.", allowed_mentions=discord.AllowedMentions.none())
+
+    @ctp_group.command(name="info", description="(Staff) Show full CTP info for a user.")
+    @is_staff()
+    async def ctp_info(self, ctx: commands.Context, *, user: str) -> None:
+        member, disc = await _resolve_target_disc(ctx, user)
+        if disc is None:
+            await ctx.reply(f"No CTP account found for `{user}`.")
+            return
+        bal = await balance_svc.compute_balance(disc)
+        history = await balance_svc.list_history(disc, limit=INFO_HISTORY_LIMIT)
+        board_enums: list[str] = []
+        if member is not None:
+            board_enums = await _board_memberships(member)
+        header = [
+            f"<@{disc.disc_uuid}> has **{bal}** CTP points.",
+            f"Boards: {', '.join(board_enums) if board_enums else '(none)'}",
+            "History:" if history else "History: (empty)",
+        ]
+        lines = header + formatting.format_info_history_lines(history)
+        embeds = from_lines(f"CTP info — {member.display_name if member else disc.disc_uuid}", lines, HISTORY_LINES_PER_PAGE, logger)
+        view = Paginator(embeds) if len(embeds) > 1 else None
+        await ctx.reply(embed=embeds[0], view=view, allowed_mentions=discord.AllowedMentions.none())
+
+    @ctp_group.command(
+        name="reward",
+        description="(Staff) Award CTP points for a completed task.",
+    )
+    @is_staff()
+    async def ctp_reward(
+        self,
+        ctx: commands.Context,
+        user: CaseInsensitiveMember,
+        board_enum: str,
+        task_number: int,
+        points: int,
+        *,
+        comment: str,
+    ) -> None:
+        target_member: discord.Member = user  # type: ignore[assignment]
+        target_disc = await balance_svc.get_or_create_disc(str(target_member.id))
+        board: Optional[CTPBoard] = None
+        if board_enum.upper() not in {"N/A", "NONE", "-"}:
+            board = await boards_svc.find_by_enum(board_enum)
+            if board is None:
+                await ctx.reply(
+                    f"No board `{board_enum.upper()}` — use `~ctp board {board_enum.upper()} <id> <role_id>` to create it, "
+                    "or pass `N/A` to award without a board.",
+                )
+                return
+        await balance_svc.award(
+            target=target_disc,
+            board=board,
+            task_number=task_number,
+            points=points,
+            comment=comment,
+            actor_disc_uuid=str(ctx.author.id),
+        )
+        if board is not None and task_number > 0:
+            tail = (
+                f" on [board {board.enum}]({boards_svc.format_board_url(board)}) "
+                f"for [task {task_number}]({boards_svc.format_task_url(task_number)})"
+            )
+        elif board is not None:
+            tail = f" on [board {board.enum}]({boards_svc.format_board_url(board)})"
+        else:
+            tail = ""
+        await ctx.reply(
+            f"Awarded **{points}** points to {target_member.mention}{tail}.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @ctp_group.command(
+        name="redeem",
+        description="(Staff) Redeem a prize on behalf of a user.",
+    )
+    @is_staff()
+    async def ctp_redeem(
+        self,
+        ctx: commands.Context,
+        user: CaseInsensitiveMember,
+        category: str,
+        *,
+        prize_enum: str,
+    ) -> None:
+        target_member: discord.Member = user  # type: ignore[assignment]
+        target_disc = await balance_svc.get_or_create_disc(str(target_member.id))
+        prize = await prizes_svc.resolve_loose(category, prize_enum)
+        if prize is None:
+            await ctx.reply(
+                f"No prize matches `{category} {prize_enum}`. "
+                "Use `~ctp prize info` to see what's available.",
+            )
+            return
+        result = await prizes_svc.redeem(
+            target=target_disc, prize=prize, actor_disc_uuid=str(ctx.author.id),
+        )
+        if not result.ok:
+            await ctx.reply(result.message)
+            return
+        bits = [
+            f"Subtracted **{prize.cost}** points from {target_member.mention} for `{prize.display}`."
+        ]
+        if prize.duration_seconds:
+            bits.append(
+                f"Reminder, this prize should last for {formatting.format_duration(prize.duration_seconds)}."
+            )
+        if prize.disclaimer:
+            bits.append(f"*{prize.disclaimer}*")
+        await ctx.reply("\n".join(bits), allowed_mentions=discord.AllowedMentions.none())
+
+    @ctp_group.command(name="access", description="(Staff) List users with currently-active access prizes.")
+    @is_staff()
+    async def ctp_access(self, ctx: commands.Context) -> None:
+        rows = await prizes_svc.active_redemptions()
+        if not rows:
+            await ctx.reply("No active redemptions.")
+            return
+        guild = self.bot.get_guild(CurrConfig.GUILD)
+        members: dict[str, discord.Member] = {}
+        if guild is not None:
+            for r in rows:
+                uuid = r.discord_account.disc_uuid
+                if uuid in members:
+                    continue
+                try:
+                    m = guild.get_member(int(uuid))
+                except (TypeError, ValueError):
+                    m = None
+                if m is not None:
+                    members[uuid] = m
+        lines = formatting.format_active_redemptions(rows, members)
+        embeds = from_lines("Active CTP redemptions", lines, HISTORY_LINES_PER_PAGE, logger)
+        view = Paginator(embeds) if len(embeds) > 1 else None
+        await ctx.reply(embed=embeds[0], view=view, allowed_mentions=discord.AllowedMentions.none())
+
+    # --- Prize subgroup -----------------------------------------------
+
+    @ctp_group.group(name="prize", description="(Anyone) Prize info; admin subcommands gated.")
+    async def prize_group(self, ctx: commands.Context) -> None:
+        if ctx.invoked_subcommand is None:
+            await ctx.reply(
+                "Use `~ctp prize info` (registered) or "
+                "`~ctp prize add/edit/enable/disable/remove/disclaim` (admin)."
+            )
+
+    @prize_group.command(name="info", description="(Registered) Show the available CTP prizes.")
+    @is_registered()
+    async def prize_info(self, ctx: commands.Context) -> None:
+        await self._render_prize_info(ctx)
+
+    async def _render_prize_info(self, ctx: commands.Context) -> None:
+        prizes = await prizes_svc.all_visible()
+        if not prizes:
+            await ctx.reply("The prize catalog is empty.")
+            return
+        embeds = formatting.build_prize_info_embeds(prizes, CurrConfig.CTP_PRIZE_ARTWORK_URL)
+        view = Paginator(embeds) if len(embeds) > 1 else None
+        await ctx.reply(embed=embeds[0], view=view, allowed_mentions=discord.AllowedMentions.none())
+
+    @prize_group.command(
+        name="add",
+        description="(Admin) Add a prize: <category> <enum> <cost> <duration_seconds> <display>",
+    )
+    @is_admin()
+    async def prize_add(
+        self,
+        ctx: commands.Context,
+        category: str,
+        enum_name: str,
+        cost: int,
+        duration_seconds: int,
+        *,
+        display: str,
+    ) -> None:
+        if prizes_svc.normalize_category(category) is None:
+            await ctx.reply(f"Unknown category `{category}`. Expected one of: {', '.join(prizes_svc.CATEGORIES)}.")
+            return
+        duration = None if duration_seconds == 0 else duration_seconds
+        prize = await prizes_svc.create(
+            category=category, enum_name=enum_name, cost=cost,
+            duration_seconds=duration, display=display,
+        )
+        if prize is None:
+            await ctx.reply(f"Prize `{category.upper()}.{enum_name.upper()}` already exists.")
+            return
+        await ctx.reply(
+            f"Added `{prize.category}.{prize.enum_name}` (`{prize.cost}` points, "
+            f"{formatting.format_duration(prize.duration_seconds)})."
+        )
+
+    @prize_group.command(name="edit", description="(Admin) Edit a prize: <category.enum> <field> <value>")
+    @is_admin()
+    async def prize_edit(self, ctx: commands.Context, dotted: str, field: str, *, value: str) -> None:
+        parsed = prizes_svc.parse_dotted_key(dotted)
+        if parsed is None:
+            await ctx.reply(f"Could not parse `{dotted}` — expected `CATEGORY.ENUM`.")
+            return
+        cat, enum_name = parsed
+        prize = await prizes_svc.find(cat, enum_name)
+        if prize is None:
+            await ctx.reply(f"No prize `{cat}.{enum_name}`.")
+            return
+        ok, msg = await prizes_svc.edit_field(prize, field, value)
+        await ctx.reply(msg)
+        if not ok:
+            logger.info("prize edit refused: %s.%s field=%s value=%s", cat, enum_name, field, value)
+
+    @prize_group.command(name="disable", description="(Admin) Disable a prize (hides it from `~ctp prize info`).")
+    @is_admin()
+    async def prize_disable(self, ctx: commands.Context, *, dotted: str) -> None:
+        await self._prize_set_disabled(ctx, dotted, True)
+
+    @prize_group.command(name="enable", description="(Admin) Re-enable a previously disabled prize.")
+    @is_admin()
+    async def prize_enable(self, ctx: commands.Context, *, dotted: str) -> None:
+        await self._prize_set_disabled(ctx, dotted, False)
+
+    async def _prize_set_disabled(self, ctx: commands.Context, dotted: str, value: bool) -> None:
+        parsed = prizes_svc.parse_dotted_key(dotted)
+        if parsed is None:
+            await ctx.reply(f"Could not parse `{dotted}` — expected `CATEGORY.ENUM`.")
+            return
+        cat, enum_name = parsed
+        prize = await prizes_svc.find(cat, enum_name)
+        if prize is None:
+            await ctx.reply(f"No prize `{cat}.{enum_name}`.")
+            return
+        await prizes_svc.set_disabled(prize, value)
+        verb = "Disabled" if value else "Re-enabled"
+        await ctx.reply(f"{verb} `{cat}.{enum_name}`.")
+
+    @prize_group.command(name="remove", description="(Admin) Delete a prize from the catalog.")
+    @is_admin()
+    async def prize_remove(self, ctx: commands.Context, *, dotted: str) -> None:
+        parsed = prizes_svc.parse_dotted_key(dotted)
+        if parsed is None:
+            await ctx.reply(f"Could not parse `{dotted}` — expected `CATEGORY.ENUM`.")
+            return
+        cat, enum_name = parsed
+        prize = await prizes_svc.find(cat, enum_name)
+        if prize is None:
+            await ctx.reply(f"No prize `{cat}.{enum_name}`.")
+            return
+        await prizes_svc.delete(prize)
+        await ctx.reply(f"Deleted `{cat}.{enum_name}`. Existing ledger snapshots are preserved.")
+
+    @prize_group.command(name="disclaim", description="(Admin) Attach a disclaimer to a prize.")
+    @is_admin()
+    async def prize_disclaim(self, ctx: commands.Context, dotted: str, *, msg: str) -> None:
+        parsed = prizes_svc.parse_dotted_key(dotted)
+        if parsed is None:
+            await ctx.reply(f"Could not parse `{dotted}` — expected `CATEGORY.ENUM`.")
+            return
+        cat, enum_name = parsed
+        prize = await prizes_svc.find(cat, enum_name)
+        if prize is None:
+            await ctx.reply(f"No prize `{cat}.{enum_name}`.")
+            return
+        cleared = msg.strip().lower() in {"none", "clear", "off"}
+        await prizes_svc.set_disclaimer(prize, None if cleared else msg)
+        await ctx.reply(
+            f"{'Cleared' if cleared else 'Updated'} disclaimer for `{cat}.{enum_name}`."
+        )
+
+    # --- Admin tier (boards + set) ------------------------------------
+
+    @ctp_group.command(
+        name="board",
+        description="(Admin) Create/move/role-change/delete a board.",
+    )
+    @is_admin()
+    async def ctp_board(
+        self,
+        ctx: commands.Context,
+        enum: str,
+        value: str,
+        role_id: Optional[str] = None,
+    ) -> None:
+        # Two-arg form (``enum value``) handles move/role/delete; three-arg
+        # form (``enum value role_id``) creates or replaces the board.
+        # See ``boards.apply_board_command`` for the dispatch table.
+        args = [value] if role_id is None else [value, role_id]
+        result = await boards_svc.apply_board_command(enum, args)
+        await ctx.reply(result.message, allowed_mentions=discord.AllowedMentions.none())
+        logger.info(
+            "ctp board: enum=%s args=%s -> %s by %s", enum, args, result.action, ctx.author,
+        )
+
+    @ctp_group.command(name="set", description="(Admin) Forcibly set a user's CTP balance.")
+    @is_admin()
+    async def ctp_set(
+        self,
+        ctx: commands.Context,
+        user: CaseInsensitiveMember,
+        value: int,
+    ) -> None:
+        target_member: discord.Member = user  # type: ignore[assignment]
+        target = await balance_svc.get_or_create_disc(str(target_member.id))
+        previous = await balance_svc.compute_balance(target)
+        await balance_svc.set_balance(
+            target=target, new_value=value, actor_disc_uuid=str(ctx.author.id),
+        )
+        await ctx.reply(
+            f"Set {target_member.mention}'s CTP balance to **{value}** "
+            f"(was {previous}, written as a corrective ledger row).",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+async def setup(bot: Bot) -> None:
+    await bot.add_cog(CTPCog(bot))
+    logger.info("CTPCog loaded successfully")

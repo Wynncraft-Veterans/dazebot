@@ -86,6 +86,11 @@ class Config:
     GUILD_SCAN_MIN_PLAUSIBLE_FRACTION = 0.5
     GUILD_SCAN_MIN_PLAUSIBLE_ABS = 5
 
+    # Optional URL of the artwork shown alongside the ``~ctp prize info`` table
+    # (chore_torn_palace.md line 40). When None the embed renders text-only.
+    # Settable at runtime via ``/config`` (persisted to ``BotConfigOverride``).
+    CTP_PRIZE_ARTWORK_URL: str | None = None
+
     GUILD_DEAD_ALERT_ROLE_USA = 1402295013169172500
     GUILD_DEAD_ALERT_ROLE_EUROPE = 1436108975132119221
     GUILD_DEAD_ALERT_ROLE_ASIA = 1436109140195020892

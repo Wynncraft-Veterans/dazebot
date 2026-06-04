@@ -80,6 +80,17 @@ The role state itself (REGISTERED/HIATUS/MEMBER/HONOURARY/WAITLISTED) lives on D
 | `IntercultMessage` | `cogs/events/returns/lib/views/intercult_view.py` | Append-only log of cross-cult messages sent via the pinned intercult button. The 24h-per-cult cooldown is derived from the most recent row per `sender_cult_name`. Stores names (not FKs) so a future cult rename leaves history pointing at the name-at-time. |
 | `RecruitmentQuery` | `cogs/events/returns/lib/views/recruitment_view.py` | Append-only log of clicks on the pinned recruitment button (lists online players not in any cult). The 1h-per-cult cooldown is derived from the most recent row per `cult_name`. Same name-not-FK pattern as `IntercultMessage`. |
 
+## Chore-Torn Palace (CTP)
+
+| Table | Owner | Purpose |
+|---|---|---|
+| `CTPBoard` | `cogs/rewards/ctp.py` (`~ctp board`) | One row per reward board (DEV / TXT / ART / ...). `enum` + `board_number` + optional `role_id`. |
+| `CTPPrize` | `cogs/rewards/ctp.py` (`~ctp prize ...`) | Editable prize catalog. Unique on `(category, enum_name)`. `disabled` hides without deleting; `duration_seconds=None` means one-time. |
+| `CTPLedger` | `cogs/rewards/lib/balance.py` | Append-only point-movement log. Balance = `SUM(amount_delta)` per user; never store a balance column. `source` discriminates rendering (`reward` / `redeem` / `gift_sent` / `gift_received` / `glint_invest` / `admin_set`). Snapshots prize fields + `expires_at` so a prize edit / delete leaves history rendering intact. |
+| `CTPGlintInvestment` | `cogs/rewards/lib/glints.py` | Cumulative-only `total_invested` per Discord user (1:1, never decrements). Separate from the ledger so the leaderboard is one SELECT; the matching negative ledger row (`source='glint_invest'`) is what debits balance. |
+
+See [ctp.md](ctp.md) for the schema invariants, the overloaded `~ctp board` parsing, and the glints-eligibility rule (MEMBER / WAITLISTED / HONOURARY only on the leaderboard).
+
 ## Misc
 
 | Table | Owner | Purpose |

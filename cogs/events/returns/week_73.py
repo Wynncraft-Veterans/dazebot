@@ -44,7 +44,7 @@ import discord
 from discord.ext import commands
 
 from cogs.events.returns import Tier, register, register_manage
-from lib.auth import _has_admin_perm, _is_operator
+from lib.auth import _has_admin_perm, _is_operator, _resolve_member
 from lib.discord_utils.paginated_embed import Paginator
 from orm import DiscordAccount, Score, StorySegment, WeeklyEvent
 
@@ -77,16 +77,22 @@ _VIEW_TIMEOUT = 600
 # ---------------------------------------------------------------------------
 
 
-def _is_admin_or_higher(user: discord.abc.User) -> bool:
-    return _is_operator(user) or _has_admin_perm(user)
-
-
-def _can_contribute(user: discord.abc.User) -> bool:
-    if _is_admin_or_higher(user):
+def _is_admin_or_higher(
+    user: discord.abc.User, client: Optional[discord.Client] = None
+) -> bool:
+    if _is_operator(user):
         return True
-    return isinstance(user, discord.Member) and any(
-        r.id in STORY_ROLE_IDS for r in user.roles
-    )
+    member = _resolve_member(user, client)
+    return member is not None and _has_admin_perm(member)
+
+
+def _can_contribute(
+    user: discord.abc.User, client: Optional[discord.Client] = None
+) -> bool:
+    if _is_admin_or_higher(user, client):
+        return True
+    member = _resolve_member(user, client)
+    return member is not None and any(r.id in STORY_ROLE_IDS for r in member.roles)
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +283,7 @@ class _StoryContributeModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        if not _can_contribute(interaction.user):
+        if not _can_contribute(interaction.user, interaction.client):
             await interaction.followup.send(
                 "You don't have a role that can take part in the Return 73 story.",
                 ephemeral=True,
@@ -347,7 +353,7 @@ class _StoryView(discord.ui.View):
         self.add_item(btn)
 
     async def _on_click(self, interaction: discord.Interaction) -> None:
-        if not _can_contribute(interaction.user):
+        if not _can_contribute(interaction.user, interaction.client):
             await interaction.response.send_message(
                 "You don't have a role that can take part in the Return 73 story.",
                 ephemeral=True,
@@ -367,7 +373,7 @@ class _StoryView(discord.ui.View):
 
 
 async def _show_tail(ctx: commands.Context) -> None:
-    if not _can_contribute(ctx.author):
+    if not _can_contribute(ctx.author, ctx.bot):
         await _private(
             ctx,
             "You don't have a role that can take part in the Return 73 story.",
@@ -381,7 +387,7 @@ async def _show_tail(ctx: commands.Context) -> None:
 
 
 async def _show_full(ctx: commands.Context) -> None:
-    if not _is_admin_or_higher(ctx.author):
+    if not _is_admin_or_higher(ctx.author, ctx.bot):
         await _private(ctx, "Administrator is required to view the entire story.")
         return
 

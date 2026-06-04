@@ -36,6 +36,7 @@ from lib.auth import (
     _has_registered_role,
     _has_staff_role,
     _is_operator,
+    _resolve_member,
 )
 
 logger = logging.getLogger("dazebot.cogs.events.returns._common")
@@ -45,6 +46,8 @@ def tier_allows(
     user: discord.abc.User,
     tier: Tier,
     custom_check: Optional[UserCustomCheck] = None,
+    *,
+    client: Optional[discord.Client] = None,
 ) -> bool:
     """True if ``user`` meets ``tier`` (with higher tiers satisfying lower).
 
@@ -54,18 +57,28 @@ def tier_allows(
     If ``custom_check`` is provided it acts as an OR-override: a user who
     would fail the tier but satisfies the custom predicate still passes.
     Used by Return 73 to admit ``STORY_ROLE_IDS`` holders.
+
+    ``client`` lets us look up the user's :class:`discord.Member` in
+    ``CurrConfig.GUILD`` when ``user`` is a bare :class:`discord.User` (DM
+    invocation). Without it, a non-Member user only passes the operator
+    (id-based) check — same as before.
     """
-    if custom_check is not None and custom_check(user):
+    member = _resolve_member(user, client)
+    if custom_check is not None and custom_check(
+        member if member is not None else user, client
+    ):
         return True
     if _is_operator(user):
         return True  # OPERATOR satisfies every tier
-    if _has_admin_perm(user):
+    if member is None:
+        return False  # DM without guild membership: nothing role-based passes
+    if _has_admin_perm(member):
         return tier <= Tier.ADMIN
-    if _has_staff_role(user):
+    if _has_staff_role(member):
         return tier <= Tier.STAFF
-    if _has_guild_role(user):
+    if _has_guild_role(member):
         return tier <= Tier.GUILD
-    if _has_registered_role(user):
+    if _has_registered_role(member):
         # Reached only when the user holds ROLE_REGISTERED but no guild role
         # (guild-role users took the earlier branch).
         return tier <= Tier.REGISTERED
@@ -74,7 +87,7 @@ def tier_allows(
 
 async def manage_tier_allows(ctx: commands.Context, sub: ManageSubcommand) -> bool:
     """Manage-subcommand variant: tier check plus async custom check."""
-    if not tier_allows(ctx.author, sub.tier):
+    if not tier_allows(ctx.author, sub.tier, client=ctx.bot):
         return False
     if sub.custom_check is not None:
         try:

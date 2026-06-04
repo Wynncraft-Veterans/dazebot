@@ -64,7 +64,9 @@ class Returns(commands.Cog):
         if handler is None:
             await ctx.reply(f"No Return registered for week {id}.", ephemeral=True)
             return
-        if not tier_allows(ctx.author, handler.tier, handler.custom_check):
+        if not tier_allows(
+            ctx.author, handler.tier, handler.custom_check, client=ctx.bot
+        ):
             await ctx.reply(
                 "You don't have access to this Return.", ephemeral=True
             )

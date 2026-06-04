@@ -279,8 +279,8 @@ def test_tier_allows_custom_check_overrides_failing_tier(mock_member, pinned_rol
     who'd otherwise fail the tier."""
     u = mock_member(role_ids=())
     assert tier_allows(u, Tier.GUILD) is False
-    assert tier_allows(u, Tier.GUILD, custom_check=lambda _u: True) is True
-    assert tier_allows(u, Tier.GUILD, custom_check=lambda _u: False) is False
+    assert tier_allows(u, Tier.GUILD, custom_check=lambda _u, _c: True) is True
+    assert tier_allows(u, Tier.GUILD, custom_check=lambda _u, _c: False) is False
 
 
 # ---------------------------------------------------------------------------

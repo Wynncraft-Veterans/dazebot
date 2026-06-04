@@ -61,7 +61,11 @@ UserCallback = Callable[[commands.Context], Awaitable[None]]
 ManageCallback = Callable[[commands.Context, list[str]], Awaitable[None]]
 # Custom checks: sync for user handlers (cheap predicate), async for manage
 # subcommands (figurehead lookup hits the DB).
-UserCustomCheck = Callable[[discord.abc.User], bool]
+#
+# The user-handler check receives the resolved Member of CurrConfig.GUILD
+# when possible (or the original User in pure-DM operator-only paths) plus
+# the client, so the check can do its own guild lookups (e.g. roles in DMs).
+UserCustomCheck = Callable[[discord.abc.User, Optional[discord.Client]], bool]
 ManageCustomCheck = Callable[[commands.Context], Awaitable[bool]]
 
 

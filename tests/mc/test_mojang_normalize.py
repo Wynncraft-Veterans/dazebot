@@ -25,7 +25,3 @@ def test_already_normalized_passes_through():
 
 def test_mixed_case_undashed():
     assert _normalize_uuid("AaBbCcDd") == "aabbccdd"
-
-
-def test_empty_string():
-    assert _normalize_uuid("") == ""

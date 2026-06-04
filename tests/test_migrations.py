@@ -80,38 +80,24 @@ def _find_ephemeral_snapshot() -> Path | None:
 EPHEMERAL_DB = _find_ephemeral_snapshot()
 
 
-# All model tables that the initial migration creates. Used to assert
-# every table is present after a fresh-DB bootstrap.
-EXPECTED_TABLES = {
-    "aerich",
-    "blocklist",
-    "bot_config_overrides",
-    "build_promotions",
-    "cult_memberships",
-    "cults",
-    "dead_guild_alerts",
-    "discord_accounts",
-    "dm_sent_log",
-    "first_install_monitors",
-    "guild_capacity_alerts",
-    "intercult_messages",
-    "janitor_alerts",
-    "link_code",
-    "link_requests",
-    "minecraft_accounts",
-    "minecraft_alts",
-    "mojang_name_cache",
-    "profession_categories",
-    "recruitment_queries",
-    "scores",
-    "shouts",
-    "staff_action_entries",
-    "story_segments",
-    "user_vanity_choices",
-    "verify_keys",
-    "waitlist",
-    "weekly_events",
-}
+# All model tables that the initial migration + follow-ups create. Used to
+# assert every table is present after a fresh-DB bootstrap. Computed from
+# the live model registry so adding a model doesn't silently desync the
+# assertion — the table set is what Tortoise *would* create from orm.py.
+def _expected_tables() -> set[str]:
+    import orm as _orm
+    from tortoise.models import Model
+
+    return {"aerich"} | {
+        cls._meta.db_table
+        for name in dir(_orm)
+        if isinstance((cls := getattr(_orm, name, None)), type)
+        and issubclass(cls, Model)
+        and cls is not Model
+    }
+
+
+EXPECTED_TABLES = _expected_tables()
 
 
 @pytest.fixture

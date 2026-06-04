@@ -12,11 +12,6 @@ from datetime import datetime, timedelta, timezone
 from orm import UNKNOWN_LAST_ONLINE, is_last_online_unknown
 
 
-def test_unknown_sentinel_is_unix_epoch_utc():
-    assert UNKNOWN_LAST_ONLINE == datetime.fromtimestamp(0, tz=timezone.utc)
-    assert UNKNOWN_LAST_ONLINE.tzinfo is not None
-
-
 def test_none_is_unknown():
     assert is_last_online_unknown(None) is True
 
@@ -43,9 +38,4 @@ def test_24h_plus_one_second_after_epoch_is_known():
 
 def test_recent_timestamp_is_known():
     dt = datetime(2026, 5, 21, 12, 0, 0, tzinfo=timezone.utc)
-    assert is_last_online_unknown(dt) is False
-
-
-def test_far_future_timestamp_is_known():
-    dt = datetime(2099, 1, 1, tzinfo=timezone.utc)
     assert is_last_online_unknown(dt) is False

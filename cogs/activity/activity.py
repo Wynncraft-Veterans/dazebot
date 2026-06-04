@@ -471,6 +471,17 @@ class Activity(commands.Cog):
     @shout_group.command(name="send", description="Record a shout you just did in-game")
     @is_shouter(ROLES_ALLOWED_TO_SHOUT)
     async def shout_send(self, ctx: commands.Context):
+        # Wynn caps guild shouts at 3 per rolling 24h, regardless of who posts.
+        window_start = datetime.now(timezone.utc) - timedelta(hours=24)
+        recent = await Shout.filter(created_at__gte=window_start).order_by("created_at")
+        if len(recent) >= 3:
+            next_ok = int((recent[0].created_at + timedelta(hours=24)).timestamp())
+            await ctx.reply(
+                f"The guild has already shouted {len(recent)} times in the last 24h "
+                f"(Wynn's cap is 3). **Do not shout yet.**\n"
+                f"Next valid shout time: <t:{next_ok}:F> (<t:{next_ok}:R>)."
+            )
+            return
         discord_acc, _ = await DiscordAccount.get_or_create(disc_uuid=str(ctx.author.id))
         await Shout.create(shouter=discord_acc)
         discord_acc.shout_count += 1

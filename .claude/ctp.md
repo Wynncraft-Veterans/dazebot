@@ -13,7 +13,7 @@ The CTP cog ([cogs/rewards/ctp.py](../cogs/rewards/ctp.py)) is the points-and-pr
 | Glint invest / leaderboard / rank lookup | [cogs/rewards/lib/glints.py](../cogs/rewards/lib/glints.py) |
 | Yes/No confirmation view (gift, glint bid) | [cogs/rewards/lib/confirm_view.py](../cogs/rewards/lib/confirm_view.py) |
 | Embed builders and history-line formatters | [cogs/rewards/lib/formatting.py](../cogs/rewards/lib/formatting.py) |
-| ORM tables | [orm.py](../orm.py) — `CTPBoard`, `CTPPrize`, `CTPLedger`, `CTPGlintInvestment` |
+| ORM tables | [orm.py](../orm.py) — `CTPBoard`, `CTPBoardMembership`, `CTPPrize`, `CTPLedger`, `CTPGlintInvestment` |
 | Initial prize-catalog seed | [vets-deploy/scripts/one-off/seed-dazebot-ctp-catalog.sh](../../vets-deploy/scripts/one-off/seed-dazebot-ctp-catalog.sh) |
 
 ## Schema invariants
@@ -36,7 +36,7 @@ Reused from [lib/auth.py](../lib/auth.py) verbatim — no new decorators.
 |---|---|---|
 | Registered | `@is_registered()` | `status`, `history`, `gift`, `prize info` |
 | Guild | `@is_guild()` | `glints bids`, `glints bid` |
-| Staff | `@is_staff()` | `balance`, `info`, `reward`, `redeem`, `access` |
+| Staff | `@is_staff()` | `balance`, `info`, `reward`, `redeem`, `access`, `assign`, `revoke` |
 | Admin | `@is_admin()` | `board`, `prize add/edit/disable/enable/remove/disclaim`, `set` |
 
 ## Glints leaderboard rules
@@ -46,6 +46,19 @@ Reused from [lib/auth.py](../lib/auth.py) verbatim — no new decorators.
 Visible cutoff: `glints.GLINT_VISIBLE_CUTOFF = 8`. Ranks 1–8 render under **Currently Glinted**, ranks 9+ under **Standby**. `is_glinted` (used by `~ctp status`) is true iff `rank <= 8 AND rank is not None`.
 
 Note: HIATUS users are NOT blocked from running `~ctp glints bid` — they keep accruing investment so re-joining the guild puts them back in the right position. Only the visible leaderboard and the `is_glinted` flag filter.
+
+## Board membership (manual vs role-derived)
+
+A user "is on" a board if **either** of:
+
+1. They hold the board's `role_id` in Discord (the original mechanism). Boards with no `role_id` set are skipped on this side — we can't claim membership we can't verify.
+2. A staff member has written a `CTPBoardMembership(disc, board)` row via `~ctp assign`.
+
+`_board_memberships` in [cogs/rewards/ctp.py](../cogs/rewards/ctp.py) unions the two and dedupes. The list surfaces in `~ctp status` and `~ctp info <user>`; nothing else in the codebase consumes board membership today.
+
+`~ctp assign <user> <ENUM>` and `~ctp revoke <user> <ENUM>` are staff-tier. They write/delete the DB row **and** grant/strip the board's `role_id` from the target as a one-shot side effect at command time. There is no drift sync — if the role is later removed by hand in Discord, the DB row stays, and vice versa. This is intentional: the DB row is the staff-driven "manual" assignment record; the Discord role is whatever role-management is happening in the server, which membership reads opportunistically. The one-shot grant just exists so staff doesn't have to do two clicks.
+
+Failures of the role half (missing permissions, board has no `role_id`, role deleted from the guild) are reported back to the staff member in the reply but do NOT roll back the DB write — the assignment is recorded regardless. `actor_disc_uuid` on the row captures who did the assign for forensics; no UI surfaces it today.
 
 ## Active redemptions
 

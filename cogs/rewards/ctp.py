@@ -64,17 +64,22 @@ async def _resolve_target_disc(
     return None, None
 
 
-async def _board_memberships(member: discord.Member) -> list[str]:
-    """Return the ``enum`` of every board whose role_id the member holds.
-    Used for the ``~ctp status`` body. Boards with no ``role_id`` set
-    are skipped (we can't claim membership we can't verify).
+async def _board_memberships(
+    disc: DiscordAccount, member: Optional[discord.Member]
+) -> list[str]:
+    """Union of manual (``~ctp assign``-written) board enums and the
+    role-derived ones. Role detection is skipped when ``member`` is None
+    (target left the server / not resolvable), so manual rows still
+    surface in ``~ctp info`` for absent users.
     """
-    boards = await CTPBoard.filter(role_id__isnull=False).all()
-    held = {r.id for r in member.roles}
-    return [
-        b.enum for b in boards
-        if b.role_id is not None and int(b.role_id) in held
-    ]
+    enums: set[str] = set(await boards_svc.list_manual_enums_for(disc))
+    if member is not None:
+        boards = await CTPBoard.filter(role_id__isnull=False).all()
+        held = {r.id for r in member.roles}
+        for b in boards:
+            if b.role_id is not None and int(b.role_id) in held:
+                enums.add(b.enum)
+    return sorted(enums)
 
 
 class CTPCog(commands.Cog):
@@ -96,6 +101,7 @@ class CTPCog(commands.Cog):
             "`~ctp balance <user>` (staff), `~ctp info <user>`, "
             "`~ctp reward <user> <board> <task#> <points> <comment>`, "
             "`~ctp redeem <user> <category> <enum>`, `~ctp access`, "
+            "`~ctp assign <user> <ENUM>`, `~ctp revoke <user> <ENUM>`, "
             "`~ctp board <ENUM> <num> [role_id]` (admin), "
             "`~ctp prize add/edit/disable/remove/disclaim ...`, "
             "or `~ctp set <user> <value>`."
@@ -110,7 +116,7 @@ class CTPCog(commands.Cog):
         bal = await balance_svc.compute_balance(disc)
         rank, total, glinted = await glints_svc.rank_of(disc=disc, bot=self.bot)
         member = ctx.author if isinstance(ctx.author, discord.Member) else None
-        board_enums = await _board_memberships(member) if member is not None else []
+        board_enums = await _board_memberships(disc, member)
         lines = formatting.format_status_lines(
             balance=bal,
             glint_rank=rank,
@@ -260,9 +266,7 @@ class CTPCog(commands.Cog):
             return
         bal = await balance_svc.compute_balance(disc)
         history = await balance_svc.list_history(disc, limit=INFO_HISTORY_LIMIT)
-        board_enums: list[str] = []
-        if member is not None:
-            board_enums = await _board_memberships(member)
+        board_enums = await _board_memberships(disc, member)
         header = [
             f"<@{disc.disc_uuid}> has **{bal}** CTP points.",
             f"Boards: {', '.join(board_enums) if board_enums else '(none)'}",
@@ -359,6 +363,113 @@ class CTPCog(commands.Cog):
         if prize.disclaimer:
             bits.append(f"*{prize.disclaimer}*")
         await ctx.reply("\n".join(bits), allowed_mentions=discord.AllowedMentions.none())
+
+    @ctp_group.command(
+        name="assign",
+        description="(Staff) Add a user to a CTP board (writes the membership + grants the board's role).",
+    )
+    @is_staff()
+    async def ctp_assign(
+        self, ctx: commands.Context, user: CaseInsensitiveMember, board_enum: str,
+    ) -> None:
+        target_member: discord.Member = user  # type: ignore[assignment]
+        board = await boards_svc.find_by_enum(board_enum)
+        if board is None:
+            await ctx.reply(
+                f"No board `{board_enum.upper()}` — use "
+                f"`~ctp board {board_enum.upper()} <board_number> <role_id>` to create it.",
+            )
+            return
+        target_disc = await balance_svc.get_or_create_disc(str(target_member.id))
+        created = await boards_svc.assign_membership(
+            disc=target_disc, board=board, actor_disc_uuid=str(ctx.author.id),
+        )
+        role_note = await self._grant_board_role(ctx, target_member, board)
+        head = (
+            f"Assigned {target_member.mention} to board `{board.enum}`."
+            if created
+            else f"{target_member.mention} was already assigned to board `{board.enum}`."
+        )
+        await ctx.reply(f"{head}{role_note}", allowed_mentions=discord.AllowedMentions.none())
+
+    @ctp_group.command(
+        name="revoke",
+        description="(Staff) Remove a user from a CTP board (deletes the membership + strips the board's role).",
+    )
+    @is_staff()
+    async def ctp_revoke(
+        self, ctx: commands.Context, user: CaseInsensitiveMember, board_enum: str,
+    ) -> None:
+        target_member: discord.Member = user  # type: ignore[assignment]
+        board = await boards_svc.find_by_enum(board_enum)
+        if board is None:
+            await ctx.reply(f"No board `{board_enum.upper()}`.")
+            return
+        target_disc = await balance_svc.get_or_create_disc(str(target_member.id))
+        deleted = await boards_svc.revoke_membership(disc=target_disc, board=board)
+        role_note = await self._strip_board_role(ctx, target_member, board)
+        head = (
+            f"Revoked {target_member.mention} from board `{board.enum}`."
+            if deleted
+            else f"{target_member.mention} was not assigned to board `{board.enum}`."
+        )
+        await ctx.reply(f"{head}{role_note}", allowed_mentions=discord.AllowedMentions.none())
+
+    async def _grant_board_role(
+        self, ctx: commands.Context, member: discord.Member, board: CTPBoard,
+    ) -> str:
+        """One-shot role grant on assign. Returns a trailing-space-prefixed
+        note for the staff reply (empty if there's nothing to say). The
+        board membership is the source of truth — failure here is logged
+        but does not roll back the DB write.
+        """
+        if board.role_id is None:
+            return ""
+        try:
+            role_id_int = int(board.role_id)
+        except ValueError:
+            logger.warning("ctp assign: board %s has non-int role_id %r", board.enum, board.role_id)
+            return f" (board has malformed role_id `{board.role_id}`; no role grant attempted)"
+        role = ctx.guild.get_role(role_id_int) if ctx.guild is not None else None
+        if role is None:
+            return f" (role <@&{board.role_id}> not found in this guild; no role grant)"
+        if role in member.roles:
+            return f" Already had role {role.mention}."
+        try:
+            await member.add_roles(role, reason=f"~ctp assign by {ctx.author}")
+        except discord.Forbidden:
+            logger.warning("ctp assign: forbidden granting role %s to %s", role.id, member.id)
+            return f" (failed to grant {role.mention}: missing permissions)"
+        except discord.HTTPException as e:
+            logger.warning("ctp assign: HTTPException granting role %s to %s: %s", role.id, member.id, e)
+            return f" (failed to grant {role.mention}: {e})"
+        return f" Granted role {role.mention}."
+
+    async def _strip_board_role(
+        self, ctx: commands.Context, member: discord.Member, board: CTPBoard,
+    ) -> str:
+        """One-shot role strip on revoke. Symmetric to ``_grant_board_role``."""
+        if board.role_id is None:
+            return ""
+        try:
+            role_id_int = int(board.role_id)
+        except ValueError:
+            logger.warning("ctp revoke: board %s has non-int role_id %r", board.enum, board.role_id)
+            return f" (board has malformed role_id `{board.role_id}`; no role strip attempted)"
+        role = ctx.guild.get_role(role_id_int) if ctx.guild is not None else None
+        if role is None:
+            return f" (role <@&{board.role_id}> not found in this guild; no role strip)"
+        if role not in member.roles:
+            return f" They did not have role {role.mention}."
+        try:
+            await member.remove_roles(role, reason=f"~ctp revoke by {ctx.author}")
+        except discord.Forbidden:
+            logger.warning("ctp revoke: forbidden removing role %s from %s", role.id, member.id)
+            return f" (failed to remove {role.mention}: missing permissions)"
+        except discord.HTTPException as e:
+            logger.warning("ctp revoke: HTTPException removing role %s from %s: %s", role.id, member.id, e)
+            return f" (failed to remove {role.mention}: {e})"
+        return f" Removed role {role.mention}."
 
     @ctp_group.command(name="access", description="(Staff) List users with currently-active access prizes.")
     @is_staff()

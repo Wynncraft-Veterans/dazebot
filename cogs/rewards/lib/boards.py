@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from orm import CTPBoard
+from orm import CTPBoard, CTPBoardMembership, DiscordAccount
 
 
 # Lengths used to disambiguate "is this a board number, a role snowflake,
@@ -53,6 +53,42 @@ def format_task_url(task_number: int) -> str:
     that case rather than format it here.
     """
     return f"https://tasks.wynnvets.org/task/{task_number}"
+
+
+async def list_manual_enums_for(disc: DiscordAccount) -> list[str]:
+    """The set of board ``enum`` tags this user has been manually assigned
+    to via ``~ctp assign``. Surfaced by ``_board_memberships`` in
+    ``cogs/rewards/ctp.py`` alongside role-derived memberships; the cog
+    deduplicates.
+    """
+    rows = await CTPBoardMembership.filter(discord_account=disc).prefetch_related("board")
+    return [r.board.enum for r in rows]
+
+
+async def assign_membership(
+    *, disc: DiscordAccount, board: CTPBoard, actor_disc_uuid: str
+) -> bool:
+    """Idempotent create. Returns True if a new row was written, False if
+    the user was already assigned. The caller is responsible for any
+    Discord role grant — this function does not touch Discord state.
+    """
+    _, created = await CTPBoardMembership.get_or_create(
+        discord_account=disc,
+        board=board,
+        defaults={"actor_disc_uuid": actor_disc_uuid},
+    )
+    return created
+
+
+async def revoke_membership(*, disc: DiscordAccount, board: CTPBoard) -> bool:
+    """Delete the manual association if present. Returns True if a row was
+    deleted, False if there was nothing to remove. As with
+    ``assign_membership``, Discord roles are the caller's concern.
+    """
+    deleted = await CTPBoardMembership.filter(
+        discord_account=disc, board=board
+    ).delete()
+    return bool(deleted)
 
 
 async def apply_board_command(enum: str, args: list[str]) -> BoardOpResult:

@@ -663,6 +663,33 @@ class CTPBoard(Model):
         table = "ctp_boards"
 
 
+class CTPBoardMembership(Model):
+    """A manual staff-assigned association between a Discord user and a CTP
+    board, surfaced in ``~ctp status`` / ``~ctp info`` alongside the
+    role-derived memberships. Carries no Discord side effect: assigning a
+    user does NOT grant the board's ``role_id``, and revoking does NOT
+    strip it. The two membership sources (role-held + manual) are unioned
+    at read time by ``_board_memberships`` in ``cogs/rewards/ctp.py``.
+
+    ``actor_disc_uuid`` is captured for forensic value (who assigned
+    whom); no audit UI consumes it today.
+    """
+
+    id = fields.UUIDField(pk=True)
+    discord_account: fields.ForeignKeyRelation[DiscordAccount] = fields.ForeignKeyField(
+        "models.DiscordAccount", related_name="ctp_board_memberships", on_delete=fields.CASCADE
+    )
+    board: fields.ForeignKeyRelation[CTPBoard] = fields.ForeignKeyField(
+        "models.CTPBoard", related_name="memberships", on_delete=fields.CASCADE
+    )
+    actor_disc_uuid = fields.CharField(max_length=255)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "ctp_board_memberships"
+        unique_together = (("discord_account", "board"),)
+
+
 class CTPPrize(Model):
     """An entry in the redeemable-prize catalog. ``(category, enum_name)``
     is the lookup key used in ``~ctp redeem`` / ``~ctp prize edit``.
@@ -848,7 +875,8 @@ def _backup_db_before_migration(db_path: str) -> str | None:
 # Update this list whenever a table is added or removed.
 _EXPECTED_MODEL_TABLES = frozenset({
     "apartments", "blocklist", "bot_config_overrides", "build_promotions",
-    "ctp_boards", "ctp_glint_investments", "ctp_ledger", "ctp_prizes",
+    "ctp_board_memberships", "ctp_boards", "ctp_glint_investments",
+    "ctp_ledger", "ctp_prizes",
     "cult_memberships", "cults", "dead_guild_alerts", "discord_accounts",
     "dm_sent_log", "first_install_monitors", "guild_capacity_alerts",
     "intercult_messages", "janitor_alerts", "link_code", "link_requests",

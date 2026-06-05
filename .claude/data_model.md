@@ -85,6 +85,7 @@ The role state itself (REGISTERED/HIATUS/MEMBER/HONOURARY/WAITLISTED) lives on D
 | Table | Owner | Purpose |
 |---|---|---|
 | `CTPBoard` | `cogs/rewards/ctp.py` (`~ctp board`) | One row per reward board (DEV / TXT / ART / ...). `enum` + `board_number` + optional `role_id`. |
+| `CTPBoardMembership` | `cogs/rewards/ctp.py` (`~ctp assign` / `~ctp revoke`) | Manual staff-assigned (`disc_account`, `board`) association. Unioned with role-derived membership by `_board_memberships`. Assign/revoke also grant/strip the board's `role_id` as a one-shot side effect — see [ctp.md](ctp.md) "Board membership". |
 | `CTPPrize` | `cogs/rewards/ctp.py` (`~ctp prize ...`) | Editable prize catalog. Unique on `(category, enum_name)`. `disabled` hides without deleting; `duration_seconds=None` means one-time. |
 | `CTPLedger` | `cogs/rewards/lib/balance.py` | Append-only point-movement log. Balance = `SUM(amount_delta)` per user; never store a balance column. `source` discriminates rendering (`reward` / `redeem` / `gift_sent` / `gift_received` / `glint_invest` / `admin_set`). Snapshots prize fields + `expires_at` so a prize edit / delete leaves history rendering intact. |
 | `CTPGlintInvestment` | `cogs/rewards/lib/glints.py` | Cumulative-only `total_invested` per Discord user (1:1, never decrements). Separate from the ledger so the leaderboard is one SELECT; the matching negative ledger row (`source='glint_invest'`) is what debits balance. |

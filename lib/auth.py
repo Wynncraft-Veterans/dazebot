@@ -33,10 +33,29 @@ decorator/predicate call site.
 
 from __future__ import annotations
 
+from enum import IntEnum
+
 import discord
 from discord.ext import commands
 
 from config import CurrConfig
+
+
+class Tier(IntEnum):
+    """Numeric ladder of permission tiers, ordered low → high.
+
+    Ordering matches the "higher tiers always satisfy lower ones" rule in
+    the module docstring, so a single ``>=`` is enough to gate UI on a
+    tier without re-deriving the predicate chain.
+    """
+
+    PUBLIC = 0
+    REGISTERED = 1
+    GUILD = 2
+    STAFF = 3
+    STRATEGIST = 4
+    ADMIN = 5
+    OPERATOR = 6
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +226,33 @@ def is_registered():
         )
 
     return commands.check(predicate)
+
+
+async def current_tier(ctx: commands.Context) -> Tier:
+    """Return the highest :class:`Tier` ``ctx.author`` qualifies for.
+
+    Uses the same DM resolution as the decorators (``_resolve_member``
+    against ``CurrConfig.GUILD``), so a user gets the same tier whether
+    they invoke from a channel or from DMs. Intended for things like
+    help-text gating where we want to mirror the decorator outcome
+    without actually running the command.
+    """
+    if _is_operator(ctx.author):
+        return Tier.OPERATOR
+    member = _resolve_member(ctx.author, ctx.bot)
+    if member is None:
+        return Tier.PUBLIC
+    if _has_admin_perm(member):
+        return Tier.ADMIN
+    if _has_strategist_role(member):
+        return Tier.STRATEGIST
+    if _has_staff_role(member):
+        return Tier.STAFF
+    if _has_guild_role(member):
+        return Tier.GUILD
+    if _has_registered_role(member):
+        return Tier.REGISTERED
+    return Tier.PUBLIC
 
 
 def is_shouter(role_ids):

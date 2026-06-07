@@ -27,7 +27,7 @@ from cogs.rewards.lib import glints as glints_svc
 from cogs.rewards.lib import prizes as prizes_svc
 from cogs.rewards.lib.confirm_view import ConfirmView
 from config import CurrConfig
-from lib.auth import is_admin, is_guild, is_registered, is_staff
+from lib.auth import Tier, current_tier, is_admin, is_guild, is_registered, is_staff
 from lib.discord_utils.converters import CaseInsensitiveMember
 from lib.discord_utils.paginated_embed import Paginator, from_lines
 from orm import CTPBoard, DiscordAccount
@@ -95,17 +95,44 @@ class CTPCog(commands.Cog):
     async def ctp_group(self, ctx: commands.Context) -> None:
         if ctx.invoked_subcommand is not None:
             return
-        await ctx.reply(
-            "Use `~ctp status` (registered), `~ctp history`, `~ctp gift <user> <points>`, "
-            "`~ctp prize info`, `~ctp glints bids` (guild), `~ctp glints bid <n>`, "
-            "`~ctp balance <user>` (staff), `~ctp info <user>`, "
-            "`~ctp reward <user> <board> <task#> <points> <comment>`, "
-            "`~ctp redeem <user> <category> <enum>`, `~ctp access`, "
-            "`~ctp assign <user> <ENUM>`, `~ctp revoke <user> <ENUM>`, "
-            "`~ctp board <ENUM> <num> [role_id]` (admin), "
-            "`~ctp prize add/edit/disable/remove/disclaim ...`, "
-            "or `~ctp set <user> <value>`."
-        )
+        tier = await current_tier(ctx)
+        sections: list[str] = []
+        if tier >= Tier.REGISTERED:
+            sections.append(
+                "**Registered**\n"
+                "- `~ctp status` — your CTP balance & glint rank\n"
+                "- `~ctp history` — your full CTP history\n"
+                "- `~ctp gift <user> <points>` — gift points to another user\n"
+                "- `~ctp prize info` — browse the prize catalog"
+            )
+        if tier >= Tier.GUILD:
+            sections.append(
+                "**Guild**\n"
+                "- `~ctp glints bids` — glint-investment leaderboard\n"
+                "- `~ctp glints bid <n>` — invest in glints (irreversible)"
+            )
+        if tier >= Tier.STAFF:
+            sections.append(
+                "**Staff**\n"
+                "- `~ctp balance <user>` — show a user's CTP balance\n"
+                "- `~ctp info <user>` — full CTP info for a user\n"
+                "- `~ctp reward <user> <board> <task#> <points> <comment>` — award points\n"
+                "- `~ctp redeem <user> <category> <enum>` — redeem a prize\n"
+                "- `~ctp access` — list currently-active redemptions\n"
+                "- `~ctp assign <user> <ENUM>` — add a user to a board\n"
+                "- `~ctp revoke <user> <ENUM>` — remove a user from a board"
+            )
+        if tier >= Tier.ADMIN:
+            sections.append(
+                "**Admin**\n"
+                "- `~ctp board <ENUM> <num> [role_id]` — create/move/role-change/delete a board\n"
+                "- `~ctp prize add|edit|disable|enable|remove|disclaim ...` — prize catalog CRUD\n"
+                "- `~ctp set <user> <value>` — forcibly set a user's balance"
+            )
+        if not sections:
+            await ctx.reply("You don't have access to any `~ctp` subcommands.")
+            return
+        await ctx.reply("\n\n".join(sections), allowed_mentions=discord.AllowedMentions.none())
 
     # --- Registered tier ----------------------------------------------
 

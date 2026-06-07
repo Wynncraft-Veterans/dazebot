@@ -39,6 +39,14 @@ HISTORY_LINES_PER_PAGE = 10
 GLINTS_LINES_PER_PAGE = 20
 INFO_HISTORY_LIMIT = 15  # how many recent rows ``~ctp info`` shows inline
 
+# Crossing this lifetime-received total (sum of all positive ledger
+# deltas, never decremented by spends) grants the role below. Additive
+# only — there is no strip path, since you can't un-receive points. The
+# threshold fires from every points-add path (reward, gift, admin set)
+# and from a one-shot startup backfill in ``on_ready``.
+LIFETIME_RECEIVED_ROLE_THRESHOLD = 88
+LIFETIME_RECEIVED_ROLE_ID = 1512981177760481300
+
 
 async def _resolve_target_disc(
     ctx: commands.Context, value: str
@@ -201,6 +209,7 @@ class CTPCog(commands.Cog):
         await balance_svc.transfer_points(
             sender=sender, receiver=receiver, amount=points, actor_disc_uuid=str(ctx.author.id),
         )
+        await self._maybe_grant_lifetime_role(ctx.guild, receiver_member, receiver)
         await prompt.edit(
             content=f"Confirmed! Gifted **{points}** points to {receiver_member.mention}.",
             view=None,
@@ -338,6 +347,7 @@ class CTPCog(commands.Cog):
             comment=comment,
             actor_disc_uuid=str(ctx.author.id),
         )
+        await self._maybe_grant_lifetime_role(ctx.guild, target_member, target_disc)
         if board is not None and task_number > 0:
             tail = (
                 f" on [board {board.enum}]({boards_svc.format_board_url(board)}) "
@@ -471,6 +481,86 @@ class CTPCog(commands.Cog):
             logger.warning("ctp assign: HTTPException granting role %s to %s: %s", role.id, member.id, e)
             return f" (failed to grant {role.mention}: {e})"
         return f" Granted role {role.mention}."
+
+    async def _maybe_grant_lifetime_role(
+        self,
+        guild: Optional[discord.Guild],
+        member: Optional[discord.Member],
+        disc: DiscordAccount,
+    ) -> None:
+        """Grant ``LIFETIME_RECEIVED_ROLE_ID`` if ``disc``'s lifetime
+        received has crossed the threshold. Safe to call on every
+        points-add: no-op if under threshold, role missing, member
+        absent, or already holds the role. Failures are logged but
+        never re-raised — a role-grant blip must not roll back the
+        ledger write that prompted it.
+        """
+        if guild is None or member is None:
+            return
+        lifetime = await balance_svc.compute_lifetime_received(disc)
+        if lifetime < LIFETIME_RECEIVED_ROLE_THRESHOLD:
+            return
+        role = guild.get_role(LIFETIME_RECEIVED_ROLE_ID)
+        if role is None:
+            logger.warning(
+                "lifetime-received role %s not found in guild %s",
+                LIFETIME_RECEIVED_ROLE_ID, guild.id,
+            )
+            return
+        if role in member.roles:
+            return
+        try:
+            await member.add_roles(
+                role,
+                reason=f"lifetime CTP received >= {LIFETIME_RECEIVED_ROLE_THRESHOLD}",
+            )
+        except discord.Forbidden:
+            logger.warning(
+                "lifetime-received role: forbidden granting %s to %s", role.id, member.id,
+            )
+        except discord.HTTPException as e:
+            logger.warning(
+                "lifetime-received role: HTTPException granting %s to %s: %s",
+                role.id, member.id, e,
+            )
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        """One-shot backfill: catch up any account whose lifetime received
+        already crossed the threshold before this rule existed (or before
+        the bot last saw them). Iterates every account with at least one
+        positive ledger row, so we don't load the entire DiscordAccount
+        table when most users have never touched CTP.
+        """
+        guild = self.bot.get_guild(self.bot.config.GUILD)
+        if guild is None:
+            logger.error("ctp lifetime-received backfill: guild %s not found", self.bot.config.GUILD)
+            return
+        await guild.chunk()
+        granted = 0
+        skipped_absent = 0
+        seen_ids: set[int] = set()
+        async for row in CTPLedger.filter(amount_delta__gt=0).select_related("discord_account"):
+            disc = row.discord_account
+            if disc.id in seen_ids:
+                continue
+            seen_ids.add(disc.id)
+            try:
+                disc_uuid_int = int(disc.disc_uuid)
+            except (TypeError, ValueError):
+                continue
+            member = guild.get_member(disc_uuid_int)
+            if member is None:
+                skipped_absent += 1
+                continue
+            before = LIFETIME_RECEIVED_ROLE_ID in {r.id for r in member.roles}
+            await self._maybe_grant_lifetime_role(guild, member, disc)
+            if not before and LIFETIME_RECEIVED_ROLE_ID in {r.id for r in member.roles}:
+                granted += 1
+        logger.info(
+            "ctp lifetime-received backfill: scanned %d accounts, granted %d, skipped %d (absent from guild)",
+            len(seen_ids), granted, skipped_absent,
+        )
 
     async def _strip_board_role(
         self, ctx: commands.Context, member: discord.Member, board: CTPBoard,
@@ -687,6 +777,7 @@ class CTPCog(commands.Cog):
         await balance_svc.set_balance(
             target=target, new_value=value, actor_disc_uuid=str(ctx.author.id),
         )
+        await self._maybe_grant_lifetime_role(ctx.guild, target_member, target)
         await ctx.reply(
             f"Set {target_member.mention}'s CTP balance to **{value}** "
             f"(was {previous}, written as a corrective ledger row).",

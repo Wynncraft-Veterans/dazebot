@@ -47,6 +47,27 @@ async def compute_balance(disc: DiscordAccount) -> int:
     return int(row["total"])
 
 
+async def compute_lifetime_received(disc: DiscordAccount) -> int:
+    """Sum of all positive ledger deltas for the account.
+
+    "Lifetime received" ignores spends (redeem / gift_sent / glint_invest)
+    and any downward admin correction; it's the running total of points
+    that have ever flowed *in*. Powers the threshold-role trigger, where
+    crossing a fixed cumulative-received total grants a Discord role
+    that's never stripped — spending points doesn't undo having received
+    them.
+    """
+    row = (
+        await CTPLedger.filter(discord_account=disc, amount_delta__gt=0)
+        .annotate(total=Sum("amount_delta"))
+        .first()
+        .values("total")
+    )
+    if not row or row.get("total") is None:
+        return 0
+    return int(row["total"])
+
+
 async def append_ledger(
     *,
     disc: DiscordAccount,

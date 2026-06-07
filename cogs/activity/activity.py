@@ -110,6 +110,13 @@ class Activity(commands.Cog):
         else:
             api_last_online = UNKNOWN_LAST_ONLINE
 
+        # ``lastjoin_hidden_at`` tracks "was lastJoin hidden at our most
+        # recent observation"; server_watcher uses it to keep polling
+        # privacy-hidden accounts even after their ``last_online`` has
+        # been bumped out of the epoch sentinel. NULL the marker when
+        # lastJoin is visible, set it when hidden.
+        lastjoin_hidden = is_last_online_unknown(api_last_online)
+
         account, created = await MinecraftAccount.get_or_create(
             uuid=member.uuid,
             defaults={
@@ -118,6 +125,7 @@ class Activity(commands.Cog):
                 "mc_username": mc_username,
                 "last_online": api_last_online,
                 "last_manual_check": UNKNOWN_LAST_ONLINE,
+                "lastjoin_hidden_at": now if lastjoin_hidden else None,
             },
         )
 
@@ -130,10 +138,22 @@ class Activity(commands.Cog):
             # isn't clobbered by our stale in-memory copy. Only include
             # last_online when we actually mutate it.
             fields = ["guild", "wynn_username", "mc_username"]
-            if not is_last_online_unknown(api_last_online):
+            if not lastjoin_hidden:
                 if is_last_online_unknown(account.last_online) or account.last_online < api_last_online:
                     account.last_online = api_last_online
                     fields.append("last_online")
+                # Clear the hidden marker now that we've observed a real
+                # lastJoin — server_watcher can drop this account from its
+                # poll scope.
+                if account.lastjoin_hidden_at is not None:
+                    account.lastjoin_hidden_at = None
+                    fields.append("lastjoin_hidden_at")
+            else:
+                # Refresh "most recent hidden observation" timestamp on every
+                # tick that re-confirms hidden state. Idempotent overwrite —
+                # the value just tracks freshness, not a one-shot event.
+                account.lastjoin_hidden_at = now
+                fields.append("lastjoin_hidden_at")
             await account.save(update_fields=fields)
 
     async def _check_guild(self, guild_name_full: str) -> Guild:

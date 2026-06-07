@@ -37,14 +37,30 @@ class PVP(BaseModel):
     deaths: int
 
 
+class RaidStats(BaseModel):
+    damageTaken: int
+    damageDealt: int
+    healthHealed: int
+    deaths: int
+    buffsTaken: int
+    gambitsUsed: int
+
+
 class GlobalData(BaseModel):
     wars: int
-    totalLevels: Optional[int] = None
-    killedMobs: Optional[int] = None
+    # Singular ``totalLevel`` and ``mobsKilled`` matche the live envelope; the
+    # previous plurals (``totalLevels``/``killedMobs``) silently parsed as
+    # None and dropped the server_watcher stat-delta signals on the floor.
+    totalLevel: Optional[int] = None
+    mobsKilled: Optional[int] = None
     chestsFound: int
     dungeons: Dungeons
     raids: Raids
+    worldEvents: int
+    lootruns: int
+    caves: int
     completedQuests: int
+    raidStats: Optional[RaidStats] = None
     pvp: PVP
     contentCompletion: Optional[int] = None
 

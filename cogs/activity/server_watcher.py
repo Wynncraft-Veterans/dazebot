@@ -8,12 +8,25 @@ https://docs.wynncraft.com/privacy). The field is the *last* server they
 were on — not a live "currently on" indicator — so it changes on
 every login.
 
-This cog polls the unknown-bucket players (those whose ``last_online`` is
-the ``UNKNOWN_LAST_ONLINE`` sentinel because the guild/player endpoint
-returned ``lastJoin=null``) and, on any transition between two non-null
-server values, infers in-interval activity and bumps ``last_online =
-now``. The existing ``/purgelist`` logic then surfaces them out of the
-Unknown section.
+This cog polls accounts whose ``lastJoin`` was observed hidden at the
+last guild tick (``lastjoin_hidden_at`` is non-null) OR whose stored
+``last_online`` is still the ``UNKNOWN_LAST_ONLINE`` sentinel (legacy /
+never-polled case). On any transition between two non-null server
+values, or any monotonic stat-counter increase, the watcher infers
+in-interval activity and bumps ``last_online = now``. The existing
+``/purgelist`` logic then surfaces them out of the Unknown section.
+
+The ``lastjoin_hidden_at`` part of the scope filter closes a long-
+standing asymmetry: previously the watcher only polled accounts at the
+epoch sentinel, so once an account got bumped out (real activity
+detected, or a brief lastJoin un-hide caught by activity.py) it dropped
+out of scope permanently. If the player then re-hid lastJoin, their
+``last_online`` would age silently until purgelist's freshness verify
+reclassified them into the "Unknown (API disabled)" bucket — with no
+path back. ``_apply_guild`` now stamps ``lastjoin_hidden_at`` every
+tick that observes hidden state, and NULLs it the instant lastJoin
+becomes visible again, so the watcher's scope tracks live privacy state
+rather than a one-shot decision made on day zero.
 
 Scope is **Returners *and* waitlisted accounts** at normal priority,
 **and HIATUS-role accounts at background priority**. Returners is the
@@ -72,8 +85,48 @@ from tortoise.expressions import Q
 from bot import Bot
 from lib.mc.hiatus_alerts import maybe_alert_hiatus
 from lib.mc.wynn_api.player import get_player_stats
+from lib.mc.wynn_api.player_models import WynncraftPlayer
 from lib.role_state import hiatus_member_uuids
 from orm import UNKNOWN_LAST_ONLINE, MinecraftAccount, is_last_online_unknown
+
+
+def _build_stat_snapshot(player: WynncraftPlayer) -> dict[str, int | float]:
+    """Flatten every monotonic counter in the /v3/player envelope into a
+    flat dict, keyed by dotted-path field name. Missing/null fields are
+    skipped so a privacy-hidden subset doesn't pollute deltas (a key
+    absent from one tick won't register as a 'decrease' against the
+    other; absent on both ticks is just not compared).
+
+    The set is intentionally inclusive — every key here is something
+    that strictly increases while the player is online. Branch B's
+    activity inference ORs strict-increase across the whole snapshot,
+    so adding a new counter to this function automatically extends
+    detection coverage with no migration.
+    """
+    snap: dict[str, int | float] = {}
+    if player.playtime is not None:
+        snap["playtime"] = player.playtime
+    g = player.globalData
+    if g is None:
+        return snap
+    for k in ("contentCompletion", "wars", "totalLevel", "mobsKilled",
+              "chestsFound", "worldEvents", "lootruns", "caves",
+              "completedQuests"):
+        v = getattr(g, k, None)
+        if v is not None:
+            snap[k] = v
+    if g.dungeons is not None:
+        snap["dungeons.total"] = g.dungeons.total
+    if g.raids is not None:
+        snap["raids.total"] = g.raids.total
+    if g.raidStats is not None:
+        for k in ("damageTaken", "damageDealt", "healthHealed", "deaths",
+                  "buffsTaken", "gambitsUsed"):
+            snap[f"raidStats.{k}"] = getattr(g.raidStats, k)
+    if g.pvp is not None:
+        snap["pvp.kills"] = g.pvp.kills
+        snap["pvp.deaths"] = g.pvp.deaths
+    return snap
 
 logger = logging.getLogger("dazebot.cogs.activity.server_watcher")
 
@@ -99,13 +152,17 @@ class ServerWatcher(commands.Cog):
         # gate the lower-priority second pass below.
         self._hiatus_uuid_set = await hiatus_member_uuids(self.bot)
 
-        # Server-side filter for the unknown sentinel: matches
-        # ``is_last_online_unknown`` (anything within 24h of epoch).
-        # Scope: Returners (original use case) OR waitlisted — see module
-        # docstring. ``waitlist`` is the reverse relation on MinecraftAccount;
+        # Server-side filter: accounts whose ``lastJoin`` was observed
+        # hidden at the last guild tick, OR whose ``last_online`` is still
+        # the epoch sentinel (legacy / never-polled). Scope: Returners
+        # (original use case) OR waitlisted — see module docstring.
+        # ``waitlist`` is the reverse relation on MinecraftAccount;
         # Waitlist.minecraft_account is unique, so the join can't fan out.
         candidates = await MinecraftAccount.filter(
-            Q(last_online__lte=UNKNOWN_LAST_ONLINE + timedelta(days=1))
+            (
+                Q(last_online__lte=UNKNOWN_LAST_ONLINE + timedelta(days=1))
+                | Q(lastjoin_hidden_at__isnull=False)
+            )
             & (Q(guild="Returners") | Q(waitlist__isnull=False))
         )
         if candidates:
@@ -124,7 +181,10 @@ class ServerWatcher(commands.Cog):
         ttl_cutoff = now - timedelta(seconds=120)
         existing_uuids = {a.uuid for a in candidates}
         hiatus_candidates = await MinecraftAccount.filter(
-            Q(last_online__lte=UNKNOWN_LAST_ONLINE + timedelta(days=1))
+            (
+                Q(last_online__lte=UNKNOWN_LAST_ONLINE + timedelta(days=1))
+                | Q(lastjoin_hidden_at__isnull=False)
+            )
             & Q(uuid__in=list(self._hiatus_uuid_set))
             & ~Q(guild="Returners")
             & (Q(server_observed_at__isnull=True) | Q(server_observed_at__lt=ttl_cutoff))
@@ -157,30 +217,26 @@ class ServerWatcher(commands.Cog):
         observed = player.server
         now = datetime.now(timezone.utc)
 
-        # Stat-delta activity signal: monotonically-increasing globalData
-        # counters are positive proof of online play even when the player
+        # Stat-delta activity signal: every monotonic counter the envelope
+        # carries is positive proof of online play even when the player
         # keeps logging into the same world (no server transition for the
-        # transition branch below to catch). The /v3/player envelope
-        # already carries these — no extra API spend. Decreases are
-        # treated as "no signal" (rare; character deletion is the main
-        # cause), but the baseline is still refreshed so subsequent
-        # increases will register.
-        prev_total = account.last_total_levels
-        prev_content = account.last_content_completion
-        new_total = player.globalData.totalLevels if player.globalData else None
-        new_content = player.globalData.contentCompletion if player.globalData else None
-        stat_signal = (
-            (new_total is not None and prev_total is not None and new_total > prev_total)
-            or
-            (new_content is not None and prev_content is not None and new_content > prev_content)
+        # branch below to catch). The /v3/player envelope already carries
+        # all of these — no extra API spend. Any one strict increase
+        # across the snapshot is enough; decreases are ignored (rare;
+        # character deletion is the main cause) but the baseline is still
+        # refreshed so subsequent increases will register.
+        prev_snap = account.last_stat_snapshot or {}
+        new_snap = _build_stat_snapshot(player)
+        stat_signal = any(
+            isinstance(prev_snap.get(k), (int, float)) and new_v > prev_snap[k]
+            for k, new_v in new_snap.items()
         )
+        # Always persist the snapshot when it differs from what we have —
+        # the next tick's comparison baseline must be the latest observation.
         stat_fields: list[str] = []
-        if new_total is not None and new_total != prev_total:
-            account.last_total_levels = new_total
-            stat_fields.append("last_total_levels")
-        if new_content is not None and new_content != prev_content:
-            account.last_content_completion = new_content
-            stat_fields.append("last_content_completion")
+        if new_snap != prev_snap:
+            account.last_stat_snapshot = new_snap
+            stat_fields.append("last_stat_snapshot")
 
         # Free-win path: player un-hid lastJoin between ticks. Adopt the
         # real timestamp directly so they clear out of the Unknown bucket
@@ -243,10 +299,16 @@ class ServerWatcher(commands.Cog):
         if stat_signal:
             account.last_online = now
             fields.append("last_online")
+            # Surface which counter(s) tripped the signal — useful when
+            # diagnosing why someone exited the Unknown bucket and which
+            # privacy-toggle subsets remain useful for which players.
+            deltas = ", ".join(
+                f"{k} {prev_snap[k]}->{new_v}"
+                for k, new_v in new_snap.items()
+                if isinstance(prev_snap.get(k), (int, float)) and new_v > prev_snap[k]
+            )
             logger.info(
-                f"{account.mc_username}: stat delta "
-                f"(total_levels {prev_total}->{new_total}, content {prev_content}->{new_content}); "
-                "bumping last_online=now"
+                f"{account.mc_username}: stat delta ({deltas}); bumping last_online=now"
             )
             if account.uuid in self._hiatus_uuid_set:
                 await maybe_alert_hiatus(self.bot, account.uuid, server=observed)

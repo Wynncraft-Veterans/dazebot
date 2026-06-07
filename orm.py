@@ -86,13 +86,25 @@ class MinecraftAccount(Model):
     # bumps ``last_online``. NULL = never observed.
     last_seen_server: Optional[str] = fields.CharField(max_length=16, null=True, default=None)  # type: ignore
     server_observed_at: datetime | None = fields.DatetimeField(use_tz=True, null=True)  # type: ignore
-    # Monotonic stat-delta signals — strict increases between
-    # server_watcher ticks are positive proof of online activity, even
-    # when the player keeps logging into the same world (no server
-    # transition). The /v3/player envelope already carries these;
-    # tracking adds no API spend.
-    last_total_levels: int | None = fields.IntField(null=True, default=None)  # type: ignore
-    last_content_completion: int | None = fields.IntField(null=True, default=None)  # type: ignore
+    # Most recent guild-tick observation that ``lastJoin`` was privacy-hidden
+    # for this account. Drives server_watcher's polling scope so accounts
+    # whose ``last_online`` has been bumped out of the epoch sentinel are
+    # still re-polled while their ``lastJoin`` remains hidden — closes the
+    # asymmetry where a one-shot un-hide → re-hide cycle would silently age
+    # the account into purgelist's "Unknown" bucket with no way back out.
+    # NULL = ``lastJoin`` was visible at the last guild tick (or account
+    # predates this signal). Cleared by ``_apply_guild`` the instant a
+    # non-null ``lastJoin`` is seen.
+    lastjoin_hidden_at: datetime | None = fields.DatetimeField(use_tz=True, null=True)  # type: ignore
+    # Snapshot of every monotonic /v3/player counter the server_watcher
+    # tracks for stat-delta activity inference. Keys are the field names
+    # from the envelope (e.g. ``playtime``, ``contentCompletion``,
+    # ``raidStats.damageDealt``, ``dungeons.total``). The watcher OR-folds
+    # strict increases across every key — any one bump = activity signal.
+    # JSON over per-counter columns because the set is large (~17) and
+    # expected to grow as Wynncraft adds stats; we never query these in
+    # SQL WHERE clauses, only read them per-tick in Python.
+    last_stat_snapshot: dict | None = fields.JSONField(null=True, default=None)  # type: ignore
     first_join: datetime | None = fields.DatetimeField(use_tz=True, null=True)  # type: ignore
     token: Optional[str] = fields.CharField(max_length=6, null=True, default=None)  # type: ignore
     is_honourary = fields.BooleanField(default=False)

@@ -540,9 +540,6 @@ class CTPCog(commands.Cog):
 
     async def _render_prize_info(self, ctx: commands.Context) -> None:
         prizes = await prizes_svc.all_visible()
-        if not prizes:
-            await ctx.reply("The prize catalog is empty.")
-            return
         embeds = formatting.build_prize_info_embeds(prizes, CurrConfig.CTP_PRIZE_ARTWORK_URL)
         view = Paginator(embeds) if len(embeds) > 1 else None
         await ctx.reply(embed=embeds[0], view=view, allowed_mentions=discord.AllowedMentions.none())
@@ -580,10 +577,10 @@ class CTPCog(commands.Cog):
 
     @prize_group.command(name="edit", description="(Admin) Edit a prize: <category.enum> <field> <value>")
     @is_admin()
-    async def prize_edit(self, ctx: commands.Context, dotted: str, field: str, *, value: str) -> None:
-        parsed = prizes_svc.parse_dotted_key(dotted)
+    async def prize_edit(self, ctx: commands.Context, category_enum: str, field: str, *, value: str) -> None:
+        parsed = prizes_svc.parse_dotted_key(category_enum)
         if parsed is None:
-            await ctx.reply(f"Could not parse `{dotted}` — expected `CATEGORY.ENUM`.")
+            await ctx.reply(f"Could not parse `{category_enum}` — expected `CATEGORY.ENUM`.")
             return
         cat, enum_name = parsed
         prize = await prizes_svc.find(cat, enum_name)
@@ -597,18 +594,18 @@ class CTPCog(commands.Cog):
 
     @prize_group.command(name="disable", description="(Admin) Disable a prize (hides it from `~ctp prize info`).")
     @is_admin()
-    async def prize_disable(self, ctx: commands.Context, *, dotted: str) -> None:
-        await self._prize_set_disabled(ctx, dotted, True)
+    async def prize_disable(self, ctx: commands.Context, *, category_enum: str) -> None:
+        await self._prize_set_disabled(ctx, category_enum, True)
 
     @prize_group.command(name="enable", description="(Admin) Re-enable a previously disabled prize.")
     @is_admin()
-    async def prize_enable(self, ctx: commands.Context, *, dotted: str) -> None:
-        await self._prize_set_disabled(ctx, dotted, False)
+    async def prize_enable(self, ctx: commands.Context, *, category_enum: str) -> None:
+        await self._prize_set_disabled(ctx, category_enum, False)
 
-    async def _prize_set_disabled(self, ctx: commands.Context, dotted: str, value: bool) -> None:
-        parsed = prizes_svc.parse_dotted_key(dotted)
+    async def _prize_set_disabled(self, ctx: commands.Context, category_enum: str, value: bool) -> None:
+        parsed = prizes_svc.parse_dotted_key(category_enum)
         if parsed is None:
-            await ctx.reply(f"Could not parse `{dotted}` — expected `CATEGORY.ENUM`.")
+            await ctx.reply(f"Could not parse `{category_enum}` — expected `CATEGORY.ENUM`.")
             return
         cat, enum_name = parsed
         prize = await prizes_svc.find(cat, enum_name)
@@ -621,10 +618,10 @@ class CTPCog(commands.Cog):
 
     @prize_group.command(name="remove", description="(Admin) Delete a prize from the catalog.")
     @is_admin()
-    async def prize_remove(self, ctx: commands.Context, *, dotted: str) -> None:
-        parsed = prizes_svc.parse_dotted_key(dotted)
+    async def prize_remove(self, ctx: commands.Context, *, category_enum: str) -> None:
+        parsed = prizes_svc.parse_dotted_key(category_enum)
         if parsed is None:
-            await ctx.reply(f"Could not parse `{dotted}` — expected `CATEGORY.ENUM`.")
+            await ctx.reply(f"Could not parse `{category_enum}` — expected `CATEGORY.ENUM`.")
             return
         cat, enum_name = parsed
         prize = await prizes_svc.find(cat, enum_name)
@@ -636,10 +633,10 @@ class CTPCog(commands.Cog):
 
     @prize_group.command(name="disclaim", description="(Admin) Attach a disclaimer to a prize.")
     @is_admin()
-    async def prize_disclaim(self, ctx: commands.Context, dotted: str, *, msg: str) -> None:
-        parsed = prizes_svc.parse_dotted_key(dotted)
+    async def prize_disclaim(self, ctx: commands.Context, category_enum: str, *, msg: str) -> None:
+        parsed = prizes_svc.parse_dotted_key(category_enum)
         if parsed is None:
-            await ctx.reply(f"Could not parse `{dotted}` — expected `CATEGORY.ENUM`.")
+            await ctx.reply(f"Could not parse `{category_enum}` — expected `CATEGORY.ENUM`.")
             return
         cat, enum_name = parsed
         prize = await prizes_svc.find(cat, enum_name)

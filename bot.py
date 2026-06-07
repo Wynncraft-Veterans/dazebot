@@ -133,7 +133,11 @@ class Bot(commands.Bot):
         elif isinstance(error, commands.BadArgument):
             await ctx.send(f"❌ Invalid argument: {error}")
         elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send(f"❌ Missing argument: {error.param.name}")
+            usage = f"{ctx.clean_prefix}{ctx.command.qualified_name} {ctx.command.signature}".rstrip()
+            await ctx.send(
+                f"❌ Missing argument: `{error.param.name}`\n"
+                f"Usage: `{usage}`"
+            )
         elif isinstance(error, commands.ArgumentParsingError):
             await ctx.send(
                 f"❌ Couldn't parse arguments: {error}\n"

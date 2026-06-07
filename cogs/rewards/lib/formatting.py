@@ -172,32 +172,27 @@ def build_prize_info_embeds(
     prizes: list[CTPPrize],
     artwork_url: Optional[str],
 ) -> list[discord.Embed]:
-    """Build one embed per category (Access / Change / Service / Gift),
-    each with a row-per-prize field. Attaches ``artwork_url`` to the
-    first embed only so paginating to a later page doesn't re-render the
-    image. Disclaimers, when present, are appended after the row.
+    """Build one embed per category (Access / Change / Service / Gift)
+    followed by a dedicated Glints page, each with a row-per-prize field.
+    Attaches ``artwork_url`` to the first embed only so paginating to a
+    later page doesn't re-render the image. Disclaimers, when present,
+    are appended after the row.
+
+    Glints aren't a catalog row — they're a top-N leaderboard payout
+    (see ``../glints.py``) — so they don't go through ``~ctp prize add``
+    and are rendered from a hard-coded block here.
     """
     by_category: dict[str, list[CTPPrize]] = {}
     for p in prizes:
         by_category.setdefault(p.category, []).append(p)
 
+    populated = [c for c in ("Access", "Change", "Service", "Gift") if by_category.get(c)]
+    pages = len(populated) + 1  # +1 for the always-present Glints page
+
     embeds: list[discord.Embed] = []
-    pages = sum(1 for v in by_category.values() if v)
-    page_idx = 0
-    glint_explainer = (
-        "**Glints**: Glints are awarded to the 8 people who have invested the most CTP points on glints. "
-        "See `~ctp glints bids` to view the standings; `~ctp glints bid <points>` to add to your investment."
-    )
-    for category in ("Access", "Change", "Service", "Gift"):
-        rows = by_category.get(category) or []
-        if not rows:
-            continue
-        page_idx += 1
-        embed = discord.Embed(
-            title=f"CTP Prizes — {category}",
-            description=glint_explainer if page_idx == 1 else None,
-        )
-        for p in rows:
+    for page_idx, category in enumerate(populated, start=1):
+        embed = discord.Embed(title=f"CTP Prizes — {category}")
+        for p in by_category[category]:
             value = f"`{p.cost}` points · {format_duration(p.duration_seconds)}"
             if p.disclaimer:
                 value += f"\n*{p.disclaimer}*"
@@ -206,6 +201,24 @@ def build_prize_info_embeds(
         if page_idx == 1 and artwork_url:
             embed.set_image(url=artwork_url)
         embeds.append(embed)
+
+    glints_page = pages
+    glints_embed = discord.Embed(title="CTP Prizes — Glints")
+    glints_embed.add_field(
+        name="Glints  (`GLINTS`)",
+        value=(
+            "Awarded to the **top 8** users by cumulative glint investment.\n"
+            "Eligibility: current vets members, waitlist, or honourary.\n"
+            "\n"
+            "Use `~ctp glints bid <points>` to invest (cumulative and irreversible).\n"
+            "Use `~ctp glints bids` to view current standings."
+        ),
+        inline=False,
+    )
+    glints_embed.set_footer(text=f"Page {glints_page}/{pages}")
+    if glints_page == 1 and artwork_url:
+        glints_embed.set_image(url=artwork_url)
+    embeds.append(glints_embed)
     return embeds
 
 

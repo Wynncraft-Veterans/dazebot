@@ -11,6 +11,9 @@ The CTP cog ([cogs/rewards/ctp.py](../cogs/rewards/ctp.py)) is the points-and-pr
 | Board CRUD + tasks.wynnvets.org URL formatting | [cogs/rewards/lib/boards.py](../cogs/rewards/lib/boards.py) |
 | Prize catalog + redemption logic | [cogs/rewards/lib/prizes.py](../cogs/rewards/lib/prizes.py) |
 | Glint invest / leaderboard / rank lookup | [cogs/rewards/lib/glints.py](../cogs/rewards/lib/glints.py) |
+| Link-bonus eligibility + idempotent grant | [cogs/rewards/lib/link_bonus.py](../cogs/rewards/lib/link_bonus.py) |
+| Link-bonus retroactive backfill + periodic reconciler | [cogs/rewards/link_bonus_reconciler.py](../cogs/rewards/link_bonus_reconciler.py) |
+| vets-anni internal client (fishbot role-capability check) | [lib/integrations/anni_internal.py](../lib/integrations/anni_internal.py) |
 | Yes/No confirmation view (gift, glint bid) | [cogs/rewards/lib/confirm_view.py](../cogs/rewards/lib/confirm_view.py) |
 | Embed builders and history-line formatters | [cogs/rewards/lib/formatting.py](../cogs/rewards/lib/formatting.py) |
 | ORM tables | [orm.py](../orm.py) — `CTPBoard`, `CTPBoardMembership`, `CTPPrize`, `CTPLedger`, `CTPGlintInvestment` |
@@ -89,6 +92,22 @@ Boards are populated in-place by admins via `~ctp board <ENUM> <num> <role_id>` 
 
 The spec calls out "Glinted" users (top 8 by glint investment) as something temporary-server may want to know about later (e.g. to flip an in-game visual). When that lands, expose a tiny internal endpoint on dazebot that returns `glints.leaderboard(bot)[0]` and have temporary-server poll it. Don't add a Discord "Glinted" role — the rank is computed live from `CTPGlintInvestment + state_of(member)` and recomputing on every guild state change would be its own can of worms.
 
+## Link-bonus (1 point × 3 milestones, retroactive + ongoing)
+
+Three identity milestones each award **1 CTP point** exactly once per user:
+
+| Kind | Eligible iff | Source of truth |
+|---|---|---|
+| `mc_link` | `DiscordAccount.minecraft_account_id` is set | dazebot DB |
+| `vetsmod` | non-revoked `VerifyKey` row exists | dazebot DB |
+| `fishbot_role` | linked `mc_uuid` is in vets-anni's `RoleCapability` set | vets-anni `GET /api/internal/role-capability-uuids` |
+
+Awards are written as plain `CTPLedger` rows with `source='link_bonus'` and the kind token in `comment` (`mc_link` / `vetsmod` / `fishbot_role`). The `(source, comment)` pair *is* the idempotency key — there is no separate flag column. A user can therefore never receive the same bonus twice, even across reconciler ticks.
+
+[`cogs/rewards/link_bonus_reconciler.py`](../cogs/rewards/link_bonus_reconciler.py) runs once on `on_ready` (the retroactive backfill) and then on `LINK_BONUS_RECONCILER_HOURS` (default 6h). Newly-linked users pick up their bonuses on the next tick — no event hook in the linking path, so a missed event (restart, edge case) still self-heals.
+
+vets-anni's [`/api/internal/role-capability-uuids`](../../vets-anni/app/web/routers/internal.py) is gated by `X-Introspect-Secret == DAZEBOT_INTROSPECT_SECRET` (the same shared secret already used in the dazebot→vets-anni direction). An unreachable vets-anni silently skips the `fishbot_role` kind for the tick; the other two kinds still run.
+
 ## Don't
 
 - Don't store a mutable `balance` column on any table. Every "set" goes through a corrective ledger row.
@@ -96,3 +115,4 @@ The spec calls out "Glinted" users (top 8 by glint investment) as something temp
 - Don't add `~ctp uninvest` or a glint-refund path. The spec is explicit that investments are cumulative-only.
 - Don't filter HIATUS users out of `~ctp glints bid` — they should keep accruing investment for when they rejoin.
 - Don't bypass `boards.apply_board_command` for `~ctp board`. The overloaded parsing lives in one place by design.
+- Don't add an event hook to the linking / `/vetsmod` / role-capability paths to "award immediately". The reconciler is intentionally the only writer — having one path keeps idempotency in one place and means a missed event still self-heals on the next tick.

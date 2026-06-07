@@ -14,6 +14,7 @@ import discord
 
 from cogs.rewards.lib import balance as balance_svc
 from cogs.rewards.lib import boards as boards_svc
+from cogs.rewards.lib import link_bonus
 from orm import CTPBoard, CTPLedger, CTPPrize
 
 
@@ -80,6 +81,11 @@ def format_history_lines(entries: Iterable[CTPLedger]) -> list[str]:
             if e.comment:
                 out.append(f"  - {e.comment}")
             continue
+        if src == balance_svc.SOURCE_LINK_BONUS:
+            label = link_bonus.BONUS_LABELS.get(e.comment or "", "Account-link bonus")
+            plural = "" if e.amount_delta == 1 else "s"
+            out.append(f"`[BONUS]` {label}: received {e.amount_delta} point{plural}.")
+            continue
         out.append(f"`[?]` ({src}) delta={e.amount_delta}")
     return out
 
@@ -119,6 +125,9 @@ def format_info_history_lines(entries: Iterable[CTPLedger]) -> list[str]:
             tail = " [GLINT]"
         elif e.source == balance_svc.SOURCE_ADMIN_SET:
             tail = " [ADMIN]"
+        elif e.source == balance_svc.SOURCE_LINK_BONUS:
+            kind = e.comment or "?"
+            tail = f" [BONUS:{kind}]"
         out.append(f"{ts} {sign}{e.amount_delta} points{tail}")
     return out
 

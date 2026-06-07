@@ -27,6 +27,11 @@ SOURCE_GIFT_SENT = "gift_sent"
 SOURCE_GIFT_RECEIVED = "gift_received"
 SOURCE_GLINT_INVEST = "glint_invest"
 SOURCE_ADMIN_SET = "admin_set"
+# Awarded by ``cogs/rewards/link_bonus_reconciler.py`` for one-time
+# milestones: linking MC, issuing a vetsmod key, declaring a fishbot role.
+# ``comment`` carries the kind discriminator (see ``link_bonus.BONUS_KINDS``)
+# and doubles as the idempotency key.
+SOURCE_LINK_BONUS = "link_bonus"
 
 
 async def compute_balance(disc: DiscordAccount) -> int:

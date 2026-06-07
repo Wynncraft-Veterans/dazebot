@@ -91,6 +91,21 @@ class Config:
     # Settable at runtime via ``/config`` (persisted to ``BotConfigOverride``).
     CTP_PRIZE_ARTWORK_URL: str | None = None
 
+    # --- CTP link-bonus reconciler (cogs/rewards/link_bonus_reconciler.py) ---
+    # Awards 1 CTP point per user for each of: linking MC, issuing a vetsmod
+    # key, declaring a fishbot role. Runs once on startup (retroactive
+    # backfill) and on the interval below. ENABLED gates the loop; interval
+    # is read at decoration time so a change needs a restart.
+    LINK_BONUS_RECONCILER_ENABLED = True
+    LINK_BONUS_RECONCILER_HOURS = 6
+    # vets-anni's secret-gated internal endpoint root (prefix-only — the
+    # client appends ``/role-capability-uuids``). Reachable on the private
+    # ``verify`` Docker network; override via env in deployments where the
+    # container name or port differ.
+    VETS_ANNI_INTERNAL_URL = os.environ.get(
+        "VETS_ANNI_INTERNAL_URL", "http://vets-anni:8000/api/internal"
+    )
+
     GUILD_DEAD_ALERT_ROLE_USA = 1402295013169172500
     GUILD_DEAD_ALERT_ROLE_EUROPE = 1436108975132119221
     GUILD_DEAD_ALERT_ROLE_ASIA = 1436109140195020892

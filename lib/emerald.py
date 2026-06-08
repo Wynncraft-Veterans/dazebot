@@ -66,8 +66,13 @@ def parse_emeralds(s: str) -> int:
     """Parse an emerald-value string into raw integer emeralds.
 
     See the module docstring for the accepted formats. A bare number with
-    no unit is treated as raw ``e``. Decimal values are floored after
-    multiplication.
+    no unit is treated as raw ``e``. Decimal values accumulate as floats
+    and the running sum is floored once at the end, so the rounding error
+    per parse is bounded by ``< 1 e`` regardless of how many decimal
+    tokens appear. (Per-token flooring, by contrast, would compound the
+    error linearly in the number of decimal tokens, breaking the
+    "< 10000 e error for donations under 150 stx" guarantee for
+    pathological inputs.)
 
     Raises ``EmeraldParseError`` on empty input, negatives, unknown units,
     or any leftover unparsed characters.
@@ -83,7 +88,7 @@ def parse_emeralds(s: str) -> int:
     if _BARE_RE.match(cleaned):
         return int(float(cleaned))
 
-    total = 0
+    total_float = 0.0
     pos = 0
     saw_any_token = False
     while pos < len(cleaned):
@@ -98,13 +103,13 @@ def parse_emeralds(s: str) -> int:
                 token=s,
             )
         value_str, unit = m.group(1), m.group(2)
-        total += int(float(value_str) * _UNIT_MULTIPLIER[unit])
+        total_float += float(value_str) * _UNIT_MULTIPLIER[unit]
         pos = m.end()
         saw_any_token = True
 
     if not saw_any_token:
         raise EmeraldParseError(f"no recognised emerald tokens in {s!r}", token=s)
-    return total
+    return int(total_float)
 
 
 def format_emeralds_as_stx(n: int) -> str:

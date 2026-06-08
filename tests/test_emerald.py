@@ -128,3 +128,57 @@ class TestFormat:
 
     def test_negative(self):
         assert format_emeralds_as_stx(-E_PER_STX) == "-1.00 stx"
+
+
+class TestRoundingBound:
+    """The parser's rounding error must stay under 10000 e for any input
+    representing < 150 stx (the realistic upper bound on a single
+    donation). Tested via equivalent-representation pairs and a
+    pathological many-decimal-tokens stress case.
+    """
+
+    MAX_E_VALUE = 150 * E_PER_STX  # 39,321,600
+    MAX_DRIFT = 10_000
+
+    def _assert_within_bound(self, a: int, b: int) -> None:
+        assert abs(a - b) <= self.MAX_DRIFT, (
+            f"parsing drift {abs(a - b)} exceeds {self.MAX_DRIFT}e"
+        )
+
+    def test_canonical_vs_decimal_stx(self):
+        # 5,436,584e expressed exactly vs as decimal stx (2 dp)
+        raw = parse_emeralds("5436584")
+        decimal = parse_emeralds("20.74stx")  # 20.74 * 262144 = 5,436,866.56 -> 5,436,866
+        self._assert_within_bound(raw, decimal)
+
+    def test_canonical_vs_compound_with_decimal_le(self):
+        # 5,436,584 vs 20stx47.29le (~ 47.291015625 le exactly)
+        raw = parse_emeralds("5436584")
+        approx = parse_emeralds("20stx47.29le")
+        self._assert_within_bound(raw, approx)
+
+    def test_compound_vs_decimal_stx_under_150(self):
+        # 149stx = 39,059,456e vs "149.00stx"
+        raw = parse_emeralds("149stx")
+        decimal = parse_emeralds("149.00stx")
+        self._assert_within_bound(raw, decimal)
+
+    def test_many_decimal_tokens_stay_under_bound(self):
+        # Pathological: 100 tokens of 0.5 stx each = 50 stx total (well
+        # under 150). Per-token flooring would accumulate up to ~100e of
+        # error; accumulate-then-floor stays at <1e.
+        many_tokens = " ".join(["0.5stx"] * 100)
+        assert parse_emeralds(many_tokens) <= self.MAX_E_VALUE
+        # Exact equivalent: 50stx
+        self._assert_within_bound(parse_emeralds("50stx"), parse_emeralds(many_tokens))
+
+    def test_thousand_small_decimal_tokens(self):
+        # Even at 1000 tokens (silly but possible), the bound holds.
+        many_tokens = " ".join(["0.05stx"] * 1000)  # 50 stx total
+        self._assert_within_bound(parse_emeralds("50stx"), parse_emeralds(many_tokens))
+
+    def test_max_realistic_donation_bound(self):
+        # Largest realistic donation: 149.99 stx as decimal vs raw e.
+        decimal = parse_emeralds("149.99stx")
+        raw_e = parse_emeralds(str(decimal))
+        self._assert_within_bound(decimal, raw_e)

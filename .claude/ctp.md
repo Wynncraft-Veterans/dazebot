@@ -88,9 +88,21 @@ Dispatched by [`boards.apply_board_command`](../cogs/rewards/lib/boards.py). Par
 
 Boards are populated in-place by admins via `~ctp board <ENUM> <num> <role_id>` after deploy. The prize catalog ships with a one-off seed: [seed-dazebot-ctp-catalog.sh](../../vets-deploy/scripts/one-off/seed-dazebot-ctp-catalog.sh). The seed is merge-safe — re-running picks up newly added rows without touching existing ones (admins still use `~ctp prize edit` for changes).
 
-## Future hook: top-glinted export
+## Top-glinted export — `GET /api/internal/glinted`
 
-The spec calls out "Glinted" users (top 8 by glint investment) as something temporary-server may want to know about later (e.g. to flip an in-game visual). When that lands, expose a tiny internal endpoint on dazebot that returns `glints.leaderboard(bot)[0]` and have temporary-server poll it. Don't add a Discord "Glinted" role — the rank is computed live from `CTPGlintInvestment + state_of(member)` and recomputing on every guild state change would be its own can of worms.
+Lives in [api/main.py](../api/main.py), gated by `DAZEBOT_INTROSPECT_SECRET` like the other `/api/internal/*` siblings. Returns the 8-slot list that drives temporary-server's `/v1/outbound/supporters` endpoint (which vetsmod's `SupportersPoller` consumes for the in-chat glint shimmer).
+
+Shape:
+
+```
+{"slots": [{"mc_uuid": str, "mc_username": str} | null, x8]}
+```
+
+- Slots 1–6: top 6 entries of `glints.leaderboard(bot)` — already filtered to MEMBER / WAITLISTED / HONOURARY by `is_eligible_member`.
+- Slots 7–8: always `null` for now; reserved for a later source.
+- Positions are **positional**. A top-6 user with no linked `MinecraftAccount` produces a `null` at their slot — slot 7 is NOT promoted into the gap. This keeps the leaderboard rank a stable identifier of "which slot you're in" even when an upstream link is missing.
+
+Don't add a Discord "Glinted" role — the rank is computed live from `CTPGlintInvestment + state_of(member)` and recomputing on every guild state change would be its own can of worms. The poller on the temporary-server side picks up changes on its 5-min cadence; if you need faster propagation, lower the cadence there rather than building a push channel.
 
 ## Link-bonus (1 point × 3 milestones, retroactive + ongoing)
 

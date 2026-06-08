@@ -32,6 +32,7 @@ from lib.mc.resolve import refresh_mc_guild
 from lib.mc.wynn_api.errors import WynnApiError
 from lib.role_state import RoleState, ensure_linked_baseline, state_of
 from lib.staff import staff_actions
+from cogs.rewards.lib import glints as glints_svc
 from lib.staff.rank_alerts import post_rank_alert
 from lib.staff.verify_keys import _find_member, introspect, resolve_tier
 from orm import (
@@ -646,5 +647,52 @@ def create_app(bot: Bot) -> FastAPI:
             "blocked": resolved.blocked,
             "reason": None if linked else "no linked minecraft account",
         }
+
+    @app.get("/api/internal/glinted")
+    async def glinted(
+        x_introspect_secret: str | None = Header(default=None),
+    ):
+        """Return the 8-slot "currently glinted" list for temporary-server.
+
+        Slots 1-6 are filled from the top 6 entries of
+        ``glints.leaderboard(bot)`` (already filtered to MEMBER /
+        WAITLISTED / HONOURARY by ``is_eligible_member``). Slots 7-8 are
+        always ``null`` for now -- reserved for a later source. Slot
+        positions are positional: if a top-6 user has no linked
+        MinecraftAccount, that slot is ``null`` rather than promoting
+        slot 7 into the gap.
+
+        Response::
+
+            {"slots": [{"mc_uuid": str, "mc_username": str} | null, x8]}
+
+        Same auth + fail-closed pattern as the other ``/api/internal/*``
+        endpoints (``DAZEBOT_INTROSPECT_SECRET``, verify network only).
+        """
+        expected = os.environ.get("DAZEBOT_INTROSPECT_SECRET")
+        if not expected:
+            logger.error(
+                "glinted: DAZEBOT_INTROSPECT_SECRET not set; refusing"
+            )
+            raise HTTPException(status_code=503, detail="glinted disabled")
+        if x_introspect_secret != expected:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+        glinted_members, _standby = await glints_svc.leaderboard(bot)
+        slots: list[dict | None] = []
+        for member, _total in glinted_members[:6]:
+            disc = (
+                await DiscordAccount.filter(disc_uuid=str(member.id))
+                .select_related("minecraft_account")
+                .first()
+            )
+            mc = disc.minecraft_account if disc is not None else None
+            if mc is None:
+                slots.append(None)
+                continue
+            slots.append({"mc_uuid": mc.uuid, "mc_username": mc.mc_username})
+        while len(slots) < 8:
+            slots.append(None)
+        return {"slots": slots}
 
     return app

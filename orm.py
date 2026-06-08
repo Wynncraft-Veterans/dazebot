@@ -825,6 +825,37 @@ class Donation(Model):
         table = "donations"
 
 
+class BucketPull(Model):
+    """A staff-awarded "pull" token in one of six prize buckets.
+
+    Users redeem in-person with staff; this row is the bot's only record
+    that they're owed a prize. Expiry is six months from award — pulls
+    past expiry stop counting as "outstanding" but the row is preserved
+    so ``~bucket info`` can still surface them for audits. Redemption
+    sets ``redeemed_at`` / ``redeemed_by_disc_uuid`` rather than deleting
+    the row, for the same reason.
+
+    PK is auto-increment ``IntField`` (matches :class:`Donation`'s
+    choice) so ``~bucket info`` can surface a short ``#42`` identifier
+    that's friendlier to type than a UUID.
+    """
+
+    id = fields.IntField(pk=True)
+    discord_account: fields.ForeignKeyRelation[DiscordAccount] = fields.ForeignKeyField(
+        "models.DiscordAccount", related_name="bucket_pulls", on_delete=fields.CASCADE,
+    )
+    tier = fields.IntField(index=True)
+    reason = fields.TextField()
+    expires_at = fields.DatetimeField()
+    redeemed_at: Optional[datetime] = fields.DatetimeField(null=True)  # type: ignore
+    redeemed_by_disc_uuid: Optional[str] = fields.CharField(max_length=255, null=True)  # type: ignore
+    actor_disc_uuid = fields.CharField(max_length=255)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "bucket_pulls"
+
+
 def _inspect_db_state(db_path: str) -> tuple[bool, set[str]]:
     """Return ``(file_exists, table_names)`` for the SQLite file at ``db_path``.
 
@@ -922,7 +953,8 @@ def _backup_db_before_migration(db_path: str) -> str | None:
 # init_db can sanity-check the on-disk schema without running model queries).
 # Update this list whenever a table is added or removed.
 _EXPECTED_MODEL_TABLES = frozenset({
-    "apartments", "blocklist", "bot_config_overrides", "build_promotions",
+    "apartments", "blocklist", "bot_config_overrides", "bucket_pulls",
+    "build_promotions",
     "ctp_board_memberships", "ctp_boards", "ctp_glint_investments",
     "ctp_ledger", "ctp_prizes",
     "cult_memberships", "cults", "dead_guild_alerts", "discord_accounts",

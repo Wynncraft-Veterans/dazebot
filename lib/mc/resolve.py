@@ -167,6 +167,72 @@ async def resolve_target_member(
         return None
 
 
+class DonationRecipientError(ValueError):
+    """Raised when :func:`resolve_donation_recipient` can't produce a
+    :class:`MinecraftAccount` for the given value.
+
+    The cog catches this and replies with the carried ``message`` directly
+    (it's written for end-user consumption).
+    """
+
+
+_DISCORD_MENTION_RE = re.compile(r"^<@!?(\d+)>$")
+# Pure-numeric Discord snowflakes are 17-20 digits in practice. A shorter
+# digits-only value is more likely a typo than a real ID, so we don't treat
+# it as a Discord lookup.
+_DISCORD_ID_RE = re.compile(r"^\d{15,20}$")
+
+
+async def resolve_donation_recipient(
+    ctx: commands.Context, value: str
+) -> MinecraftAccount:
+    """Resolve a ``~donations`` recipient argument to a :class:`MinecraftAccount`.
+
+    The argument may be one of:
+
+    1. A Discord mention (``<@123>``) or a long pure-numeric Discord ID.
+       The linked :class:`MinecraftAccount` is returned; if the Discord
+       user has no linked MC, raises :class:`DonationRecipientError`
+       (donations need an in-game identity).
+    2. A Minecraft UUID or username. Delegated to :func:`ensure_mc_account`
+       (which hits Wynncraft / Mojang as needed and persists new rows).
+
+    Raises :class:`DonationRecipientError` on unlinked Discord users or
+    unresolvable MC values. :class:`~lib.mc.wynn_api.errors.WynnApiError`
+    can also propagate from the MC branch when the API itself fails.
+    """
+    raw = value.strip()
+    if not raw:
+        raise DonationRecipientError("Recipient is required.")
+
+    disc_id: Optional[str] = None
+    m = _DISCORD_MENTION_RE.match(raw)
+    if m:
+        disc_id = m.group(1)
+    elif _DISCORD_ID_RE.match(raw):
+        disc_id = raw
+
+    if disc_id is not None:
+        disc = (
+            await DiscordAccount.filter(disc_uuid=disc_id)
+            .select_related("minecraft_account")
+            .first()
+        )
+        if disc is None or disc.minecraft_account is None:
+            raise DonationRecipientError(
+                f"<@{disc_id}> has no linked Minecraft account; "
+                "they need to `/link` before they can receive donations."
+            )
+        return disc.minecraft_account
+
+    try:
+        return await ensure_mc_account(raw)
+    except WynnApiError as e:
+        raise DonationRecipientError(
+            f"Couldn't resolve `{raw}` as a Minecraft account: {e}"
+        ) from e
+
+
 async def resolve_target(
     ctx: commands.Context, target: str
 ) -> tuple[Optional[discord.Member], Optional[MinecraftAccount]]:

@@ -789,6 +789,42 @@ class CTPGlintInvestment(Model):
         table = "ctp_glint_investments"
 
 
+class Donation(Model):
+    """A single staff-recorded in-game donation to the guild.
+
+    ``value_emeralds`` is the staff-assigned emerald-equivalent valuation,
+    not necessarily liquid emerald currency: most donations are items,
+    which is why ``image_urls_json`` is usually populated (screenshot
+    evidence). Pure emerald-currency donations exist but are rare.
+
+    PK is auto-increment ``IntField`` (not UUID) because ``~donations
+    info <id>`` and ``~donations edit <id>`` are typed by humans —
+    friendly trumps matching CTP's UUID convention.
+
+    ``image_urls_json`` is a JSON list of Discord CDN URLs captured at
+    record time. Discord re-signs URLs when the source message is
+    re-fetched, so they remain viewable as long as the source message
+    exists. Re-hosting to i.wynnvets.org is out of scope for v1.
+
+    FK to ``MinecraftAccount`` uses ``RESTRICT`` — deleting an MC account
+    must not silently orphan donation history.
+    """
+
+    id = fields.IntField(pk=True)
+    recipient_mc: fields.ForeignKeyRelation[MinecraftAccount] = fields.ForeignKeyField(
+        "models.MinecraftAccount", related_name="donations_received",
+        on_delete=fields.RESTRICT,
+    )
+    value_emeralds = fields.BigIntField()
+    comment: Optional[str] = fields.TextField(null=True)
+    image_urls_json: Optional[str] = fields.TextField(null=True)
+    recorder_disc_uuid = fields.CharField(max_length=255)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "donations"
+
+
 def _inspect_db_state(db_path: str) -> tuple[bool, set[str]]:
     """Return ``(file_exists, table_names)`` for the SQLite file at ``db_path``.
 
@@ -890,7 +926,7 @@ _EXPECTED_MODEL_TABLES = frozenset({
     "ctp_board_memberships", "ctp_boards", "ctp_glint_investments",
     "ctp_ledger", "ctp_prizes",
     "cult_memberships", "cults", "dead_guild_alerts", "discord_accounts",
-    "dm_sent_log", "first_install_monitors", "guild_capacity_alerts",
+    "dm_sent_log", "donations", "first_install_monitors", "guild_capacity_alerts",
     "intercult_messages", "janitor_alerts", "link_code", "link_requests",
     "minecraft_accounts", "minecraft_alts", "mojang_name_cache",
     "profession_categories", "recruitment_queries", "return_guesses",

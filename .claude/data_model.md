@@ -84,13 +84,19 @@ The role state itself (REGISTERED/HIATUS/MEMBER/HONOURARY/WAITLISTED) lives on D
 
 | Table | Owner | Purpose |
 |---|---|---|
-| `CTPBoard` | `cogs/rewards/ctp.py` (`~ctp board`) | One row per reward board (DEV / TXT / ART / ...). `enum` + `board_number` + optional `role_id`. |
-| `CTPBoardMembership` | `cogs/rewards/ctp.py` (`~ctp assign` / `~ctp revoke`) | Manual staff-assigned (`disc_account`, `board`) association. Unioned with role-derived membership by `_board_memberships`. Assign/revoke also grant/strip the board's `role_id` as a one-shot side effect — see [ctp.md](ctp.md) "Board membership". |
-| `CTPPrize` | `cogs/rewards/ctp.py` (`~ctp prize ...`) | Editable prize catalog. Unique on `(category, enum_name)`. `disabled` hides without deleting; `duration_seconds=None` means one-time. |
-| `CTPLedger` | `cogs/rewards/lib/balance.py` | Append-only point-movement log. Balance = `SUM(amount_delta)` per user; never store a balance column. `source` discriminates rendering (`reward` / `redeem` / `gift_sent` / `gift_received` / `glint_invest` / `admin_set`). Snapshots prize fields + `expires_at` so a prize edit / delete leaves history rendering intact. |
-| `CTPGlintInvestment` | `cogs/rewards/lib/glints.py` | Cumulative-only `total_invested` per Discord user (1:1, never decrements). Separate from the ledger so the leaderboard is one SELECT; the matching negative ledger row (`source='glint_invest'`) is what debits balance. |
+| `CTPBoard` | `cogs/rewards/ctp/ctp.py` (`~ctp board`) | One row per reward board (DEV / TXT / ART / ...). `enum` + `board_number` + optional `role_id`. |
+| `CTPBoardMembership` | `cogs/rewards/ctp/ctp.py` (`~ctp assign` / `~ctp revoke`) | Manual staff-assigned (`disc_account`, `board`) association. Unioned with role-derived membership by `_board_memberships`. Assign/revoke also grant/strip the board's `role_id` as a one-shot side effect — see [ctp.md](ctp.md) "Board membership". |
+| `CTPPrize` | `cogs/rewards/ctp/ctp.py` (`~ctp prize ...`) | Editable prize catalog. Unique on `(category, enum_name)`. `disabled` hides without deleting; `duration_seconds=None` means one-time. |
+| `CTPLedger` | `cogs/rewards/ctp/lib/balance.py` | Append-only point-movement log. Balance = `SUM(amount_delta)` per user; never store a balance column. `source` discriminates rendering (`reward` / `redeem` / `gift_sent` / `gift_received` / `glint_invest` / `admin_set`). Snapshots prize fields + `expires_at` so a prize edit / delete leaves history rendering intact. |
+| `CTPGlintInvestment` | `cogs/rewards/ctp/lib/glints.py` | Cumulative-only `total_invested` per Discord user (1:1, never decrements). Separate from the ledger so the leaderboard is one SELECT; the matching negative ledger row (`source='glint_invest'`) is what debits balance. |
 
 See [ctp.md](ctp.md) for the schema invariants, the overloaded `~ctp board` parsing, and the glints-eligibility rule (MEMBER / WAITLISTED / HONOURARY only on the leaderboard).
+
+## Donations
+
+| Table | Owner | Purpose |
+|---|---|---|
+| `Donation` | `cogs/rewards/donations/donations.py` (`~donations`) | One staff-recorded in-game donation to the guild. PK is auto-increment int so `~donations info <id>` is human-typeable. `value_emeralds` is the staff-assigned emerald-equivalent valuation (BigInt). `image_urls_json` is a JSON list of Discord CDN URLs (null when no attachments). FK to `MinecraftAccount` is `RESTRICT`: deleting an MC account must not orphan donation history. See [donations.md](donations.md) for the 5%-milestone rule and the glint-slots 7-8 wiring. |
 
 ## Misc
 

@@ -1,21 +1,21 @@
 # Chore-Torn Palace (CTP)
 
-The CTP cog ([cogs/rewards/ctp.py](../cogs/rewards/ctp.py)) is the points-and-prizes system surfaced via the `~ctp` command group. It tracks per-user point balances, an editable prize catalog, time-bound redemptions, and a cumulative glint-investment leaderboard.
+The CTP cog ([cogs/rewards/ctp/ctp.py](../cogs/rewards/ctp/ctp.py)) is the points-and-prizes system surfaced via the `~ctp` command group. It tracks per-user point balances, an editable prize catalog, time-bound redemptions, and a cumulative glint-investment leaderboard.
 
 ## Where to look
 
 | Concern | File |
 |---|---|
-| Command surface (all ~22 subcommands) | [cogs/rewards/ctp.py](../cogs/rewards/ctp.py) |
-| Append-only ledger + balance math | [cogs/rewards/lib/balance.py](../cogs/rewards/lib/balance.py) |
-| Board CRUD + tasks.wynnvets.org URL formatting | [cogs/rewards/lib/boards.py](../cogs/rewards/lib/boards.py) |
-| Prize catalog + redemption logic | [cogs/rewards/lib/prizes.py](../cogs/rewards/lib/prizes.py) |
-| Glint invest / leaderboard / rank lookup | [cogs/rewards/lib/glints.py](../cogs/rewards/lib/glints.py) |
-| Link-bonus eligibility + idempotent grant | [cogs/rewards/lib/link_bonus.py](../cogs/rewards/lib/link_bonus.py) |
-| Link-bonus retroactive backfill + periodic reconciler | [cogs/rewards/link_bonus_reconciler.py](../cogs/rewards/link_bonus_reconciler.py) |
+| Command surface (all ~22 subcommands) | [cogs/rewards/ctp/ctp.py](../cogs/rewards/ctp/ctp.py) |
+| Append-only ledger + balance math | [cogs/rewards/ctp/lib/balance.py](../cogs/rewards/ctp/lib/balance.py) |
+| Board CRUD + tasks.wynnvets.org URL formatting | [cogs/rewards/ctp/lib/boards.py](../cogs/rewards/ctp/lib/boards.py) |
+| Prize catalog + redemption logic | [cogs/rewards/ctp/lib/prizes.py](../cogs/rewards/ctp/lib/prizes.py) |
+| Glint invest / leaderboard / rank lookup | [cogs/rewards/ctp/lib/glints.py](../cogs/rewards/ctp/lib/glints.py) |
+| Link-bonus eligibility + idempotent grant | [cogs/rewards/ctp/lib/link_bonus.py](../cogs/rewards/ctp/lib/link_bonus.py) |
+| Link-bonus retroactive backfill + periodic reconciler | [cogs/rewards/ctp/link_bonus_reconciler.py](../cogs/rewards/ctp/link_bonus_reconciler.py) |
 | vets-anni internal client (fishbot role-capability check) | [lib/integrations/anni_internal.py](../lib/integrations/anni_internal.py) |
-| Yes/No confirmation view (gift, glint bid) | [cogs/rewards/lib/confirm_view.py](../cogs/rewards/lib/confirm_view.py) |
-| Embed builders and history-line formatters | [cogs/rewards/lib/formatting.py](../cogs/rewards/lib/formatting.py) |
+| Yes/No confirmation view (cross-subsystem; reused by `~donations remove`) | [cogs/rewards/lib/confirm_view.py](../cogs/rewards/lib/confirm_view.py) |
+| Embed builders and history-line formatters | [cogs/rewards/ctp/lib/formatting.py](../cogs/rewards/ctp/lib/formatting.py) |
 | ORM tables | [orm.py](../orm.py) — `CTPBoard`, `CTPBoardMembership`, `CTPPrize`, `CTPLedger`, `CTPGlintInvestment` |
 | Initial prize-catalog seed | [vets-deploy/scripts/one-off/seed-dazebot-ctp-catalog.sh](../../vets-deploy/scripts/one-off/seed-dazebot-ctp-catalog.sh) |
 
@@ -57,7 +57,7 @@ A user "is on" a board if **either** of:
 1. They hold the board's `role_id` in Discord (the original mechanism). Boards with no `role_id` set are skipped on this side — we can't claim membership we can't verify.
 2. A staff member has written a `CTPBoardMembership(disc, board)` row via `~ctp assign`.
 
-`_board_memberships` in [cogs/rewards/ctp.py](../cogs/rewards/ctp.py) unions the two and dedupes. The list surfaces in `~ctp status` and `~ctp info <user>`; nothing else in the codebase consumes board membership today.
+`_board_memberships` in [cogs/rewards/ctp/ctp.py](../cogs/rewards/ctp/ctp.py) unions the two and dedupes. The list surfaces in `~ctp status` and `~ctp info <user>`; nothing else in the codebase consumes board membership today.
 
 `~ctp assign <user> <ENUM>` and `~ctp revoke <user> <ENUM>` are staff-tier. They write/delete the DB row **and** grant/strip the board's `role_id` from the target as a one-shot side effect at command time. There is no drift sync — if the role is later removed by hand in Discord, the DB row stays, and vice versa. This is intentional: the DB row is the staff-driven "manual" assignment record; the Discord role is whatever role-management is happening in the server, which membership reads opportunistically. The one-shot grant just exists so staff doesn't have to do two clicks.
 
@@ -69,7 +69,7 @@ Failures of the role half (missing permissions, board has no `role_id`, role del
 
 ## `~ctp board` syntax (overloaded)
 
-Dispatched by [`boards.apply_board_command`](../cogs/rewards/lib/boards.py). Parsing rules:
+Dispatched by [`boards.apply_board_command`](../cogs/rewards/ctp/lib/boards.py). Parsing rules:
 
 | Form | Effect | Required state |
 |---|---|---|
@@ -99,8 +99,8 @@ Shape:
 ```
 
 - Slots 1–6: top 6 entries of `glints.leaderboard(bot)` — already filtered to MEMBER / WAITLISTED / HONOURARY by `is_eligible_member`.
-- Slots 7–8: always `null` for now; reserved for a later source.
-- Positions are **positional**. A top-6 user with no linked `MinecraftAccount` produces a `null` at their slot — slot 7 is NOT promoted into the gap. This keeps the leaderboard rank a stable identifier of "which slot you're in" even when an upstream link is missing.
+- Slots 7–8: two most recent distinct recipients with a qualifying donation milestone (≥5% of their cumulative-received total). Computed live via `donations_svc.donation_milestone_recipients(limit=2)` — see [donations.md](donations.md). Subject to the same MEMBER / WAITLISTED / HONOURARY eligibility filter as slots 1–6.
+- Positions are **positional**. A user whose slot can't be filled (no linked `MinecraftAccount`, ineligible role, fewer than 6 CTP glinters or fewer than 2 milestone donors) produces a `null` at their slot — lower-ranked candidates are NOT promoted into the gap. This keeps the leaderboard rank a stable identifier of "which slot you're in" even when an upstream link is missing.
 
 Don't add a Discord "Glinted" role — the rank is computed live from `CTPGlintInvestment + state_of(member)` and recomputing on every guild state change would be its own can of worms. The poller on the temporary-server side picks up changes on its 5-min cadence; if you need faster propagation, lower the cadence there rather than building a push channel.
 
@@ -116,7 +116,7 @@ Three identity milestones each award **1 CTP point** exactly once per user:
 
 Awards are written as plain `CTPLedger` rows with `source='link_bonus'` and the kind token in `comment` (`mc_link` / `vetsmod` / `fishbot_role`). The `(source, comment)` pair *is* the idempotency key — there is no separate flag column. A user can therefore never receive the same bonus twice, even across reconciler ticks.
 
-[`cogs/rewards/link_bonus_reconciler.py`](../cogs/rewards/link_bonus_reconciler.py) runs once on `on_ready` (the retroactive backfill) and then on `LINK_BONUS_RECONCILER_HOURS` (default 6h). Newly-linked users pick up their bonuses on the next tick — no event hook in the linking path, so a missed event (restart, edge case) still self-heals.
+[`cogs/rewards/ctp/link_bonus_reconciler.py`](../cogs/rewards/ctp/link_bonus_reconciler.py) runs once on `on_ready` (the retroactive backfill) and then on `LINK_BONUS_RECONCILER_HOURS` (default 6h). Newly-linked users pick up their bonuses on the next tick — no event hook in the linking path, so a missed event (restart, edge case) still self-heals.
 
 vets-anni's [`/api/internal/role-capability-uuids`](../../vets-anni/app/web/routers/internal.py) is gated by `X-Introspect-Secret == DAZEBOT_INTROSPECT_SECRET` (the same shared secret already used in the dazebot→vets-anni direction). An unreachable vets-anni silently skips the `fishbot_role` kind for the tick; the other two kinds still run.
 

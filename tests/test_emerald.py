@@ -1,0 +1,130 @@
+"""Unit tests for ``lib.emerald`` parser + formatter.
+
+Spec examples from ``.claude/ephemeral/donations_management.md``::
+
+    5436584         == 5436584e
+    20stx47le18eb40e == 5436584
+    20stx47.29le    == 5436584   (decimal le)
+"""
+
+import pytest
+
+from lib.emerald import (
+    EmeraldParseError,
+    E_PER_EB,
+    E_PER_LE,
+    E_PER_STX,
+    format_emeralds_as_stx,
+    parse_emeralds,
+)
+
+
+class TestParseFromSpec:
+    def test_bare_int(self):
+        assert parse_emeralds("5436584") == 5436584
+
+    def test_bare_with_e_suffix(self):
+        assert parse_emeralds("5436584e") == 5436584
+
+    def test_full_compound(self):
+        assert parse_emeralds("20stx47le18eb40e") == 5436584
+
+    def test_decimal_le(self):
+        # The spec rounds "20stx47.29le" to 5436584, but mathematically
+        # 47.29 * 4096 = 193699.84 floored = 193699, so the exact total is
+        # 5242880 + 193699 = 5436579. The parser uses floor() to match the
+        # WynnVentory JS calculator reference (Math.floor of the sum).
+        # Exact decimal equivalent is "47.291015625le" (which would give
+        # 5436584 exactly), but staff will type decimal approximations.
+        assert parse_emeralds("20stx47.29le") == 5436579
+
+
+class TestParseFormats:
+    def test_with_spaces_between_tokens(self):
+        assert parse_emeralds("20 stx 47 le 18 eb 40 e") == 5436584
+
+    def test_with_spaces_between_value_and_unit(self):
+        assert parse_emeralds("20stx 47 le") == 20 * E_PER_STX + 47 * E_PER_LE
+
+    def test_uppercase(self):
+        assert parse_emeralds("20STX") == 20 * E_PER_STX
+
+    def test_mixed_case(self):
+        assert parse_emeralds("20Stx47Le") == 20 * E_PER_STX + 47 * E_PER_LE
+
+    def test_leading_trailing_whitespace(self):
+        assert parse_emeralds("   1le   ") == E_PER_LE
+
+    def test_just_le(self):
+        assert parse_emeralds("1le") == E_PER_LE
+
+    def test_just_eb(self):
+        assert parse_emeralds("1eb") == E_PER_EB
+
+    def test_zero(self):
+        assert parse_emeralds("0e") == 0
+
+    def test_zero_bare(self):
+        assert parse_emeralds("0") == 0
+
+    def test_decimal_floored(self):
+        # 0.5 le = 2048 e exactly; 0.5001 le = 2048.4096 floored to 2048
+        assert parse_emeralds("0.5le") == 2048
+        assert parse_emeralds("0.5001le") == 2048
+
+
+class TestParseErrors:
+    def test_empty(self):
+        with pytest.raises(EmeraldParseError):
+            parse_emeralds("")
+
+    def test_whitespace_only(self):
+        with pytest.raises(EmeraldParseError):
+            parse_emeralds("   ")
+
+    def test_bad_unit(self):
+        with pytest.raises(EmeraldParseError):
+            parse_emeralds("5xyz")
+
+    def test_letters_only(self):
+        with pytest.raises(EmeraldParseError):
+            parse_emeralds("stx")
+
+    def test_negative_rejected(self):
+        with pytest.raises(EmeraldParseError):
+            parse_emeralds("-5e")
+
+    def test_trailing_garbage(self):
+        with pytest.raises(EmeraldParseError):
+            parse_emeralds("1stx garbage")
+
+    def test_non_string(self):
+        with pytest.raises(EmeraldParseError):
+            parse_emeralds(123)  # type: ignore[arg-type]
+
+    def test_error_carries_token(self):
+        with pytest.raises(EmeraldParseError) as exc_info:
+            parse_emeralds("5xyz")
+        assert exc_info.value.token == "5xyz"
+
+
+class TestFormat:
+    def test_zero(self):
+        assert format_emeralds_as_stx(0) == "0.00 stx"
+
+    def test_exact_stx(self):
+        assert format_emeralds_as_stx(E_PER_STX) == "1.00 stx"
+
+    def test_spec_example(self):
+        # From the spec: 20.74 stx for the 5436584 examples
+        assert format_emeralds_as_stx(5436584) == "20.74 stx"
+
+    def test_small_value_rounds_to_zero(self):
+        assert format_emeralds_as_stx(100) == "0.00 stx"
+
+    def test_two_decimal_places_preserved(self):
+        # 2.32 stx — example from the spec
+        assert format_emeralds_as_stx(int(2.32 * E_PER_STX)) == "2.32 stx"
+
+    def test_negative(self):
+        assert format_emeralds_as_stx(-E_PER_STX) == "-1.00 stx"

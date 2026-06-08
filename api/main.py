@@ -33,6 +33,8 @@ from lib.mc.wynn_api.errors import WynnApiError
 from lib.role_state import RoleState, ensure_linked_baseline, state_of
 from lib.staff import staff_actions
 from cogs.rewards.ctp.lib import glints as glints_svc
+from cogs.rewards.donations.lib import svc as donations_svc
+from config import CurrConfig
 from lib.staff.rank_alerts import post_rank_alert
 from lib.staff.verify_keys import _find_member, introspect, resolve_tier
 from orm import (
@@ -656,11 +658,19 @@ def create_app(bot: Bot) -> FastAPI:
 
         Slots 1-6 are filled from the top 6 entries of
         ``glints.leaderboard(bot)`` (already filtered to MEMBER /
-        WAITLISTED / HONOURARY by ``is_eligible_member``). Slots 7-8 are
-        always ``null`` for now -- reserved for a later source. Slot
-        positions are positional: if a top-6 user has no linked
-        MinecraftAccount, that slot is ``null`` rather than promoting
-        slot 7 into the gap.
+        WAITLISTED / HONOURARY by ``is_eligible_member``).
+
+        Slots 7-8 are filled from the two most-recent distinct recipients
+        with a qualifying donation milestone (``value >= 5%`` of their
+        cumulative-received total at the time of that donation). Subject
+        to the same MEMBER / WAITLISTED / HONOURARY eligibility filter as
+        slots 1-6 — an ineligible/unlinked recipient yields ``null``
+        rather than promoting a lower-ranked donor.
+
+        Slot positions are positional: if any slot can't be filled
+        (no linked MC, ineligible role, fewer than 6 CTP glinters or
+        fewer than 2 milestone donors), that slot is ``null`` rather
+        than promoting another candidate into the gap.
 
         Response::
 
@@ -688,6 +698,30 @@ def create_app(bot: Bot) -> FastAPI:
             )
             mc = disc.minecraft_account if disc is not None else None
             if mc is None:
+                slots.append(None)
+                continue
+            slots.append({"mc_uuid": mc.uuid, "mc_username": mc.mc_username})
+        # Pad slots 1-6 to exactly 6 entries before appending the donation
+        # milestone slots, so they always occupy positions 7-8.
+        while len(slots) < 6:
+            slots.append(None)
+
+        # Slots 7-8: two most recent distinct donation-milestone
+        # recipients, same eligibility filter as 1-6.
+        guild = bot.get_guild(CurrConfig.GUILD)
+        donation_recipients = await donations_svc.donation_milestone_recipients(limit=2)
+        for mc in donation_recipients:
+            disc = (
+                await DiscordAccount.filter(minecraft_account_id=mc.id).first()
+                if guild is not None else None
+            )
+            member = None
+            if disc is not None and guild is not None:
+                try:
+                    member = guild.get_member(int(disc.disc_uuid))
+                except (TypeError, ValueError):
+                    member = None
+            if member is None or not glints_svc.is_eligible_member(member):
                 slots.append(None)
                 continue
             slots.append({"mc_uuid": mc.uuid, "mc_username": mc.mc_username})

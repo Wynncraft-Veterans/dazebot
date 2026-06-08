@@ -20,11 +20,11 @@ import discord
 from discord.ext import commands
 
 from bot import Bot
-from cogs.rewards.lib import balance as balance_svc
-from cogs.rewards.lib import boards as boards_svc
-from cogs.rewards.lib import formatting
-from cogs.rewards.lib import glints as glints_svc
-from cogs.rewards.lib import prizes as prizes_svc
+from cogs.rewards.ctp.lib import balance as balance_svc
+from cogs.rewards.ctp.lib import boards as boards_svc
+from cogs.rewards.ctp.lib import formatting
+from cogs.rewards.ctp.lib import glints as glints_svc
+from cogs.rewards.ctp.lib import prizes as prizes_svc
 from cogs.rewards.lib.confirm_view import ConfirmView
 from config import CurrConfig
 from lib.auth import Tier, current_tier, is_admin, is_guild, is_registered, is_staff
@@ -274,7 +274,7 @@ class CTPCog(commands.Cog):
             )
         await prompt.edit(
             content=(
-                f"Confirmed! You have added **{number}** points to your **{new_total}** glint investment.\n{tail}"
+                f"Confirmed! You have added **{number}** points, bringing your glint investment to **{new_total}**.\n{tail}"
             ),
             view=None,
             allowed_mentions=discord.AllowedMentions.none(),

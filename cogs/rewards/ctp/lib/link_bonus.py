@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from cogs.rewards.lib import balance as balance_svc
+from cogs.rewards.ctp.lib import balance as balance_svc
 from orm import CTPLedger, DiscordAccount, VerifyKey
 
 logger = logging.getLogger("dazebot.cogs.rewards.lib.link_bonus")

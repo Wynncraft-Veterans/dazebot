@@ -29,8 +29,8 @@ from dataclasses import dataclass, field
 from discord.ext import commands, tasks
 
 from bot import Bot
-from cogs.rewards.lib import balance as balance_svc
-from cogs.rewards.lib import link_bonus
+from cogs.rewards.ctp.lib import balance as balance_svc
+from cogs.rewards.ctp.lib import link_bonus
 from config import Config, CurrConfig
 from lib.integrations import anni_internal
 from orm import DiscordAccount, VerifyKey

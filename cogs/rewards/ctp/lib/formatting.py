@@ -12,9 +12,9 @@ from typing import Iterable, Optional
 
 import discord
 
-from cogs.rewards.lib import balance as balance_svc
-from cogs.rewards.lib import boards as boards_svc
-from cogs.rewards.lib import link_bonus
+from cogs.rewards.ctp.lib import balance as balance_svc
+from cogs.rewards.ctp.lib import boards as boards_svc
+from cogs.rewards.ctp.lib import link_bonus
 from orm import CTPBoard, CTPLedger, CTPPrize
 
 

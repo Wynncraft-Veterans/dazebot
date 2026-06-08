@@ -32,7 +32,7 @@ from lib.mc.resolve import refresh_mc_guild
 from lib.mc.wynn_api.errors import WynnApiError
 from lib.role_state import RoleState, ensure_linked_baseline, state_of
 from lib.staff import staff_actions
-from cogs.rewards.lib import glints as glints_svc
+from cogs.rewards.ctp.lib import glints as glints_svc
 from lib.staff.rank_alerts import post_rank_alert
 from lib.staff.verify_keys import _find_member, introspect, resolve_tier
 from orm import (

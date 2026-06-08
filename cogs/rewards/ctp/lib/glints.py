@@ -19,7 +19,7 @@ from typing import Optional
 
 import discord
 
-from cogs.rewards.lib import balance as balance_svc
+from cogs.rewards.ctp.lib import balance as balance_svc
 from config import CurrConfig
 from lib.role_state import RoleState, state_of
 from orm import CTPGlintInvestment, DiscordAccount

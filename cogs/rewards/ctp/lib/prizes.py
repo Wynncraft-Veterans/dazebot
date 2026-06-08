@@ -15,7 +15,7 @@ from typing import Optional
 
 from tortoise.expressions import Q
 
-from cogs.rewards.lib import balance as balance_svc
+from cogs.rewards.ctp.lib import balance as balance_svc
 from orm import CTPLedger, CTPPrize, DiscordAccount
 
 

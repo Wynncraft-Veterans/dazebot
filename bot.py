@@ -16,7 +16,7 @@ from orm import close_db, init_db
 # loading their .py files as discord.py extensions would fail with
 # NoEntryPointError -- the catch in _load_cogs would also handle it, but
 # explicit skipping keeps the log clean and the intent obvious.
-COG_SKIP_DIRS: set[str] = {"returns"}
+COG_SKIP_DIRS: set[str] = {"returns", "lib"}
 
 logger = logging.getLogger("dazebot.bot")
 from dotenv import load_dotenv

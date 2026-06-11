@@ -78,19 +78,23 @@ async def _resolve_nominee(
 ) -> tuple[Optional[discord.Member], Optional[MinecraftAccount], Optional[str]]:
     """Resolve a nominee string to a Discord Member or MinecraftAccount.
 
-    Tries, in order:
+    Branches by input shape so the failure message tells the user where the
+    lookup actually missed:
 
-      1. Discord mention ``<@id>`` or bare snowflake -> guild member lookup.
-      2. Member username / global name / display name lookup in
-         ``guild_id``'s cache.
-      3. :func:`ensure_mc_account` (local DB + Wynncraft / Mojang fallback).
+      1. Discord mention ``<@id>`` or bare snowflake → guild member lookup
+         only. If that fails, do *not* fall through to the Wynncraft API —
+         a mention plainly isn't an MC name.
+      2. Plain string → guild member name / global name / display name,
+         then :func:`ensure_mc_account` (local DB + Wynncraft / Mojang
+         fallback).
 
     Returns ``(member, mc, error)``. On success only one of ``member`` /
-    ``mc`` is set. On failure ``error`` carries a user-facing message.
+    ``mc`` is set. On failure ``error`` carries a user-facing message
+    specific to which branch was attempted.
     """
     val = raw.strip()
     if not val:
-        return None, None, "Nominee is required."
+        return None, None, "Nominee is required — leave nothing blank."
 
     guild = interaction.client.get_guild(guild_id)
     disc_id: Optional[str] = None
@@ -100,17 +104,27 @@ async def _resolve_nominee(
     elif _DISCORD_ID_RE.match(val):
         disc_id = val
 
-    if disc_id is not None and guild is not None:
+    if disc_id is not None:
+        if guild is None:
+            return None, None, (
+                "I can't reach this server right now to resolve a Discord ID. "
+                "Try again in a moment, or ping an admin."
+            )
         member = guild.get_member(int(disc_id))
         if member is None:
             try:
                 member = await guild.fetch_member(int(disc_id))
-            except discord.HTTPException:
+            except (discord.NotFound, discord.HTTPException):
                 member = None
-        if member is not None:
-            return member, None, None
+        if member is None:
+            return None, None, (
+                f"That looks like a Discord mention/ID, but `{disc_id}` isn't "
+                "a member of this server. Try a username or a Minecraft name "
+                "instead."
+            )
+        return member, None, None
 
-    if disc_id is None and guild is not None:
+    if guild is not None:
         lower = val.lower()
         for cand in guild.members:
             if (
@@ -124,10 +138,17 @@ async def _resolve_nominee(
         mc = await ensure_mc_account(val)
         return None, mc, None
     except WynnApiError:
-        return (
-            None,
-            None,
-            f"Couldn't find a Discord member or Minecraft account matching `{val}`.",
+        return None, None, (
+            f"`{val}` doesn't match any Discord member here or any Wynncraft "
+            "player. Check the spelling, or paste a Discord @mention."
+        )
+    except Exception:  # noqa: BLE001 - network / SDK safety net
+        logger.exception(
+            "return 77: unexpected error resolving MC nominee %r", val
+        )
+        return None, None, (
+            f"Something went wrong looking up `{val}` (Wynncraft may be "
+            "having issues). Try again in a moment."
         )
 
 
@@ -283,7 +304,7 @@ class _NominateModal(discord.ui.Modal):
         )
 
         try:
-            await thread.send(
+            posted = await thread.send(
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -299,9 +320,46 @@ class _NominateModal(discord.ui.Modal):
             )
             return
 
+        logger.info(
+            "return 77: nomination posted by %s (%s) -> thread %s message %s (%s)",
+            interaction.user,
+            interaction.user.id,
+            NOMINATION_THREAD_ID,
+            posted.id,
+            posted.jump_url,
+        )
         await interaction.followup.send(
             "✅ Your nomination has been submitted.", ephemeral=True
         )
+
+    async def on_error(
+        self, interaction: discord.Interaction, error: Exception
+    ) -> None:
+        """Catch-all for anything ``on_submit`` doesn't handle explicitly.
+
+        Without this, an unhandled exception causes Discord to show a
+        generic "Something went wrong" to the user with no detail and no
+        log line in our logs — the exact "partially went through but
+        nothing landed in the thread" symptom.
+        """
+        logger.exception(
+            "return 77: unhandled error in modal submit (user=%s %s)",
+            interaction.user,
+            interaction.user.id,
+            exc_info=error,
+        )
+        msg = (
+            "Something went wrong submitting your nomination. Nothing was "
+            "posted. Try again — if it keeps failing, ping wen with what "
+            "you typed."
+        )
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
 
 
 class _NominateView(discord.ui.View):

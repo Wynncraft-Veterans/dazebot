@@ -247,7 +247,7 @@ class _NominateModal(discord.ui.Modal):
                 NOMINATION_THREAD_ID,
             )
             await interaction.followup.send(
-                "I couldn't reach the awards thread. Ping an admin so they "
+                "I couldn't reach the awards thread. Ping wen so he "
                 "can check the bot config.",
                 ephemeral=True,
             )
@@ -294,7 +294,7 @@ class _NominateModal(discord.ui.Modal):
             )
             await interaction.followup.send(
                 "I couldn't post your nomination to the awards thread. Try "
-                "again in a moment, or ping an admin.",
+                "again in a moment, or ping wen.",
                 ephemeral=True,
             )
             return
@@ -340,8 +340,7 @@ async def handle(ctx: commands.Context) -> None:
     guild_id = ctx.guild.id if ctx.guild is not None else CurrConfig.GUILD
     view = _NominateView(guild_id=guild_id)
     intro = (
-        "🏆 **Return 77 — Award nomination.** "
-        "Click the button to open the form; what you submit goes only to "
-        "the admin-only awards thread."
+        "🏆 **Return 77 — Award nomination.**\n"
+        "Click the button to open the form!\n"
     )
     await ctx.reply(intro, view=view)

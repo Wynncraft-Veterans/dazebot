@@ -222,7 +222,7 @@ class _NominateModal(discord.ui.Modal):
     )
     title_input = discord.ui.TextInput(
         label="Possible Award (Suggested Title)",
-        placeholder="Succinctly charactarise their positive contributions!",
+        placeholder="Succinctly characterise their positive contributions!",
         style=discord.TextStyle.short,
         min_length=1,
         max_length=MAX_TITLE_LEN,

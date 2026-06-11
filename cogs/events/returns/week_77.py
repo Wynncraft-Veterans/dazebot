@@ -2,8 +2,9 @@
 
 Surfaces:
 
-* ``/return 77`` / ``~return 77`` — opens a private modal (via a button on
-  an ephemeral or DM reply) where the invoker types three fields:
+* ``/return 77`` / ``~return 77`` — the bot replies in-channel with a
+  "Submit a nomination" button; the button opens a Modal where the
+  clicker types three fields:
 
   * ``nominee`` — a Discord member (mention / id / username / display
     name) OR a Minecraft username / UUID. Validated against the guild
@@ -18,9 +19,12 @@ Surfaces:
   Honourary / Hiatus / Waitlisted / Registered) so thread admins can
   weigh the nomination at a glance.
 
-Nothing about a submission ever leaves the modal, the ephemeral / DM
-confirmation, or the admin thread. No DB persistence — the thread post
-is the canonical record.
+Only the *form content* is private — the modal is rendered only to the
+clicker; submissions only reach the admin thread plus a brief ephemeral
+ack. The fact that ``/return 77`` was run is not hidden; the bot replies
+in-channel with the button. Anyone may click; ``_NominateView`` re-runs
+the REGISTERED tier check before opening the modal. No DB persistence —
+the thread post is the canonical record.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ import discord
 from discord.ext import commands
 
 from cogs.events.returns import Tier, register
+from cogs.events.returns._common import tier_allows
 from config import CurrConfig
 from lib.auth import (
     _has_admin_perm,
@@ -61,51 +66,6 @@ _VIEW_TIMEOUT = 600
 # Discord mention / id matchers. Kept in sync with lib/mc/resolve.py.
 _DISCORD_MENTION_RE = re.compile(r"^<@!?(\d+)>$")
 _DISCORD_ID_RE = re.compile(r"^\d{15,20}$")
-
-
-# ---------------------------------------------------------------------------
-# Privacy helper (mirrors week_73's _private)
-# ---------------------------------------------------------------------------
-
-
-async def _private(
-    ctx: commands.Context,
-    content: Optional[str] = None,
-    *,
-    embed: Optional[discord.Embed] = None,
-    view: Optional[discord.ui.View] = None,
-) -> None:
-    """Send a response only the invoking user should see.
-
-    Slash invocation -> ephemeral reply. Prefix (``~return 77``) has no
-    ephemeral channel, so DM the user and delete the original command
-    message. Falls back to a non-revealing nudge if DMs are closed.
-    """
-    kw: dict = {}
-    if content is not None:
-        kw["content"] = content
-    if embed is not None:
-        kw["embed"] = embed
-    if view is not None:
-        kw["view"] = view
-
-    if ctx.interaction is not None:
-        await ctx.reply(ephemeral=True, **kw)
-        return
-
-    try:
-        await ctx.author.send(**kw)
-    except discord.Forbidden:
-        await ctx.reply(
-            "I couldn't DM you. Open your DMs or use the **slash** command "
-            "`/return 77` to nominate someone privately.",
-            mention_author=False,
-        )
-        return
-    try:
-        await ctx.message.delete()
-    except (discord.Forbidden, discord.NotFound, AttributeError):
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -240,20 +200,20 @@ class _NominateModal(discord.ui.Modal):
         required=True,
     )
     title_input = discord.ui.TextInput(
-        label="Award title",
-        placeholder="What is the award called?",
+        label="Possible Award (Suggested Title)",
+        placeholder="Succinctly describe this user's positive contributions to your experience",
         style=discord.TextStyle.short,
         min_length=1,
         max_length=MAX_TITLE_LEN,
         required=True,
     )
     description = discord.ui.TextInput(
-        label="Description / justification",
-        placeholder="Why does this user deserve the award?",
+        label="Description and justification",
+        placeholder="Expand on the above as to why this user is particularly deserving of recognition",
         style=discord.TextStyle.paragraph,
-        min_length=1,
+        min_length=0,
         max_length=MAX_DESC_LEN,
-        required=True,
+        required=False,
     )
 
     def __init__(self, *, guild_id: int):
@@ -267,9 +227,9 @@ class _NominateModal(discord.ui.Modal):
         title = str(self.title_input.value).strip()
         description = str(self.description.value).strip()
 
-        if not raw_nominee or not title or not description:
+        if not raw_nominee or not title:
             await interaction.followup.send(
-                "All three fields are required.", ephemeral=True
+                "Nominee and award title are required.", ephemeral=True
             )
             return
 
@@ -305,7 +265,7 @@ class _NominateModal(discord.ui.Modal):
 
         embed = discord.Embed(
             title="🏆 Award Nomination",
-            description=description,
+            description=description or "*(no description provided)*",
             timestamp=discord.utils.utcnow(),
         )
         embed.add_field(name="Award Title", value=title, inline=False)
@@ -356,6 +316,15 @@ class _NominateView(discord.ui.View):
         self.add_item(btn)
 
     async def _on_click(self, interaction: discord.Interaction) -> None:
+        # The bot's reply is public, so anyone can see and click. Re-gate
+        # the modal on the same REGISTERED tier the dispatcher enforces.
+        if not tier_allows(
+            interaction.user, Tier.REGISTERED, client=interaction.client
+        ):
+            await interaction.response.send_message(
+                "You don't have access to `/return 77`.", ephemeral=True
+            )
+            return
         await interaction.response.send_modal(
             _NominateModal(guild_id=self.guild_id)
         )
@@ -371,9 +340,8 @@ async def handle(ctx: commands.Context) -> None:
     guild_id = ctx.guild.id if ctx.guild is not None else CurrConfig.GUILD
     view = _NominateView(guild_id=guild_id)
     intro = (
-        "🏆 **Return 77 — Award nomination.**\n"
-        "Click the button to open a private form. Your nominee, the award "
-        "title, and your justification go only to the admin-only awards "
-        "thread — nothing appears in this channel."
+        "🏆 **Return 77 — Award nomination.** "
+        "Click the button to open the form; what you submit goes only to "
+        "the admin-only awards thread."
     )
-    await _private(ctx, intro, view=view)
+    await ctx.reply(intro, view=view)

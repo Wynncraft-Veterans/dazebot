@@ -24,6 +24,7 @@ from cogs.events.returns._common import tier_allows
 from cogs.events.returns.week_0 import (
     backfill_cult_threads,
     backfill_thread_ids_from_dict,
+    register_listeners as _register_week_0_listeners,
 )
 from cogs.events.returns.week_2 import (
     register_listeners as _register_week_2_listeners,
@@ -41,6 +42,7 @@ class Returns(commands.Cog):
         logger.info("Initialized Returns")
 
     async def cog_load(self) -> None:
+        _register_week_0_listeners(self.bot)
         _register_week_2_listeners(self.bot)
         # Threads need the gateway-cached parent channel; wait for ready.
         self.bot.loop.create_task(self._run_startup_backfill())

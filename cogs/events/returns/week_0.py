@@ -123,6 +123,48 @@ async def _remove_from_cult_thread(bot, cult: Cult, discord_id: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Gateway: keep figureheads out of their own cult thread at runtime
+# ---------------------------------------------------------------------------
+
+
+async def _on_thread_member_join_sweep_figurehead(tm: discord.ThreadMember) -> None:
+    """Sweep a figurehead back out if they get added to their own cult's
+    thread (typically by being @mentioned — Discord auto-invites mentioned
+    users into private threads). Mirrors the boot-time sweep in
+    :func:`backfill_cult_threads` for the live case.
+    """
+    cult = await Cult.filter(thread_id=tm.thread_id).first()
+    if cult is None:
+        return
+    disc = await DiscordAccount.filter(disc_uuid=str(tm.id)).first()
+    if disc is None or disc.minecraft_account_id is None:
+        return
+    if disc.minecraft_account_id != cult.owner_id:
+        return
+    thread = tm.thread
+    if thread is None:
+        return
+    try:
+        await thread.remove_user(discord.Object(id=tm.id))
+        logger.info(
+            "swept figurehead %s out of own cult thread %s (%s)",
+            tm.id, tm.thread_id, cult.name,
+        )
+    except discord.NotFound:
+        pass
+    except discord.HTTPException as e:
+        logger.warning(
+            "figurehead sweep remove(%s, %s) failed: %s", tm.id, cult.name, e,
+        )
+
+
+def register_listeners(bot: commands.Bot) -> None:
+    bot.add_listener(
+        _on_thread_member_join_sweep_figurehead, name="on_thread_member_join"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Backfill (called from Returns.cog_load)
 # ---------------------------------------------------------------------------
 

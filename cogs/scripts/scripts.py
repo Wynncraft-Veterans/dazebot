@@ -189,29 +189,35 @@ class Scripts(commands.Cog):
 
     @script_group.command(
         name="extract_anni_timestamps",
-        description="(Operator) Dump up to 10k raw messages from the anni channel as a gzipped JSONL attachment for offline debug.",
+        description="(Operator) Dump all anni-channel messages from the last 3 years as gzipped JSONL attachments for offline debug.",
     )
     @is_operator()
     async def script_extract_anni_timestamps(self, ctx: commands.Context):
         """Dump raw history of ``AnniConfig.CHANNEL_ID`` to JSONL.gz.
 
-        Iterates ``channel.history(limit=10_000)`` and writes one JSON
-        object per message with the metadata needed to debug filter
-        decisions (``webhook_id``, ``interaction_metadata``, ``flags``,
-        ``author.bot``, embeds, …).
+        Iterates ``channel.history(limit=None, after=utcnow-3y,
+        oldest_first=True)`` and writes one JSON object per message with
+        the metadata needed to debug filter decisions (``webhook_id``,
+        ``interaction_metadata``, ``flags``, ``author.bot``, embeds, …).
 
         Replaces the prior CSV timestamp-extraction flow, which had
         become brittle against multiple Magbot/announcement-follow embed
         shapes; the new output is meant for offline analysis (jq /
         sqlite) before any filter is re-derived.
+
+        Output streams into rotating gzip parts capped at the guild's
+        ``filesize_limit`` (minus a safety margin), so a single dump may
+        arrive as several ``anni_messages.partNN.jsonl.gz`` attachments.
         """
+        import datetime
         import gzip
         import io
         import json
         import time
 
-        HISTORY_LIMIT = 10_000
+        HISTORY_WINDOW = datetime.timedelta(days=3 * 365)
         EDIT_INTERVAL_S = 5.0
+        CHUNK_SAFETY_MARGIN = 1 * 1024 * 1024  # 1 MiB headroom under filesize_limit
 
         if ctx.guild is None:
             await ctx.reply("❌ Must be run in a guild context.")
@@ -224,6 +230,10 @@ class Scripts(commands.Cog):
                 "is not a readable text channel in this guild."
             )
             return
+
+        after = discord.utils.utcnow() - HISTORY_WINDOW
+        filesize_limit = ctx.guild.filesize_limit
+        chunk_target = max(filesize_limit - CHUNK_SAFETY_MARGIN, 1 * 1024 * 1024)
 
         def embed_dict(emb: discord.Embed) -> dict:
             return {
@@ -274,20 +284,31 @@ class Scripts(commands.Cog):
             }
 
         status = await ctx.reply(
-            f"Starting dump of #{channel.name} (up to {HISTORY_LIMIT:,} msgs)..."
+            f"Starting dump of #{channel.name} since {after.date().isoformat()} "
+            "(no message cap)..."
         )
         started = time.monotonic()
         last_edit = started
         messages_scanned = 0
-        lines: list[bytes] = []
+        parts: list[bytes] = []
+        buf = io.BytesIO()
+        gz = gzip.GzipFile(fileobj=buf, mode="wb")
+
+        def rotate_part() -> None:
+            nonlocal buf, gz
+            gz.close()
+            parts.append(buf.getvalue())
+            buf = io.BytesIO()
+            gz = gzip.GzipFile(fileobj=buf, mode="wb")
 
         async def push_status():
             nonlocal last_edit
             last_edit = time.monotonic()
             elapsed = last_edit - started
             text = (
-                f"Dumping #{channel.name}...\n"
-                f"messages scanned: {messages_scanned:,}/{HISTORY_LIMIT:,}\n"
+                f"Dumping #{channel.name} since {after.date().isoformat()}...\n"
+                f"messages scanned: {messages_scanned:,}\n"
+                f"parts so far: {len(parts)}\n"
                 f"elapsed: {elapsed:.0f}s"
             )
             try:
@@ -295,19 +316,23 @@ class Scripts(commands.Cog):
             except discord.HTTPException:
                 pass
             logger.info(
-                "extract_anni_timestamps progress: %d msgs scanned, %.0fs elapsed",
-                messages_scanned, elapsed,
+                "extract_anni_timestamps progress: %d msgs scanned, %d parts, %.0fs elapsed",
+                messages_scanned, len(parts), elapsed,
             )
 
         try:
-            async for msg in channel.history(limit=HISTORY_LIMIT):
+            async for msg in channel.history(
+                limit=None, after=after, oldest_first=True
+            ):
                 messages_scanned += 1
-                lines.append(
+                gz.write(
                     (
                         json.dumps(msg_dict(msg), ensure_ascii=False, default=str)
                         + "\n"
                     ).encode("utf-8")
                 )
+                if buf.tell() >= chunk_target:
+                    rotate_part()
                 if time.monotonic() - last_edit >= EDIT_INTERVAL_S:
                     await push_status()
         except (discord.Forbidden, discord.HTTPException) as e:
@@ -317,27 +342,47 @@ class Scripts(commands.Cog):
                 pass
             return
 
+        gz.close()
+        if buf.tell() > 0 or not parts:
+            parts.append(buf.getvalue())
+
         elapsed = time.monotonic() - started
+        total_bytes = sum(len(p) for p in parts)
         try:
             await status.edit(
                 content=(
                     f"Dump complete in {elapsed:.0f}s — "
-                    f"see attached file ({messages_scanned:,} messages)."
+                    f"{messages_scanned:,} messages, {len(parts)} part"
+                    f"{'s' if len(parts) > 1 else ''}, "
+                    f"{total_bytes / 1_048_576:.1f} MiB gzipped."
                 )
             )
         except discord.HTTPException:
             pass
 
-        buf = io.BytesIO()
-        with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
-            for line in lines:
-                gz.write(line)
-        data = buf.getvalue()
+        def part_file(idx: int, data: bytes) -> discord.File:
+            name = (
+                f"anni_messages.part{idx:02d}.jsonl.gz"
+                if len(parts) > 1
+                else "anni_messages.jsonl.gz"
+            )
+            return discord.File(io.BytesIO(data), filename=name)
 
-        await ctx.reply(
-            content=f"Done. {messages_scanned:,} messages from #{channel.name}.",
-            file=discord.File(io.BytesIO(data), filename="anni_messages.jsonl.gz"),
+        files = [part_file(i + 1, p) for i, p in enumerate(parts)]
+        summary = (
+            f"Done. {messages_scanned:,} messages from #{channel.name} "
+            f"since {after.date().isoformat()} "
+            f"({len(parts)} part{'s' if len(parts) > 1 else ''}, "
+            f"{total_bytes / 1_048_576:.1f} MiB gzipped)."
         )
+
+        BATCH = 10
+        for i in range(0, len(files), BATCH):
+            batch = files[i : i + BATCH]
+            if i == 0:
+                await ctx.reply(content=summary, files=batch)
+            else:
+                await ctx.send(files=batch)
 
 
 async def setup(bot: Bot):

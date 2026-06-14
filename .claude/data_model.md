@@ -1,8 +1,72 @@
 # Data model
 
-Reference for [orm.py](../orm.py) — every table, its purpose, and which subsystem owns it.
+Reference for [orm.py](../orm.py) (dazebot.db tables) and
+[orm_returns.py](../orm_returns.py) (returns.db tables) — every table, its
+purpose, and which subsystem owns it.
 
-DB engine: SQLite at `/app/data/dazebot.db` (production) or `dev.db` at the repo root (local). WAL mode. Schema is managed by [aerich](https://github.com/tortoise/aerich) — migrations live in [migrations/models/](../migrations/models/) and are applied automatically at boot by `init_db()`. Adding/renaming/removing columns is supported via `uv run aerich migrate --name "..."`; see "When to add a new table" below.
+DB engine: SQLite. Two physical files at `/app/data/` (production) or in
+the repo root (local):
+
+| File | Tortoise app | Migration dir | Models module |
+|---|---|---|---|
+| `dazebot.db` | `models` | `migrations/models/` | [`orm.py`](../orm.py) |
+| `returns.db` | `returns` | `migrations/returns/` | [`orm_returns.py`](../orm_returns.py) |
+
+Both DBs run WAL mode. Schema is managed by
+[aerich](https://github.com/tortoise/aerich) — `init_db()` applies pending
+migrations on both apps at every boot. Aerich tracks BOTH apps' history in
+ONE `aerich` table that lives in dazebot.db's default connection (this is
+the actual aerich behaviour — verified empirically; do not "fix" by adding
+`aerich.models` to the returns app's models list). Adding/renaming/removing
+columns is supported via `uv run aerich --app <models|returns> migrate
+--name "..."`; see "When to add a new table" below.
+
+## Why the two-DB split
+
+The returns subsystem hosts ad-hoc, per-week ephemeral state (price guesses
+for week 75, story fragments for week 73, future similar one-shots) that
+has a fundamentally different lifecycle than the well-modelled dazebot
+core. Keeping them in separate files means:
+
+- A regression in a single `cogs/events/returns/week_N.py` can't corrupt
+  the dazebot core schema.
+- "Wipe last year of stale returns state" is a file-level (`rm returns.db`,
+  let init_db re-create) rather than per-table operation.
+- The host-side dump pipeline (`manage update dazebot` → pre-update
+  `_dump_sqlite_pre_update`) backs both files up to
+  `/opt/docker/backups/db-dumps/dazebot/` as `dazebot-<ts>.db` and
+  `returns-<ts>.db` — independent restore points.
+
+What lives in **returns.db** (`orm_returns.py`): `ReturnGuess` (week 75
+price guesses), `StorySegment` (week 73 collaborative story). Both
+reference Discord users via a plain `disc_uuid: CharField` — **not** a
+FK, because SQLite has no cross-database FK enforcement. This mirrors the
+existing pattern used by `IntercultMessage.sender_disc_uuid`,
+`RecruitmentQuery.requester_disc_uuid`, etc. in orm.py.
+
+What stays in **dazebot.db**: everything else, including the Returners
+infrastructure that is NOT per-week ephemeral — `WeeklyEvent`, `Score`
+(scoring scaffold every return uses), `Cult` and friends (week 0 / cults
+are permanent), and `Apartment` (community feature, not week-scoped).
+
+Restoring from a known-safe dump: `vets-deploy/scripts/one-off/restore-dazebot-db.sh`
+for dazebot.db and `restore-returns-db.sh` for returns.db.
+
+## 2026-06-14 one-shot: legacy returns-tables split
+
+`return_guesses` and `story_segments` used to live in dazebot.db, FK'd to
+`DiscordAccount`. The 2026-06-14 deploy (a) created returns.db with a
+standalone schema (no FK; just an indexed `disc_uuid` CharField),
+(b) ran a one-shot `_copy_returns_legacy_data` helper in `init_db` that
+ATTACHes returns.db, INSERT...SELECT JOINs through `discord_accounts` to
+translate `discord_account_id` (UUID PK) → `disc_uuid` (snowflake string),
+and verifies row counts before commit, and (c) ran the
+`11_*_drop_returns_legacy.py` migration to remove the legacy tables from
+dazebot.db. The destructive drop is gated on `DAZEBOT_ALLOW_LEGACY_RETURNS_DROP=1`
+which `manage update dazebot` only sets after a successful host-side dump
+landed in `/opt/docker/backups/db-dumps/dazebot/`. Once every deployed
+environment is past this one-shot, the gate variable + the
+`_LEGACY_RETURNS_TABLES` constant in `orm.py` can be removed.
 
 ## Identity
 
@@ -55,12 +119,24 @@ The role state itself (REGISTERED/HIATUS/MEMBER/HONOURARY/WAITLISTED) lives on D
 | `FirstInstallMonitor` | `cogs/membership/join.py`, `lib/discord_utils/first_install_view.py` | Tracks which channel message hosts the persistent "Link my account" button so it survives bot restarts. |
 | `DMSentLog` | `cogs/membership/membership_state.py` (inactivity loop) | Idempotency for one-shot DMs (e.g. inactive-member warnings). Prevents the activity loop from re-DMing on every tick. |
 
-## Weekly events / scoring (legacy / cog-specific)
+## Weekly events / scoring (dazebot.db)
 
 | Table | Owner | Purpose |
 |---|---|---|
-| `WeeklyEvent` | `cogs/events/weekly_event.py`, `cogs/events/returns/` | Weekly Returners event configuration. |
-| `Score` | `cogs/events/weekly_event.py` | Per-user scoring for the weekly event. |
+| `WeeklyEvent` | `cogs/events/weekly_event.py`, `cogs/events/returns/` | Weekly Returners event configuration. Scaffold every return uses — permanent infrastructure, stays in dazebot.db. |
+| `Score` | `cogs/events/weekly_event.py` | Per-user scoring for the weekly event. FK to `DiscordAccount`. Stays in dazebot.db. |
+
+## Per-week ephemeral tables (returns.db)
+
+These live in a **separate physical SQLite file** (`/app/data/returns.db`)
+because per-week Returners state is ad-hoc and one-shot — see "Why the
+two-DB split" above. Defined in [orm_returns.py](../orm_returns.py); the
+`returns` Tortoise app is bound to the `returns` connection.
+
+| Table | Owner | Purpose |
+|---|---|---|
+| `ReturnGuess` | `cogs/events/returns/week_75.py` | One user's emerald-price guess for a `/return 75` day-N slot. Unique on `(week, day, disc_uuid)`. `disc_uuid` is a plain `CharField` (no FK across DB files). |
+| `StorySegment` | `cogs/events/returns/week_73.py` | One fragment of a `/return 73` collaborative story. The back-to-back guard reads the most recent row's `disc_uuid` to forbid the same author twice running. |
 
 ## Alerts (rare, edge-case-driven)
 
@@ -123,10 +199,13 @@ LinkCode (no FK; matched by mc_username + code at consume time)
 
 All changes — new tables, new columns, renames, removals — go through aerich:
 
-1. Edit the model in [`orm.py`](../orm.py).
-2. `uv run aerich migrate --name "describe_change"` — generates a new file under `migrations/models/`.
+1. Edit the model in [`orm.py`](../orm.py) (dazebot.db) or
+   [`orm_returns.py`](../orm_returns.py) (returns.db).
+2. `uv run aerich --app models migrate --name "describe_change"` for
+   dazebot.db, or `uv run aerich --app returns migrate --name "..."` for
+   returns.db — generates a new file under `migrations/<app>/`.
 3. Inspect the generated file (`upgrade()` and `downgrade()` SQL); commit it.
-4. Restart the bot; `init_db()` applies pending migrations automatically.
+4. Restart the bot; `init_db()` applies pending migrations on both apps automatically.
 
 `init_db()` (in [`orm.py`](../orm.py)) handles three states:
 

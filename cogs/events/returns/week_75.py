@@ -21,7 +21,7 @@ Surfaces:
 Guesses are editable for :data:`_EDIT_WINDOW` after the original
 submission — the window is anchored on ``created_at`` and does **not**
 slide on edits. After the window expires the guess is locked and only
-staff can clear it. The unique ``(week, day, discord_account)`` constraint
+staff can clear it. The unique ``(week, day, disc_uuid)`` constraint
 on ``ReturnGuess`` is still respected because edits are ``UPDATE`` not
 ``INSERT``.
 
@@ -46,7 +46,8 @@ from tortoise.exceptions import IntegrityError
 from cogs.events.returns import Tier, register, register_manage
 from cogs.events.returns._common import is_persist_context, send_feedback
 from lib.discord_utils.paginated_embed import Paginator, from_lines
-from orm import DiscordAccount, MinecraftAccount, ReturnGuess
+from orm import DiscordAccount, MinecraftAccount
+from orm_returns import ReturnGuess
 
 logger = logging.getLogger("dazebot.cogs.events.returns.week_75")
 
@@ -241,17 +242,15 @@ class _PriceModal(discord.ui.Modal):
             )
             return
 
-        disc, _ = await DiscordAccount.get_or_create(
-            disc_uuid=str(interaction.user.id)
-        )
         existing = await ReturnGuess.filter(
-            week=WEEK, day=self.day, discord_account=disc
+            week=WEEK, day=self.day, disc_uuid=str(interaction.user.id)
         ).first()
 
         if existing is None:
             try:
                 await ReturnGuess.create(
-                    week=WEEK, day=self.day, discord_account=disc, price=value
+                    week=WEEK, day=self.day,
+                    disc_uuid=str(interaction.user.id), price=value,
                 )
             except IntegrityError:
                 # Race: another submit landed between the .first() and the
@@ -377,10 +376,7 @@ def _build_guess_view(existing: dict[int, ReturnGuess]) -> discord.ui.View:
 
 async def _existing_guesses(user_id: int) -> dict[int, ReturnGuess]:
     """All of ``user_id``'s week-75 guesses, keyed by day (1-7)."""
-    disc = await DiscordAccount.filter(disc_uuid=str(user_id)).first()
-    if disc is None:
-        return {}
-    rows = await ReturnGuess.filter(week=WEEK, discord_account=disc)
+    rows = await ReturnGuess.filter(week=WEEK, disc_uuid=str(user_id))
     return {r.day: r for r in rows}
 
 
@@ -429,38 +425,47 @@ async def handle(ctx: commands.Context) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _username_for(bot, disc: DiscordAccount) -> str:
-    if disc.minecraft_account_id is not None:
+async def _username_for(bot, disc: Optional[DiscordAccount], disc_uuid: str) -> str:
+    """Render a display name for a guess row by ``disc_uuid``.
+
+    Post-split (ReturnGuess no longer FKs DiscordAccount), a guess row can
+    outlive its DiscordAccount — callers pass ``disc=None`` when the
+    DiscordAccount lookup came up empty, and we fall through to fetching
+    the bare Discord user.
+    """
+    if disc is not None and disc.minecraft_account_id is not None:
         try:
             mc = await MinecraftAccount.get(id=disc.minecraft_account_id)
             return mc.mc_username
         except Exception:
             logger.exception(
-                "MinecraftAccount lookup failed for disc %s", disc.disc_uuid
+                "MinecraftAccount lookup failed for disc %s", disc_uuid
             )
     try:
-        user = await bot.fetch_user(int(disc.disc_uuid))
+        user = await bot.fetch_user(int(disc_uuid))
         return f"@{user.name} (unlinked)"
     except (ValueError, discord.HTTPException):
-        return f"<{disc.disc_uuid}> (unlinked)"
+        return f"<{disc_uuid}> (unlinked)"
 
 
 async def _show_day(ctx: commands.Context, day: int) -> None:
     if ctx.interaction is not None:
         await ctx.defer(ephemeral=True)
 
-    guesses = (
-        await ReturnGuess.filter(week=WEEK, day=day)
-        .order_by("price")
-        .prefetch_related("discord_account")
-    )
+    guesses = await ReturnGuess.filter(week=WEEK, day=day).order_by("price")
     if not guesses:
         await _private(ctx, f"No guesses recorded for Return 75 day {day}.")
         return
 
+    disc_uuids = {g.disc_uuid for g in guesses}
+    discs = {
+        d.disc_uuid: d
+        for d in await DiscordAccount.filter(disc_uuid__in=list(disc_uuids))
+    }
+
     lines: list[str] = []
     for g in guesses:
-        name = await _username_for(ctx.bot, g.discord_account)
+        name = await _username_for(ctx.bot, discs.get(g.disc_uuid), g.disc_uuid)
         lines.append(f"{name}: {_format_emeralds(g.price)}")
 
     title = f"Return 75 — Day {day} ({len(guesses)} guess(es))"

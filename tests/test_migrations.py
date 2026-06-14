@@ -97,7 +97,23 @@ def _expected_tables() -> set[str]:
     }
 
 
+def _expected_returns_tables() -> set[str]:
+    """Tables expected in returns.db after bootstrap. NOTE: no ``aerich``
+    — aerich tracks both apps' history in dazebot.db, not in returns.db."""
+    import orm_returns as _orm_ret
+    from tortoise.models import Model
+
+    return {
+        cls._meta.db_table
+        for name in dir(_orm_ret)
+        if isinstance((cls := getattr(_orm_ret, name, None)), type)
+        and issubclass(cls, Model)
+        and cls is not Model
+    }
+
+
 EXPECTED_TABLES = _expected_tables()
+EXPECTED_RETURNS_TABLES = _expected_returns_tables()
 
 
 @pytest.fixture
@@ -134,11 +150,17 @@ async def _isolated_db(tmp_path, monkeypatch):
 
     await _reset()
     db_path = tmp_path / "test.db"
+    returns_db_path = tmp_path / "test_returns.db"
     monkeypatch.setenv("DAZEBOT_DB_PATH", str(db_path))
+    monkeypatch.setenv("DAZEBOT_RETURNS_DB_PATH", str(returns_db_path))
     # Tests intentionally start from empty tmp_path DBs (or seed one by
-    # copying the ephemeral snapshot). The fresh-DB guard in init_db is a
+    # copying the ephemeral snapshot). The fresh-DB guards in init_db are a
     # prod safety mechanism that would otherwise refuse all these tests.
     monkeypatch.setenv("DAZEBOT_ALLOW_FRESH_DB", "1")
+    monkeypatch.setenv("DAZEBOT_ALLOW_FRESH_RETURNS_DB", "1")
+    # Legacy-tables-present scenarios need this; granting blanket is safe in
+    # tests because no test ever runs against the real prod DB path.
+    monkeypatch.setenv("DAZEBOT_ALLOW_LEGACY_RETURNS_DROP", "1")
     yield db_path
     await _reset()
 
@@ -245,28 +267,36 @@ def test_detect_bootstrapped_db_does_not_need_fake_apply(tmp_path):
 
 
 async def test_bootstrap_on_fresh_db(_isolated_db):
-    """``init_db`` on an empty path creates every model table and the
-    aerich tracking table, and records every migration as applied.
+    """``init_db`` on empty paths creates every model table in dazebot.db,
+    every returns table in returns.db, and records both apps' migrations
+    in dazebot.db's single ``aerich`` tracking table.
     """
     db_path = _isolated_db
+    returns_path = db_path.parent / "test_returns.db"
     assert not db_path.exists()
+    assert not returns_path.exists()
 
     await init_db()
 
     assert _table_names(db_path) == EXPECTED_TABLES
+    assert _table_names(returns_path) == EXPECTED_RETURNS_TABLES
 
-    # Every migration file is recorded as applied (initial + any follow-ups).
+    # Every migration file is recorded — both apps' rows live in dazebot.db's
+    # `aerich` table (the returns connection has no aerich table of its own).
     conn = sqlite3.connect(db_path)
     rows = conn.execute("SELECT version, app FROM aerich ORDER BY id").fetchall()
     conn.close()
-    versions = [r[0] for r in rows]
     apps = {r[1] for r in rows}
-    assert versions[0].startswith("0_") and versions[0].endswith("_init.py")
-    assert apps == {"models"}
-    # Sanity-check ordering matches the on-disk migration files.
+    assert apps == {"models", "returns"}
+
     from pathlib import Path
-    on_disk = sorted(p.name for p in Path("migrations/models").glob("*.py"))
-    assert versions == on_disk
+    on_disk_models = sorted(p.name for p in Path("migrations/models").glob("*.py"))
+    on_disk_returns = sorted(p.name for p in Path("migrations/returns").glob("*.py"))
+    versions_by_app: dict[str, list[str]] = {}
+    for v, a in rows:
+        versions_by_app.setdefault(a, []).append(v)
+    assert sorted(versions_by_app["models"]) == on_disk_models
+    assert sorted(versions_by_app["returns"]) == on_disk_returns
 
 
 async def test_fresh_db_round_trip(_isolated_db):
@@ -305,53 +335,73 @@ async def test_fresh_db_round_trip(_isolated_db):
 )
 async def test_bootstrap_on_existing_db(_isolated_db):
     """Copy the ephemeral snapshot to a tmp_path, run ``init_db``, and
-    assert: aerich tracking table created with one row, every original
-    row count preserved, no model table dropped or recreated.
+    assert: aerich tracking table created (with rows for both apps),
+    every preserved row count unchanged, the legacy returns tables
+    migrated to returns.db then dropped from dazebot.db.
     """
     db_path = _isolated_db
+    returns_path = db_path.parent / "test_returns.db"
     shutil.copy2(EPHEMERAL_DB, db_path)
 
     # Pre-bootstrap row counts and table set (sanity-anchor: prove we're
     # comparing against the real snapshot, not what aerich generated).
     pre_tables = _table_names(db_path)
     assert "aerich" not in pre_tables
-    pre_counts = _row_counts(
+    # Tables that MUST survive in dazebot.db post-migration.
+    dazebot_kept_tables = [
+        "minecraft_accounts",
+        "discord_accounts",
+        "cults",
+        "cult_memberships",
+        "verify_keys",
+        "profession_categories",
+    ]
+    pre_counts = _row_counts(db_path, dazebot_kept_tables)
+    # Legacy returns tables (may or may not be in this snapshot — older
+    # pre-aerich snapshots predate them).
+    pre_legacy_counts = _row_counts(
         db_path,
-        [
-            "minecraft_accounts",
-            "discord_accounts",
-            "cults",
-            "cult_memberships",
-            "verify_keys",
-            "story_segments",
-            "profession_categories",
-        ],
+        [t for t in ("return_guesses", "story_segments") if t in pre_tables],
     )
 
     await init_db()
 
     # The aerich tracking table now exists; the initial migration is
-    # fake-applied (no DDL re-run) and any follow-up migrations run for
-    # real on top.
+    # fake-applied (no DDL re-run) and any follow-up migrations — including
+    # the legacy-returns drop — run for real on top.
     post_tables = _table_names(db_path)
     assert "aerich" in post_tables
-    # Every pre-existing table is still present (no destructive change).
-    assert pre_tables.issubset(post_tables)
+    # Every non-legacy pre-existing table is still present.
+    for t in pre_tables:
+        if t in {"return_guesses", "story_segments"}:
+            continue
+        assert t in post_tables, f"{t} disappeared from dazebot.db"
+    # Legacy returns tables MUST be gone from dazebot.db (drop migration ran).
+    assert "return_guesses" not in post_tables
+    assert "story_segments" not in post_tables
 
     conn = sqlite3.connect(db_path)
     rows = conn.execute("SELECT version, app FROM aerich ORDER BY id").fetchall()
     conn.close()
-    versions = [r[0] for r in rows]
-    assert versions[0].endswith("_init.py")
-    assert {r[1] for r in rows} == {"models"}
-    # Every on-disk migration is recorded.
+    assert {r[1] for r in rows} == {"models", "returns"}
+    # Every on-disk migration is recorded for its respective app.
     from pathlib import Path
-    on_disk = sorted(p.name for p in Path("migrations/models").glob("*.py"))
-    assert versions == on_disk
+    on_disk_models = sorted(p.name for p in Path("migrations/models").glob("*.py"))
+    on_disk_returns = sorted(p.name for p in Path("migrations/returns").glob("*.py"))
+    versions_by_app: dict[str, list[str]] = {}
+    for v, a in rows:
+        versions_by_app.setdefault(a, []).append(v)
+    assert sorted(versions_by_app["models"]) == on_disk_models
+    assert sorted(versions_by_app["returns"]) == on_disk_returns
 
-    # Row counts unchanged — fake-apply did not touch model data.
-    post_counts = _row_counts(db_path, list(pre_counts.keys()))
+    # Kept tables: row counts unchanged.
+    post_counts = _row_counts(db_path, dazebot_kept_tables)
     assert pre_counts == post_counts
+
+    # Legacy returns rows migrated to returns.db with the disc_uuid translation.
+    if pre_legacy_counts:
+        post_returns_counts = _row_counts(returns_path, list(pre_legacy_counts.keys()))
+        assert pre_legacy_counts == post_returns_counts
 
 
 @pytest.mark.skipif(
@@ -527,3 +577,287 @@ async def test_mock_data_verify_key_revoked_at_round_trip(_isolated_db):
 
     refetched = await VerifyKey.get(id=key.id)
     assert refetched.revoked_at == revoked_time
+
+
+# ---------------------------------------------------------------------------
+# Branch 4: legacy returns-table → returns.db one-shot migration
+# ---------------------------------------------------------------------------
+#
+# These tests seed a synthetic dazebot.db that mimics the pre-split prod
+# shape: it has the full aerich-tracked schema through migration 10
+# (i.e. *before* the drop-returns-legacy migration), plus rows in the
+# legacy return_guesses / story_segments tables FK'd to real
+# discord_accounts. Running init_db then exercises the whole copy →
+# verify → drop path.
+
+
+def _seed_legacy_dazebot_db(db_path: Path, *, n_guesses: int = 5, n_segs: int = 3) -> dict[str, int]:
+    """Seed ``db_path`` with the *minimum* shape needed to exercise the
+    legacy-returns copy path: aerich-tracked schema with discord_accounts
+    + the legacy return_guesses/story_segments tables (FK'd to
+    discord_accounts.id, as they were before the split), plus N rows in
+    each. Returns the seeded row counts.
+
+    Synthetic CREATE TABLEs — not aerich-driven — because the tests here
+    care about the COPY behaviour, not how the schema got there. The
+    aerich table is populated with one row per pre-drop migration so
+    init_db's "pending migrations" detection finds only the drop on top.
+    """
+    import sqlite3
+
+    pre_drop_migrations = sorted(
+        p.name for p in Path("migrations/models").glob("*.py")
+        if not p.name.endswith("_drop_returns_legacy.py")
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript("""
+            CREATE TABLE "aerich" (
+                "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                "version" VARCHAR(255) NOT NULL,
+                "app" VARCHAR(100) NOT NULL,
+                "content" JSON NOT NULL
+            );
+            CREATE TABLE "discord_accounts" (
+                "id" CHAR(36) NOT NULL PRIMARY KEY,
+                "disc_uuid" VARCHAR(255) NOT NULL UNIQUE,
+                "shout_count" INT NOT NULL DEFAULT 0,
+                "minecraft_account_id" CHAR(36)
+            );
+            CREATE TABLE "minecraft_accounts" (
+                "id" CHAR(36) NOT NULL PRIMARY KEY
+            );
+            CREATE TABLE "return_guesses" (
+                "id" CHAR(36) NOT NULL PRIMARY KEY,
+                "week" INT NOT NULL,
+                "day" INT NOT NULL,
+                "discord_account_id" CHAR(36) NOT NULL REFERENCES "discord_accounts"("id"),
+                "price" INT NOT NULL,
+                "created_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE "story_segments" (
+                "id" CHAR(36) NOT NULL PRIMARY KEY,
+                "week" INT NOT NULL,
+                "discord_account_id" CHAR(36) NOT NULL REFERENCES "discord_accounts"("id"),
+                "content" TEXT NOT NULL,
+                "created_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        for m in pre_drop_migrations:
+            conn.execute(
+                'INSERT INTO "aerich" ("version", "app", "content") VALUES (?, ?, ?)',
+                (m, "models", "{}"),
+            )
+
+        disc_records: list[tuple[str, str]] = []
+        for i in range(max(n_guesses, n_segs)):
+            disc_id = f"00000000-0000-0000-0000-{i:012d}"
+            disc_uuid = f"9{i:017d}"
+            disc_records.append((disc_id, disc_uuid))
+            conn.execute(
+                'INSERT INTO "discord_accounts" ("id", "disc_uuid") VALUES (?, ?)',
+                (disc_id, disc_uuid),
+            )
+        for i in range(n_guesses):
+            conn.execute(
+                'INSERT INTO "return_guesses" '
+                '("id", "week", "day", "discord_account_id", "price") '
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    f"00000001-0000-0000-0000-{i:012d}",
+                    75, i + 1, disc_records[i][0], 1000 * (i + 1),
+                ),
+            )
+        for i in range(n_segs):
+            conn.execute(
+                'INSERT INTO "story_segments" '
+                '("id", "week", "discord_account_id", "content") '
+                "VALUES (?, ?, ?, ?)",
+                (
+                    f"00000002-0000-0000-0000-{i:012d}",
+                    73, disc_records[i][0], f"segment {i}",
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "return_guesses": n_guesses,
+        "story_segments": n_segs,
+        "discord_accounts": max(n_guesses, n_segs),
+    }
+
+
+async def test_legacy_returns_data_copied_with_disc_uuid_translation(_isolated_db):
+    """Seed dazebot.db with pre-split state (legacy tables + FK-linked rows),
+    run init_db, and verify:
+      - returns.db has every legacy row, identical counts.
+      - The disc_uuid column in returns.db matches the Discord snowflake
+        string (translated from the source's synthetic UUID FK).
+      - The legacy tables are gone from dazebot.db.
+    """
+    from orm import _copy_returns_legacy_data
+
+    db_path = _isolated_db
+    returns_path = db_path.parent / "test_returns.db"
+
+    seeded = _seed_legacy_dazebot_db(db_path, n_guesses=5, n_segs=3)
+    pre_disc_uuids = sorted(
+        r[0] for r in sqlite3.connect(db_path).execute(
+            "SELECT da.disc_uuid FROM return_guesses rg "
+            "JOIN discord_accounts da ON da.id = rg.discord_account_id"
+        )
+    )
+
+    # Pre-create returns.db schema so the copy helper has somewhere to insert.
+    # init_db() does this via the returns-app aerich upgrade, but for this
+    # focused test we exercise the copy helper directly.
+    import sqlite3 as _sq3
+    rconn = _sq3.connect(returns_path)
+    try:
+        rconn.executescript("""
+            CREATE TABLE "return_guesses" (
+                "id" CHAR(36) NOT NULL PRIMARY KEY,
+                "week" INT NOT NULL,
+                "day" INT NOT NULL,
+                "disc_uuid" VARCHAR(255) NOT NULL,
+                "price" INT NOT NULL,
+                "created_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE "story_segments" (
+                "id" CHAR(36) NOT NULL PRIMARY KEY,
+                "week" INT NOT NULL,
+                "disc_uuid" VARCHAR(255) NOT NULL,
+                "content" TEXT NOT NULL,
+                "created_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        rconn.commit()
+    finally:
+        rconn.close()
+
+    _copy_returns_legacy_data(str(db_path), str(returns_path))
+
+    # Counts match.
+    post_returns = _row_counts(returns_path, ["return_guesses", "story_segments"])
+    assert post_returns == {
+        "return_guesses": seeded["return_guesses"],
+        "story_segments": seeded["story_segments"],
+    }
+
+    # Translation: every disc_uuid in returns.db's return_guesses matches
+    # what the source FK pointed at via discord_accounts.disc_uuid.
+    post_disc_uuids = sorted(
+        r[0] for r in sqlite3.connect(returns_path).execute(
+            "SELECT disc_uuid FROM return_guesses"
+        )
+    )
+    assert post_disc_uuids == pre_disc_uuids
+
+
+async def test_legacy_returns_copy_is_idempotent(_isolated_db):
+    """Running the copy twice doesn't double the data — the
+    destination-empty gate inside ``_copy_returns_legacy_data`` skips on
+    rerun.
+    """
+    from orm import _copy_returns_legacy_data
+
+    db_path = _isolated_db
+    returns_path = db_path.parent / "test_returns.db"
+    seeded = _seed_legacy_dazebot_db(db_path, n_guesses=4, n_segs=2)
+
+    import sqlite3 as _sq3
+    rconn = _sq3.connect(returns_path)
+    try:
+        rconn.executescript("""
+            CREATE TABLE "return_guesses" (
+                "id" CHAR(36) NOT NULL PRIMARY KEY,
+                "week" INT NOT NULL, "day" INT NOT NULL,
+                "disc_uuid" VARCHAR(255) NOT NULL,
+                "price" INT NOT NULL,
+                "created_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE "story_segments" (
+                "id" CHAR(36) NOT NULL PRIMARY KEY,
+                "week" INT NOT NULL,
+                "disc_uuid" VARCHAR(255) NOT NULL,
+                "content" TEXT NOT NULL,
+                "created_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        """)
+        rconn.commit()
+    finally:
+        rconn.close()
+
+    _copy_returns_legacy_data(str(db_path), str(returns_path))
+    _copy_returns_legacy_data(str(db_path), str(returns_path))
+
+    post = _row_counts(returns_path, ["return_guesses", "story_segments"])
+    assert post == {
+        "return_guesses": seeded["return_guesses"],
+        "story_segments": seeded["story_segments"],
+    }
+
+
+async def test_init_db_refuses_legacy_drop_without_gate(_isolated_db, monkeypatch):
+    """If dazebot.db still has the legacy returns tables, init_db must
+    refuse unless ``DAZEBOT_ALLOW_LEGACY_RETURNS_DROP=1`` is set. This is
+    the safety latch that ensures the host-side dump has been taken
+    before the destructive drop migration runs.
+    """
+    db_path = _isolated_db
+    _seed_legacy_dazebot_db(db_path, n_guesses=2, n_segs=1)
+
+    monkeypatch.delenv("DAZEBOT_ALLOW_LEGACY_RETURNS_DROP", raising=False)
+    with pytest.raises(RuntimeError, match="DAZEBOT_ALLOW_LEGACY_RETURNS_DROP"):
+        await init_db()
+
+
+async def test_copy_helper_detects_orphan_rows(_isolated_db):
+    """If a legacy ``return_guesses`` row points at a ``discord_account_id``
+    that doesn't exist (shouldn't happen — FK was CASCADE — but we don't
+    want to silently drop history if it does), the copy helper raises
+    rather than producing a smaller-than-source destination.
+    """
+    from orm import _copy_returns_legacy_data
+
+    db_path = _isolated_db
+    returns_path = db_path.parent / "test_returns.db"
+    _seed_legacy_dazebot_db(db_path, n_guesses=3, n_segs=1)
+
+    # Insert an orphan row whose FK target doesn't exist.
+    orphan_conn = sqlite3.connect(db_path)
+    try:
+        orphan_conn.execute(
+            'INSERT INTO "return_guesses" '
+            '("id", "week", "day", "discord_account_id", "price", "created_at") '
+            "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            ("99999999-9999-9999-9999-999999999999", 75, 7, "ffffffff-ffff-ffff-ffff-ffffffffffff", 999),
+        )
+        orphan_conn.commit()
+    finally:
+        orphan_conn.close()
+
+    # Pre-create returns.db schema.
+    import sqlite3 as _sq3
+    rconn = _sq3.connect(returns_path)
+    try:
+        rconn.executescript("""
+            CREATE TABLE "return_guesses" (
+                "id" CHAR(36) NOT NULL PRIMARY KEY,
+                "week" INT NOT NULL, "day" INT NOT NULL,
+                "disc_uuid" VARCHAR(255) NOT NULL,
+                "price" INT NOT NULL,
+                "created_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE "story_segments" (
+                "id" CHAR(36) NOT NULL PRIMARY KEY,
+                "week" INT NOT NULL,
+                "disc_uuid" VARCHAR(255) NOT NULL,
+                "content" TEXT NOT NULL,
+                "created_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        """)
+        rconn.commit()
+    finally:
+        rconn.close()
+
+    with pytest.raises(RuntimeError, match="Orphan rows"):
+        _copy_returns_legacy_data(str(db_path), str(returns_path))

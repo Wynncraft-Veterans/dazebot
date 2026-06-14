@@ -46,7 +46,8 @@ from discord.ext import commands
 from cogs.events.returns import Tier, register, register_manage
 from lib.auth import _has_admin_perm, _is_operator, _resolve_member
 from lib.discord_utils.paginated_embed import Paginator
-from orm import DiscordAccount, Score, StorySegment, WeeklyEvent
+from orm import DiscordAccount, Score, WeeklyEvent
+from orm_returns import StorySegment
 
 logger = logging.getLogger("dazebot.cogs.events.returns.week_73")
 
@@ -187,11 +188,7 @@ def _render_tail(contents: list[str], *, blocked_self: bool) -> str:
 
 
 async def _segments() -> list[StorySegment]:
-    return (
-        await StorySegment.filter(week=WEEK)
-        .order_by("created_at")
-        .prefetch_related("discord_account")
-    )
+    return await StorySegment.filter(week=WEEK).order_by("created_at")
 
 
 def _authored_recent(segs: list[StorySegment], author_id: int) -> bool:
@@ -201,7 +198,7 @@ def _authored_recent(segs: list[StorySegment], author_id: int) -> bool:
     or 1 existing segments this just checks whatever is there.
     """
     uid = str(author_id)
-    return any(s.discord_account.disc_uuid == uid for s in segs[-2:])
+    return any(s.disc_uuid == uid for s in segs[-2:])
 
 
 async def _private(
@@ -254,7 +251,7 @@ async def _private(
 async def _persist_segment(user: discord.abc.User, text: str) -> None:
     """Append a fragment and award the +1 week-73 score point."""
     disc, _ = await DiscordAccount.get_or_create(disc_uuid=str(user.id))
-    await StorySegment.create(week=WEEK, discord_account=disc, content=text)
+    await StorySegment.create(week=WEEK, disc_uuid=str(user.id), content=text)
     event, _ = await WeeklyEvent.get_or_create(week=WEEK)
     score_obj, created = await Score.get_or_create(
         event=event, discord_account=disc, defaults={"score": 1}

@@ -24,20 +24,49 @@ def _resolve_db_path() -> str:
     return p
 
 
-def _build_tortoise_config(db_path: str | None = None) -> dict:
-    """Build a tortoise config dict pointing at ``db_path`` (or the resolved
-    default). Built fresh per call so test monkeypatching of
-    ``DAZEBOT_DB_PATH`` takes effect — the module-level ``TORTOISE_ORM``
-    below is for aerich CLI use and is frozen at import time.
+def _resolve_returns_db_path() -> str:
+    """Resolve the returns SQLite path. Mirrors :func:`_resolve_db_path`;
+    ``DAZEBOT_RETURNS_DB_PATH`` overrides both — set in tests to a tmp file.
+
+    Returners-only tables (``return_guesses``, ``story_segments``) live in
+    this separate file rather than in dazebot.db. See ``orm_returns.py``.
+    """
+    p = os.environ.get("DAZEBOT_RETURNS_DB_PATH")
+    if p is None:
+        p = "/app/data/returns.db" if os.path.isdir("/app/data") else "returns.db"
+    return p
+
+
+def _build_tortoise_config(
+    db_path: str | None = None, returns_db_path: str | None = None
+) -> dict:
+    """Build a tortoise config dict with two connections / two apps. Built
+    fresh per call so test monkeypatching of ``DAZEBOT_DB_PATH`` and
+    ``DAZEBOT_RETURNS_DB_PATH`` takes effect — the module-level
+    ``TORTOISE_ORM`` below is for aerich CLI use and is frozen at import time.
+
+    Aerich tracks BOTH apps' migration history in one ``aerich`` table in
+    the ``default`` connection (it's registered with the first app only,
+    not duplicated under ``returns``). Each app's *schema* still lands in
+    its own connection's DB file — verified empirically; do not "fix" this
+    by adding ``aerich.models`` to the returns app's models list.
     """
     path = db_path if db_path is not None else _resolve_db_path()
+    returns_path = returns_db_path if returns_db_path is not None else _resolve_returns_db_path()
     return {
-        "connections": {"default": f"sqlite://{path}"},
+        "connections": {
+            "default": f"sqlite://{path}",
+            "returns": f"sqlite://{returns_path}",
+        },
         "apps": {
             "models": {
                 "models": ["orm", "aerich.models"],
                 "default_connection": "default",
-            }
+            },
+            "returns": {
+                "models": ["orm_returns"],
+                "default_connection": "returns",
+            },
         },
     }
 
@@ -579,34 +608,6 @@ class BuildPromotion(Model):
         table = "build_promotions"
 
 
-class ReturnGuess(Model):
-    """One user's emerald-price guess for a ``/return 75`` day-N slot.
-
-    Used by ``cogs/events/returns/week_75.py``: each accepted submission
-    appends one row. Unique per (``week``, ``day``, ``discord_account``) —
-    re-submission for the same day is rejected (the user must ask staff if
-    they want their guess cleared).
-
-    Keyed by ``week`` (not an FK to ``WeeklyEvent``) for the same reason
-    ``StorySegment`` is: a future price-guessing week picks a new int with
-    no schema change. ``day`` is 1-7. ``price`` is the guess in raw
-    emeralds; the manage view re-renders it as stx/le/e.
-    """
-
-    id = fields.UUIDField(pk=True)
-    week = fields.IntField(index=True)
-    day = fields.IntField()
-    discord_account: fields.ForeignKeyRelation[DiscordAccount] = fields.ForeignKeyField(
-        "models.DiscordAccount", related_name="return_guesses", on_delete=fields.CASCADE
-    )
-    price = fields.IntField()
-    created_at = fields.DatetimeField(auto_now_add=True)
-
-    class Meta:
-        table = "return_guesses"
-        unique_together = (("week", "day", "discord_account"),)
-
-
 class Apartment(Model):
     """One Returners apartment row. ``number`` is unique — ``~apartment create``
     refuses on collision. NULL ``owner_mc_username`` means VACANT. Each user is
@@ -622,31 +623,6 @@ class Apartment(Model):
 
     class Meta:
         table = "apartments"
-
-
-class StorySegment(Model):
-    """One fragment of a collaborative ``/return`` story event.
-
-    Used by ``cogs/events/returns/week_73.py``: each accepted ``/return 73``
-    submission appends one row. The full story is reconstructed by ordering
-    rows for a ``week`` by ``created_at`` and concatenating ``content``.
-
-    Keyed by ``week`` (not an FK to WeeklyEvent) so a future story week just
-    picks a new int — no schema change. Scoring still goes through the normal
-    ``WeeklyEvent``/``Score`` tables. The back-to-back guard reads the most
-    recent row's ``discord_account`` to forbid the same author twice running.
-    """
-
-    id = fields.UUIDField(pk=True)
-    week = fields.IntField(index=True)
-    discord_account: fields.ForeignKeyRelation[DiscordAccount] = fields.ForeignKeyField(
-        "models.DiscordAccount", related_name="story_segments", on_delete=fields.CASCADE
-    )
-    content = fields.TextField()
-    created_at = fields.DatetimeField(auto_now_add=True)
-
-    class Meta:
-        table = "story_segments"
 
 
 # --- Chore-Torn Palace (CTP) ----------------------------------------------
@@ -961,10 +937,119 @@ _EXPECTED_MODEL_TABLES = frozenset({
     "dm_sent_log", "donations", "first_install_monitors", "guild_capacity_alerts",
     "intercult_messages", "janitor_alerts", "link_code", "link_requests",
     "minecraft_accounts", "minecraft_alts", "mojang_name_cache",
-    "profession_categories", "recruitment_queries", "return_guesses",
-    "scores", "shouts", "staff_action_entries", "story_segments",
+    "profession_categories", "recruitment_queries",
+    "scores", "shouts", "staff_action_entries",
     "user_vanity_choices", "verify_keys", "waitlist", "weekly_events",
 })
+
+# Tables that USED to live in dazebot.db but have moved to returns.db. Their
+# presence in dazebot.db means an old (pre-split) DB file — init_db will copy
+# them to returns.db, then a follow-up migration drops them from here. Once
+# the drop migration has run everywhere, this set can be removed.
+_LEGACY_RETURNS_TABLES = frozenset({"return_guesses", "story_segments"})
+
+# What the returns.db file should contain after a successful upgrade. The
+# `aerich` tracking table lives in dazebot.db (default connection), not here.
+_EXPECTED_RETURNS_TABLES = frozenset({"return_guesses", "story_segments"})
+
+
+def _copy_returns_legacy_data(main_db_path: str, returns_db_path: str) -> None:
+    """One-shot copy of legacy ``return_guesses`` and ``story_segments`` rows
+    from the dazebot DB into the freshly-provisioned returns DB.
+
+    Runs inside :func:`init_db` exactly once per deploy, gated on the legacy
+    tables still being present in dazebot.db. Idempotent: if the destination
+    rows are already populated, the copy is skipped with a warning.
+
+    The translation is the consequential bit: the source schema FKs to
+    ``discord_accounts.id`` (synthetic UUID PK); the destination schema in
+    :mod:`orm_returns` stores the natural Discord snowflake ``disc_uuid``
+    string directly (no cross-DB FK is enforceable in SQLite). The
+    ``INSERT … SELECT`` joins through ``discord_accounts`` to perform that
+    translation. We assert source count == join-result count before
+    committing — a mismatch means an orphan row whose discord_account_id
+    pointed at a row that no longer exists, and we'd rather fail loudly
+    than silently drop history.
+
+    All work happens in a single transaction on the main connection with the
+    returns DB ATTACHed, so a crash mid-copy leaves both files untouched
+    (SQLite's atomic-commit guarantee).
+    """
+    import logging
+    import sqlite3
+
+    log = logging.getLogger("dazebot.orm")
+    conn = sqlite3.connect(main_db_path)
+    try:
+        conn.execute(f"ATTACH DATABASE '{returns_db_path}' AS returns_db")
+
+        src_rg = conn.execute("SELECT COUNT(*) FROM return_guesses").fetchone()[0]
+        src_ss = conn.execute("SELECT COUNT(*) FROM story_segments").fetchone()[0]
+        dst_rg = conn.execute("SELECT COUNT(*) FROM returns_db.return_guesses").fetchone()[0]
+        dst_ss = conn.execute("SELECT COUNT(*) FROM returns_db.story_segments").fetchone()[0]
+
+        if dst_rg > 0 or dst_ss > 0:
+            log.warning(
+                "returns.db already populated (rg=%s ss=%s); skipping legacy copy",
+                dst_rg, dst_ss,
+            )
+            return
+
+        joined_rg = conn.execute(
+            "SELECT COUNT(*) FROM return_guesses rg "
+            "JOIN discord_accounts da ON da.id = rg.discord_account_id"
+        ).fetchone()[0]
+        joined_ss = conn.execute(
+            "SELECT COUNT(*) FROM story_segments ss "
+            "JOIN discord_accounts da ON da.id = ss.discord_account_id"
+        ).fetchone()[0]
+        if joined_rg != src_rg or joined_ss != src_ss:
+            raise RuntimeError(
+                f"Orphan rows detected in legacy returns tables: "
+                f"return_guesses src={src_rg} after-join={joined_rg}, "
+                f"story_segments src={src_ss} after-join={joined_ss}. "
+                "Refusing to copy a partial set — investigate before retrying."
+            )
+
+        conn.execute("BEGIN")
+        try:
+            conn.execute(
+                "INSERT INTO returns_db.return_guesses "
+                "(id, week, day, disc_uuid, price, created_at) "
+                "SELECT rg.id, rg.week, rg.day, da.disc_uuid, rg.price, rg.created_at "
+                "FROM return_guesses rg "
+                "JOIN discord_accounts da ON da.id = rg.discord_account_id"
+            )
+            conn.execute(
+                "INSERT INTO returns_db.story_segments "
+                "(id, week, disc_uuid, content, created_at) "
+                "SELECT ss.id, ss.week, da.disc_uuid, ss.content, ss.created_at "
+                "FROM story_segments ss "
+                "JOIN discord_accounts da ON da.id = ss.discord_account_id"
+            )
+            new_rg = conn.execute(
+                "SELECT COUNT(*) FROM returns_db.return_guesses"
+            ).fetchone()[0]
+            new_ss = conn.execute(
+                "SELECT COUNT(*) FROM returns_db.story_segments"
+            ).fetchone()[0]
+            if new_rg != src_rg or new_ss != src_ss:
+                conn.execute("ROLLBACK")
+                raise RuntimeError(
+                    f"returns.db copy count mismatch: "
+                    f"rg src={src_rg} dst={new_rg}, ss src={src_ss} dst={new_ss}. "
+                    "Rolled back."
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        log.info(
+            "Copied legacy returns data to %s: %s return_guesses, %s story_segments",
+            returns_db_path, new_rg, new_ss,
+        )
+    finally:
+        conn.close()
 
 
 async def _fake_apply_initial_migration(app: str) -> None:
@@ -997,31 +1082,45 @@ async def _fake_apply_initial_migration(app: str) -> None:
 
 
 async def init_db():
-    """Initialise Tortoise and apply pending aerich migrations.
+    """Initialise Tortoise and apply pending aerich migrations across BOTH
+    the dazebot and returns SQLite databases.
 
-    Branches:
+    Branches (dazebot.db side, unchanged from the single-DB era):
 
     * **Empty/fresh DB** (file absent, OR exists with no model tables and
       no ``aerich`` table) — refused unless ``DAZEBOT_ALLOW_FRESH_DB=1`` is
       set. A missing file at the prod path almost always means a broken
       bind mount / lost data rather than legitimate first-time setup; the
       flag is the operator stating "yes, I really mean a clean install."
-      With the flag set, ``upgrade`` creates everything from scratch.
     * **Existing pre-aerich DB** (model tables present, ``aerich`` table
       absent) — back up the file, provision the tracking table, fake-apply
       ONLY the initial migration, then ``upgrade`` to apply any follow-up
-      migrations for real. This is where backfill migrations (like
-      ``1_*_backfill_fk_unique_indexes.py``) actually take effect on prod.
-    * **Already-bootstrapped DB** (model tables + ``aerich`` table present)
-      — back up the file, run ``upgrade`` for any pending follow-up
-      migrations; no-op when up-to-date.
+      migrations for real.
+    * **Already-bootstrapped DB** — back up the file, run ``upgrade`` for
+      any pending follow-up migrations; no-op when up-to-date.
 
-    The pre-migration backup ends up at ``{db_path}.pre-migration-{epoch}``
-    so any deploy that goes wrong can be reversed with a file copy.
+    Returns-DB side:
 
-    ``aerich.Command.init`` calls ``Tortoise.init`` internally (guarded by
-    ``Tortoise._inited``), so the connection it opens is the same one the
-    bot uses for queries afterwards.
+    * **Missing returns.db** is fine IF the legacy ``return_guesses``/
+      ``story_segments`` tables are still in dazebot.db (this deploy will
+      copy them across). Missing AND no legacy → require explicit
+      ``DAZEBOT_ALLOW_FRESH_RETURNS_DB=1``.
+    * **Legacy split gate** (``DAZEBOT_ALLOW_LEGACY_RETURNS_DROP=1``) — when
+      dazebot.db still holds the legacy tables, the boot is about to
+      (a) populate returns.db and (b) let the models-app drop migration
+      nuke them from dazebot.db. The gate env var ensures the operator
+      saw the pre-update dump land in ``/opt/docker/backups/db-dumps/dazebot/``
+      first; ``manage update dazebot`` sets it after a successful dump.
+
+    Boot order is precise:
+      backup both files →
+      run returns-app aerich (creates returns.db schema if first time) →
+      copy legacy data (if legacy_present) →
+      run models-app aerich (the drop migration runs HERE, after the copy
+      has been verified — so a copy failure aborts before the drop).
+
+    Pre-migration backups land at ``{db_path}.pre-migration-{epoch}`` so a
+    bad deploy can be reversed with a file copy.
     """
     import logging
 
@@ -1030,42 +1129,106 @@ async def init_db():
     logger = logging.getLogger("dazebot.orm")
 
     db_path = _resolve_db_path()
-    file_exists, table_names = _inspect_db_state(db_path)
-    has_aerich = "aerich" in table_names
-    model_tables_present = bool(table_names & _EXPECTED_MODEL_TABLES)
+    returns_path = _resolve_returns_db_path()
 
-    if not file_exists or (not model_tables_present and not has_aerich):
+    main_exists, main_tables = _inspect_db_state(db_path)
+    returns_exists, returns_tables = _inspect_db_state(returns_path)
+
+    main_has_aerich = "aerich" in main_tables
+    main_models_present = bool(main_tables & _EXPECTED_MODEL_TABLES)
+    legacy_present = bool(main_tables & _LEGACY_RETURNS_TABLES)
+    returns_present = bool(returns_tables & _EXPECTED_RETURNS_TABLES)
+
+    # --- Fresh-DB guard: dazebot.db ---
+    if not main_exists or (not main_models_present and not main_has_aerich):
         if os.environ.get("DAZEBOT_ALLOW_FRESH_DB") != "1":
             raise RuntimeError(
                 f"No existing dazebot DB at {db_path!r} "
-                f"(file_exists={file_exists}, model_tables_present={model_tables_present}). "
+                f"(file_exists={main_exists}, model_tables_present={main_models_present}). "
                 "Refusing to create a fresh DB and lose any data that may "
                 "have been at this path. If this is genuinely first-time "
                 "setup, set DAZEBOT_ALLOW_FRESH_DB=1 and restart."
             )
-        logger.warning(
-            "DAZEBOT_ALLOW_FRESH_DB=1 set; creating fresh DB at %s", db_path
-        )
-        needs_fake_apply = False
-    elif model_tables_present and not has_aerich:
-        needs_fake_apply = True
+        logger.warning("DAZEBOT_ALLOW_FRESH_DB=1 set; creating fresh dazebot DB at %s", db_path)
+        needs_fake_apply_main = False
+    elif main_models_present and not main_has_aerich:
+        needs_fake_apply_main = True
     else:
-        needs_fake_apply = False
+        needs_fake_apply_main = False
 
-    backup_path = _backup_db_before_migration(db_path)
-    if backup_path is not None:
-        logger.info("Backed up pre-migration DB to %s", backup_path)
+    # --- Fresh-DB guard: returns.db ---
+    # Missing returns.db is OK if legacy tables in dazebot.db will be copied
+    # below. Otherwise require an explicit opt-in.
+    if not returns_exists and not legacy_present and not returns_present:
+        if os.environ.get("DAZEBOT_ALLOW_FRESH_RETURNS_DB") != "1":
+            raise RuntimeError(
+                f"No existing returns DB at {returns_path!r} and no legacy "
+                "return_guesses/story_segments tables in dazebot.db to copy. "
+                "Set DAZEBOT_ALLOW_FRESH_RETURNS_DB=1 to start with an empty "
+                "returns.db."
+            )
+        logger.warning(
+            "DAZEBOT_ALLOW_FRESH_RETURNS_DB=1 set; creating fresh returns DB at %s",
+            returns_path,
+        )
 
-    if needs_fake_apply:
-        _create_aerich_tracking_table(db_path)
+    # --- Belt-and-suspenders backups (both files) ---
+    main_backup = _backup_db_before_migration(db_path)
+    if main_backup is not None:
+        logger.info("Backed up pre-migration dazebot DB to %s", main_backup)
+    returns_backup = _backup_db_before_migration(returns_path)
+    if returns_backup is not None:
+        logger.info("Backed up pre-migration returns DB to %s", returns_backup)
 
-    command = Command(tortoise_config=_build_tortoise_config(db_path), app="models", location="./migrations")
-    await command.init()
-    if needs_fake_apply:
-        await _fake_apply_initial_migration(command.app)
-    applied = await command.upgrade(fake=False)
-    if applied:
-        logger.info("Applied aerich migration(s): %s", applied)
+    # --- One-shot split gate ---
+    # This boot is about to copy the legacy tables to returns.db, then a
+    # pending models-app migration will drop them from dazebot.db. Refuse
+    # unless the deploy procedure has confirmed a fresh dump exists in
+    # /opt/docker/backups/db-dumps/dazebot/ — `manage update dazebot` sets
+    # this env var for the new container exactly once, after a successful
+    # pre-update dump.
+    if legacy_present:
+        if os.environ.get("DAZEBOT_ALLOW_LEGACY_RETURNS_DROP") != "1":
+            raise RuntimeError(
+                f"dazebot.db at {db_path!r} still holds legacy returns tables "
+                f"({sorted(main_tables & _LEGACY_RETURNS_TABLES)}). The next "
+                "boot will copy them to returns.db and the pending drop "
+                "migration will remove them from here. Refusing to proceed "
+                "without DAZEBOT_ALLOW_LEGACY_RETURNS_DROP=1. Run "
+                "`manage dump dazebot` to land a backup in "
+                "/opt/docker/backups/db-dumps/dazebot/, then "
+                "`manage update dazebot` (which sets the env var for one boot)."
+            )
+
+    # Provision the aerich table before EITHER app's upgrade runs — the
+    # returns-app upgrade also writes into this table (it lives in the
+    # default connection, shared across both apps). On a fresh dazebot.db
+    # the table doesn't exist yet; on the pre-aerich-DB bootstrap path we
+    # also need it before _fake_apply_initial_migration writes its row.
+    # CREATE TABLE IF NOT EXISTS makes this safe to call unconditionally.
+    _create_aerich_tracking_table(db_path)
+
+    cfg = _build_tortoise_config(db_path, returns_path)
+
+    # --- Returns app FIRST: ensures returns.db schema exists before copy ---
+    returns_cmd = Command(tortoise_config=cfg, app="returns", location="./migrations")
+    await returns_cmd.init()
+    applied_returns = await returns_cmd.upgrade(fake=False)
+    if applied_returns:
+        logger.info("Applied returns-app migration(s): %s", applied_returns)
+
+    # --- One-shot copy: legacy dazebot.db rows -> returns.db ---
+    if legacy_present:
+        _copy_returns_legacy_data(db_path, returns_path)
+
+    # --- Models app: existing flow (drop migration runs HERE if pending) ---
+    models_cmd = Command(tortoise_config=cfg, app="models", location="./migrations")
+    await models_cmd.init()
+    if needs_fake_apply_main:
+        await _fake_apply_initial_migration(models_cmd.app)
+    applied_models = await models_cmd.upgrade(fake=False)
+    if applied_models:
+        logger.info("Applied models-app migration(s): %s", applied_models)
 
 
 async def close_db():

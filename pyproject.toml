@@ -34,6 +34,12 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["."]
 
+# Aerich CLI: pass `--app models` (dazebot.db, default) or `--app returns`
+# (returns.db) — `aerich --app <app> migrate` writes to migrations/<app>/.
+# Both apps' migration history is tracked in ONE `aerich` table inside
+# dazebot.db (the default connection); each app's *schema* still lands in
+# its own DB file. Don't add `aerich.models` to the returns app's models
+# list to "fix" this — it's the intended behaviour.
 [tool.aerich]
 tortoise_orm = "orm.TORTOISE_ORM"
 location = "./migrations"

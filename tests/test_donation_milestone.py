@@ -50,8 +50,11 @@ async def _isolated_db(tmp_path, monkeypatch):
 
     await _reset()
     db_path = tmp_path / "test.db"
+    returns_db_path = tmp_path / "test_returns.db"
     monkeypatch.setenv("DAZEBOT_DB_PATH", str(db_path))
+    monkeypatch.setenv("DAZEBOT_RETURNS_DB_PATH", str(returns_db_path))
     monkeypatch.setenv("DAZEBOT_ALLOW_FRESH_DB", "1")
+    monkeypatch.setenv("DAZEBOT_ALLOW_FRESH_RETURNS_DB", "1")
     yield db_path
     await _reset()
 

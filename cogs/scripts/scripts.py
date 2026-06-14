@@ -189,31 +189,28 @@ class Scripts(commands.Cog):
 
     @script_group.command(
         name="extract_anni_timestamps",
-        description="(Operator) Dump Discord timestamps from webhook-posted 'annihilation' messages in the anni channel.",
+        description="(Operator) Dump up to 10k raw messages from the anni channel as a gzipped JSONL attachment for offline debug.",
     )
     @is_operator()
     async def script_extract_anni_timestamps(self, ctx: commands.Context):
-        """Scrape ``AnniConfig.CHANNEL_ID`` for webhook-authored messages
-        whose content or embeds mention "annihilation", extract every
-        ``<t:N[:fmt]>`` Discord timestamp, dedupe, sort ascending, and reply
-        with the result as a CSV attachment.
+        """Dump raw history of ``AnniConfig.CHANNEL_ID`` to JSONL.gz.
 
-        The historical bulk poster (Magbot) no longer exists and its webhook
-        id can't be recovered, so the filter is "any webhook + keyword"
-        rather than a specific ``webhook_id``.
+        Iterates ``channel.history(limit=10_000)`` and writes one JSON
+        object per message with the metadata needed to debug filter
+        decisions (``webhook_id``, ``interaction_metadata``, ``flags``,
+        ``author.bot``, embeds, …).
 
-        Edits a single status message at least every 5 seconds with the
-        message counter and elapsed time so the operator can see progress
-        during the (potentially multi-minute) scan. Also mirrors progress
-        to the cog logger so the docker logs reflect liveness independently
-        of Discord state.
+        Replaces the prior CSV timestamp-extraction flow, which had
+        become brittle against multiple Magbot/announcement-follow embed
+        shapes; the new output is meant for offline analysis (jq /
+        sqlite) before any filter is re-derived.
         """
-        import csv
+        import gzip
         import io
-        import re
+        import json
         import time
 
-        TS_RE = re.compile(r"<t:(\d+)(?::[A-Za-z])?>")
+        HISTORY_LIMIT = 10_000
         EDIT_INTERVAL_S = 5.0
 
         if ctx.guild is None:
@@ -228,41 +225,69 @@ class Scripts(commands.Cog):
             )
             return
 
-        def message_text(msg: discord.Message) -> str:
-            parts: list[str] = [msg.content or ""]
-            for emb in msg.embeds:
-                if emb.title:
-                    parts.append(emb.title)
-                if emb.description:
-                    parts.append(emb.description)
-                if emb.author and emb.author.name:
-                    parts.append(emb.author.name)
-                if emb.footer and emb.footer.text:
-                    parts.append(emb.footer.text)
-                for f in emb.fields:
-                    if f.name:
-                        parts.append(f.name)
-                    if f.value:
-                        parts.append(f.value)
-            return "\n".join(parts)
+        def embed_dict(emb: discord.Embed) -> dict:
+            return {
+                "title": emb.title,
+                "description": emb.description,
+                "author_name": emb.author.name if emb.author else None,
+                "footer_text": emb.footer.text if emb.footer else None,
+                "fields": [{"name": f.name, "value": f.value} for f in emb.fields],
+            }
 
-        status = await ctx.reply(f"Starting scrape of #{channel.name}...")
+        def msg_dict(msg: discord.Message) -> dict:
+            im = msg.interaction_metadata
+            return {
+                "id": msg.id,
+                "created_at": msg.created_at.isoformat(),
+                "type": msg.type.name if msg.type else None,
+                "content": msg.content,
+                "clean_content": msg.clean_content,
+                "author": {
+                    "id": msg.author.id,
+                    "name": msg.author.name,
+                    "bot": msg.author.bot,
+                    "system": getattr(msg.author, "system", False),
+                },
+                "webhook_id": msg.webhook_id,
+                "application_id": msg.application_id,
+                "interaction_metadata": (
+                    {
+                        "id": im.id,
+                        "type": im.type.name if im.type else None,
+                        "user_id": im.user.id if im.user else None,
+                    }
+                    if im is not None
+                    else None
+                ),
+                "flags": {
+                    "value": msg.flags.value,
+                    "crossposted": msg.flags.crossposted,
+                    "is_crossposted": msg.flags.is_crossposted,
+                    "suppress_embeds": msg.flags.suppress_embeds,
+                    "ephemeral": msg.flags.ephemeral,
+                    "loading": msg.flags.loading,
+                },
+                "role_mention_names": [r.name for r in msg.role_mentions],
+                "embeds": [embed_dict(e) for e in msg.embeds],
+                "attachment_count": len(msg.attachments),
+                "reaction_count": sum(r.count for r in msg.reactions),
+            }
 
-        timestamps: set[int] = set()
-        messages_scanned = 0
-        matched = 0
+        status = await ctx.reply(
+            f"Starting dump of #{channel.name} (up to {HISTORY_LIMIT:,} msgs)..."
+        )
         started = time.monotonic()
         last_edit = started
+        messages_scanned = 0
+        lines: list[bytes] = []
 
         async def push_status():
             nonlocal last_edit
             last_edit = time.monotonic()
             elapsed = last_edit - started
             text = (
-                f"Scraping #{channel.name}...\n"
-                f"messages scanned: {messages_scanned:,}\n"
-                f"matched webhook messages: {matched:,}\n"
-                f"timestamps found: {len(timestamps):,}\n"
+                f"Dumping #{channel.name}...\n"
+                f"messages scanned: {messages_scanned:,}/{HISTORY_LIMIT:,}\n"
                 f"elapsed: {elapsed:.0f}s"
             )
             try:
@@ -270,19 +295,19 @@ class Scripts(commands.Cog):
             except discord.HTTPException:
                 pass
             logger.info(
-                "extract_anni_timestamps progress: %d msgs scanned, "
-                "%d matched, %d timestamps, %.0fs elapsed",
-                messages_scanned, matched, len(timestamps), elapsed,
+                "extract_anni_timestamps progress: %d msgs scanned, %.0fs elapsed",
+                messages_scanned, elapsed,
             )
 
         try:
-            async for msg in channel.history(limit=None):
+            async for msg in channel.history(limit=HISTORY_LIMIT):
                 messages_scanned += 1
-                if msg.webhook_id is not None:
-                    text = message_text(msg)
-                    if "annihilation" in text.lower():
-                        matched += 1
-                        timestamps.update(int(s) for s in TS_RE.findall(text))
+                lines.append(
+                    (
+                        json.dumps(msg_dict(msg), ensure_ascii=False, default=str)
+                        + "\n"
+                    ).encode("utf-8")
+                )
                 if time.monotonic() - last_edit >= EDIT_INTERVAL_S:
                     await push_status()
         except (discord.Forbidden, discord.HTTPException) as e:
@@ -295,24 +320,23 @@ class Scripts(commands.Cog):
         elapsed = time.monotonic() - started
         try:
             await status.edit(
-                content=f"Scrape complete in {elapsed:.0f}s — see attached CSV."
+                content=(
+                    f"Dump complete in {elapsed:.0f}s — "
+                    f"see attached file ({messages_scanned:,} messages)."
+                )
             )
         except discord.HTTPException:
             pass
 
-        buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(["unix_timestamp"])
-        for ts in sorted(timestamps):
-            writer.writerow([ts])
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
+            for line in lines:
+                gz.write(line)
+        data = buf.getvalue()
 
-        data = buf.getvalue().encode("utf-8")
         await ctx.reply(
-            content=(
-                f"Done. {len(timestamps):,} unique timestamps from "
-                f"{matched:,} matched webhook messages in #{channel.name}."
-            ),
-            file=discord.File(io.BytesIO(data), filename="anni_timestamps.csv"),
+            content=f"Done. {messages_scanned:,} messages from #{channel.name}.",
+            file=discord.File(io.BytesIO(data), filename="anni_messages.jsonl.gz"),
         )
 
 

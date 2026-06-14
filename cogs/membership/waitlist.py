@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import Annotated, Optional
+from typing import Optional
 
 import discord
 from discord.ext import commands
@@ -12,8 +12,7 @@ from tortoise.expressions import Q
 
 from bot import Bot
 from lib.auth import is_guild, is_registered, is_staff
-from lib.discord_utils.converters import CaseInsensitiveMember
-from lib.mc.resolve import ensure_mc_account, refresh_mc_guild
+from lib.mc.resolve import ensure_mc_account, refresh_mc_guild, resolve_target
 from lib.mc.wynn_api.errors import WynnApiError
 from lib.role_state import (
     RoleState,
@@ -41,31 +40,41 @@ class WaitlistCog(commands.Cog):
     async def waitlist_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
             await ctx.reply(
-                "Use `/waitlist add <user> [username]` (staff), `/waitlist view` (registered), "
-                "`/waitlist remove <user>` (staff), `/waitlist force <user> <position>` (staff), "
+                "Use `/waitlist add <target> [username]` (staff), `/waitlist view` (registered), "
+                "`/waitlist remove <username_or_uuid>` (staff), `/waitlist force <target> <position>` (staff), "
                 "`/waitlist self` (guild member self-add), "
                 "or `/waitlist leave` (anyone, self-remove)."
             )
 
     @waitlist_group.command(
         name="add",
-        description="(Staff) Add a user to the waitlist; `username` required if they aren't linked.",
+        description="(Staff) Add a user (Discord identifier or Minecraft IGN) to the waitlist; `username` required if a Discord user isn't linked.",
     )
     @is_staff()
     async def waitlist_add(
         self,
         ctx: commands.Context,
-        user: Annotated[discord.Member, CaseInsensitiveMember],
+        target: str,
         username: Optional[str] = None,
     ):
         if ctx.guild is None:
             return
-        disc = (
-            await DiscordAccount.filter(disc_uuid=str(user.id))
-            .select_related("minecraft_account")
-            .first()
-        )
-        mc: Optional[MinecraftAccount] = disc.minecraft_account if disc else None
+        member, mc = await resolve_target(ctx, target)
+        if member is None and mc is None:
+            await ctx.reply(
+                f"Couldn't resolve `{target}` to a Discord member or Minecraft account."
+            )
+            return
+        if member is None:
+            # MC exists but no Discord member is linked / in-guild; the role
+            # transition below needs a discord.Member, so we can't proceed.
+            await ctx.reply(
+                f"`{mc.mc_username}` isn't linked to a Discord user in this server; "
+                "can't add to waitlist (role assignment needs a Discord member).",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        user = member
 
         if mc is None:
             if not username:
@@ -267,13 +276,13 @@ class WaitlistCog(commands.Cog):
 
     @waitlist_group.command(
         name="force",
-        description="(Staff) Move a user to a specific waitlist position (1 = top).",
+        description="(Staff) Move a user (Discord identifier or Minecraft IGN) to a specific waitlist position (1 = top).",
     )
     @is_staff()
     async def waitlist_force(
         self,
         ctx: commands.Context,
-        user: Annotated[discord.Member, CaseInsensitiveMember],
+        target: str,
         position: int,
     ):
         # Position is *derived* from `created_at` ascending ordering (see
@@ -285,16 +294,10 @@ class WaitlistCog(commands.Cog):
         # not touch roles or row existence, so the WAITLISTED state and the
         # janitor reconciler are unaffected; only the moved user's displayed
         # "added X ago" changes, which is inherent to how position is stored.
-        disc = (
-            await DiscordAccount.filter(disc_uuid=str(user.id))
-            .select_related("minecraft_account")
-            .first()
-        )
-        mc: Optional[MinecraftAccount] = disc.minecraft_account if disc else None
+        _, mc = await resolve_target(ctx, target)
         if mc is None:
             await ctx.reply(
-                f"{user.mention} is not on the waitlist. Use `/waitlist add` first.",
-                allowed_mentions=discord.AllowedMentions.none(),
+                f"Couldn't resolve `{target}` to a Minecraft account."
             )
             return
 

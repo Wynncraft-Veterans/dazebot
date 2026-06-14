@@ -1,9 +1,10 @@
 """Membership-state cog: role-state transitions and surrounding commands.
 
-Owns the ``/first_install``, ``/script``, ``/force``, ``/vanity``,
-``/honour``/``/unhonour``, ``/list``, and ``/info`` slash surfaces, plus
-the periodic ``inactivity_loop`` that decays stale waitlist entries and
-DM-warns inactive members.
+Owns the ``/first_install``, ``/force``, ``/vanity``, ``/honour``/
+``/unhonour``, ``/list``, and ``/info`` slash surfaces, the prefix-only
+``~script`` operator group (one-off maintenance scripts kept out of the
+slash picker), plus the periodic ``inactivity_loop`` that decays stale
+waitlist entries and DM-warns inactive members.
 
 The full requirements live in ``../.claude/membership_spec.md``.
 """
@@ -174,9 +175,9 @@ class MembershipState(commands.Cog):
             f"• Cleared stored vanity choices."
         )
 
-    # ---------- /script (one-off admin maintenance scripts) ----------
+    # ---------- ~script (one-off operator maintenance scripts) ----------
 
-    @commands.hybrid_group(
+    @commands.group(
         name="script",
         description="(Operator) One-off maintenance scripts.",
     )
@@ -184,9 +185,10 @@ class MembershipState(commands.Cog):
     async def script_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
             await ctx.reply(
-                "Available scripts: `/script edit_welcome <channel> <message_id>`, "
-                "`/script rename_cult`, `/script install_intercult`, "
-                "`/script install_recruitment`, `/script install_recruitment_deercult`."
+                "Available scripts: `~script edit_welcome <channel> <message_id>`, "
+                "`~script rename_cult`, `~script install_intercult`, "
+                "`~script install_recruitment`, `~script install_recruitment_deercult`, "
+                "`~script extract_anni_timestamps`."
             )
 
     @script_group.command(
@@ -194,10 +196,6 @@ class MembershipState(commands.Cog):
         description="(Operator) Rewrite an onboarding message to the simplified copy, keeping the link button.",
     )
     @is_operator()
-    @app_commands.describe(
-        channel="Channel containing the onboarding message.",
-        message_id="ID of the message to edit (must have been posted by this bot).",
-    )
     async def script_edit_welcome(
         self,
         ctx: commands.Context,
@@ -295,7 +293,7 @@ class MembershipState(commands.Cog):
         """Bulk install of the recruitment button across non-deercult cults.
 
         Deercult is excluded by default (membership-balance reasons);
-        opt it in separately with ``/script install_recruitment_deercult``.
+        opt it in separately with ``~script install_recruitment_deercult``.
         Routine cult creation installs this button automatically (also
         skipping deercult); this command exists for the initial bootstrap
         and for re-pinning if the message was deleted.
@@ -332,6 +330,134 @@ class MembershipState(commands.Cog):
             "unresolved": "❌ deercult has no resolvable `thread_id`; aborting.",
         }[result]
         await ctx.reply(note, ephemeral=True)
+
+    @script_group.command(
+        name="extract_anni_timestamps",
+        description="(Operator) Dump every Discord timestamp ever posted by the anni webhook to CSV.",
+    )
+    @is_operator()
+    async def script_extract_anni_timestamps(self, ctx: commands.Context):
+        """Scrape the whole guild for messages by the anni webhook, extract
+        every embedded ``<t:N[:fmt]>`` Discord timestamp, dedupe, sort
+        ascending, and reply with the result as a CSV attachment.
+
+        Edits a single status message at least every 5 seconds with the
+        current channel, message counter, and elapsed time so the operator
+        can see progress during the (potentially multi-minute) scan. Also
+        mirrors progress to the cog logger so the docker logs reflect
+        liveness independently of Discord state.
+        """
+        import csv
+        import io
+        import re
+        import time
+
+        WEBHOOK_ID = 1396669909077070007  # CurrConfig.AnniConfig.WEBHOOK_ID
+        TS_RE = re.compile(r"<t:(\d+)(?::[A-Za-z])?>")
+        EDIT_INTERVAL_S = 5.0
+
+        if ctx.guild is None:
+            await ctx.reply("❌ Must be run in a guild context.")
+            return
+
+        status = await ctx.reply("Starting scrape...")
+
+        text_channels = list(ctx.guild.text_channels)
+        forum_channels = list(getattr(ctx.guild, "forums", []))
+        all_top_level: list = text_channels + forum_channels
+        total = len(all_top_level)
+
+        timestamps: set[int] = set()
+        messages_scanned = 0
+        skipped = 0
+        started = time.monotonic()
+        last_edit = started
+        current_idx = 0
+        current_name = "(none)"
+
+        async def push_status():
+            nonlocal last_edit
+            last_edit = time.monotonic()
+            elapsed = last_edit - started
+            text = (
+                f"Scraping... channel {current_idx}/{total} · #{current_name}\n"
+                f"messages scanned: {messages_scanned:,}\n"
+                f"timestamps found: {len(timestamps):,}\n"
+                f"elapsed: {elapsed:.0f}s"
+            )
+            try:
+                await status.edit(content=text)
+            except discord.HTTPException:
+                pass
+            logger.info(
+                "extract_anni_timestamps progress: %d/%d channels (in #%s), "
+                "%d msgs scanned, %d timestamps, %.0fs elapsed",
+                current_idx, total, current_name, messages_scanned, len(timestamps), elapsed,
+            )
+
+        async def scan_history(history_iter):
+            nonlocal messages_scanned
+            async for msg in history_iter:
+                messages_scanned += 1
+                if msg.webhook_id == WEBHOOK_ID:
+                    timestamps.update(int(s) for s in TS_RE.findall(msg.content))
+                if time.monotonic() - last_edit >= EDIT_INTERVAL_S:
+                    await push_status()
+
+        for current_idx, top in enumerate(all_top_level, start=1):
+            current_name = top.name
+            had_error = False
+
+            if isinstance(top, discord.TextChannel):
+                try:
+                    await scan_history(top.history(limit=None))
+                except (discord.Forbidden, discord.HTTPException):
+                    had_error = True
+
+            for thread in list(getattr(top, "threads", [])):
+                current_name = thread.name
+                try:
+                    await scan_history(thread.history(limit=None))
+                except (discord.Forbidden, discord.HTTPException):
+                    had_error = True
+
+            try:
+                async for thread in top.archived_threads(limit=None):
+                    current_name = thread.name
+                    try:
+                        await scan_history(thread.history(limit=None))
+                    except (discord.Forbidden, discord.HTTPException):
+                        had_error = True
+            except (discord.Forbidden, discord.HTTPException, AttributeError):
+                had_error = True
+
+            current_name = top.name
+            if had_error:
+                skipped += 1
+            await push_status()
+
+        elapsed = time.monotonic() - started
+        try:
+            await status.edit(
+                content=f"Scrape complete in {elapsed:.0f}s — see attached CSV."
+            )
+        except discord.HTTPException:
+            pass
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["unix_timestamp"])
+        for ts in sorted(timestamps):
+            writer.writerow([ts])
+
+        data = buf.getvalue().encode("utf-8")
+        await ctx.reply(
+            content=(
+                f"Done. {len(timestamps):,} unique timestamps; "
+                f"skipped {skipped} top-level channels with at least one unreadable history."
+            ),
+            file=discord.File(io.BytesIO(data), filename="anni_timestamps.csv"),
+        )
 
     # ---------- /force ----------
 

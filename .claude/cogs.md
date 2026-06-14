@@ -12,7 +12,7 @@ Auto-discovery: `bot.py:_load_cogs` walks every `.py` file under `cogs/` (recurs
 | [`vanity_roles.py`](../cogs/membership/vanity_roles.py) | Per-member year/date cosmetic role auto-assignment driven by Wynncraft `firstJoin`. |
 | [`blocking.py`](../cogs/membership/blocking.py) | `/block`, `/unblock`. |
 | [`waitlist.py`](../cogs/membership/waitlist.py) | `/waitlist add\|view\|remove\|force\|self\|leave`. The `WAITLISTED` role is kept in lock-step with the `Waitlist` DB table: `add`/`self` apply the role (and `add` reports success if the role was already present — DB+role re-synced), `remove`/`leave` strip it via `apply_transition(INACTIVE_WAITLIST)`. `force` reorders by rewriting one row's `created_at` (position = `created_at` ordering) and deliberately touches neither roles nor row existence. The Waitlist table is the source of truth; janitor reconciler (D) heals any residual divergence. |
-| [`membership_state.py`](../cogs/membership/membership_state.py) | `/first_install`, `/force change\|check`, `/vanity set\|force`, `/honour`, `/unhonour`, `/list unlinked\|linked`, `/info`, the prefix-only `~script` operator group (`edit_welcome`, `rename_cult`, `install_intercult`, `install_recruitment[_deercult]`, `extract_anni_timestamps`), and the periodic `inactivity_loop`. |
+| [`membership_state.py`](../cogs/membership/membership_state.py) | `/first_install`, `/force change\|check`, `/vanity set\|force`, `/honour`, `/unhonour`, `/list unlinked\|linked`, `/info`, and the periodic `inactivity_loop`. |
 | [`runtime_config_cog.py`](../cogs/membership/runtime_config_cog.py) | `/config list\|get\|set\|reset` and `/alerts status\|mute\|unmute\|thresholds`. |
 
 ## `cogs/moderation/` — staff actions
@@ -37,6 +37,12 @@ Auto-discovery: `bot.py:_load_cogs` walks every `.py` file under `cogs/` (recurs
 | [`janitor.py`](../cogs/maintenance/janitor.py) | Periodic reconciliation loop (`JANITOR_INTERVAL_MINUTES`, default 6h) + staff `/janitor run`. Four reconcilers, run **(F)→(A)→(D)→(B)**: **(F)** blocklisted users' linked members forced REGISTERED-only (blocklist *is* positive info — spec §2b); **(A)** the Flame self-heal, *strictly* — only linked members with **no** membership state at all get the baseline **granted** (additive; never a demotion). Members with any valid primary role, **including manually-assigned HIATUS/HONOURARY**, are left untouched; genuine multi-primary conflicts are left for manual review. **(D)** WAITLISTED ↔ Waitlist-DB sync — the DB table is the source of truth: an orphaned role with no row is removed, a row whose member lacks the role gets it (runs after (A) so a just-healed stateless member can be waitlisted). **(B)** leftover `LinkCode` cleanup — unrecoverable rows deleted; for a linked user, a stale row (user already has a valid state) is just deleted *without touching roles*, only a *stateless* user triggers an additive baseline re-enforce. Log-only by default (`JANITOR_REPAIR_ENABLED=False`); flips to actually mutate at runtime. **Either way** it posts a throttled (`JANITOR_ALERT_DELTA`) summary embed to `JANITOR_ALERT_CHANNEL`, throttle bypassed when a tick actually repaired. `JANITOR_ENABLED`/interval are read at init/decoration → restart to change; `JANITOR_REPAIR_ENABLED` is the live switch. Throttle marker = `JanitorAlert` ORM table (mirror of `DeadGuildAlert`). |
 
 `cogs/maintenance/` is a normal auto-loaded subfolder (not in `COG_SKIP_DIRS`); the empty `__init__.py` is the subpackage marker like every other `cogs/*` folder.
+
+## `cogs/scripts/` — prefix-only one-off operator scripts
+
+| Cog | Owns |
+|---|---|
+| [`scripts.py`](../cogs/scripts/scripts.py) | The prefix-only `~script` operator group (`edit_welcome`, `rename_cult`, `install_intercult`, `install_recruitment`, `install_recruitment_deercult`, `extract_anni_timestamps`). Throwaway recovery/backfill helpers; intentionally kept out of the slash picker. Add new one-offs here and retire them in-place when done — no real feature code lives in this folder, so churn is safe. |
 
 ## `cogs/events/` — return weeks + scoring
 

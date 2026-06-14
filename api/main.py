@@ -325,18 +325,24 @@ def create_app(bot: Bot) -> FastAPI:
             {
               "target_uuid": str,
               "target_username": str,
-              "total_points": int,
+              "total_points": int,           # LIVE count after decay
+              "next_expiry": str | null,     # ISO 8601 of soonest live-point expiry
               "entries": [
                 {
                   "kind": str,
-                  "points": int,
+                  "points": int,             # raw delta this entry contributed
+                  "live_points": int,        # how many of those points are still live
                   "actor_username_at_time": str,
                   "message": str | null,
-                  "created_at": str,  # ISO 8601 UTC
+                  "created_at": str,         # ISO 8601 UTC
                 },
                 ...
               ]
             }
+
+        ``total_points`` is the player's *live* point total under the
+        decay curve in ``lib.staff.staff_actions._expiry_days``; fully
+        expired entries appear in ``entries`` with ``live_points=0``.
 
         ``404`` if the target cannot be resolved (no MinecraftAccount,
         Wynncraft API doesn't recognise them either).
@@ -361,21 +367,22 @@ def create_app(bot: Bot) -> FastAPI:
             logger.exception("staff_actions_history: resolve failed")
             raise HTTPException(status_code=502, detail="resolve failed")
 
-        total = await staff_actions.total_points_for(target_uuid)
-        rows = await staff_actions.history_for(target_uuid)
+        total, next_expiry, paired = await staff_actions.live_breakdown(target_uuid)
         return {
             "target_uuid": target_uuid,
             "target_username": canonical,
             "total_points": total,
+            "next_expiry": next_expiry.isoformat() if next_expiry else None,
             "entries": [
                 {
                     "kind": r.kind,
                     "points": r.points,
+                    "live_points": live_pts,
                     "actor_username_at_time": r.actor_username_at_time,
                     "message": r.message,
                     "created_at": r.created_at.isoformat(),
                 }
-                for r in rows
+                for r, live_pts in paired
             ],
         }
 

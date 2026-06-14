@@ -23,8 +23,9 @@ commit and trigger the DM.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 import discord
 
@@ -63,6 +64,94 @@ EJECT_THRESHOLD = 6
 # ``warning`` frame format this prefix specially in-game; the Discord
 # DM lands here verbatim.
 WARNING_PREFIX = "⚠ WARNING ⚠"
+
+
+# ---------------------------------------------------------------------------
+# Decay
+#
+# Each caution point ages out independently. Issue an entry and its N
+# points get ordinals (M+1, M+2, ..., M+N) where M is the player's live
+# (non-expired) point count at the moment of issue; each ordinal x
+# expires ``_expiry_days(x)`` days after the entry's ``created_at``.
+# Sanity check: y(1)=21d, y(5)=182d, sum(y(1..5)) ~= 407d ("about a
+# year" for 5 accumulated points, per spec).
+#
+# The replay walks an audit-log in chronological order. Negative-delta
+# adjustments retire live points oldest-issued-first (most lenient, and
+# matches the lowest-ordinal-expires-first natural ordering). The
+# audit log is never mutated -- expired rows stay for history.
+# ---------------------------------------------------------------------------
+
+
+def _expiry_days(ordinal: int) -> float:
+    """Decay curve for the *x*-th live point. ``y(x) = 21 * (26/3) ** ((x-1)/4)``."""
+    return 21.0 * (26.0 / 3.0) ** ((ordinal - 1) / 4.0)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _coerce_aware(dt: datetime) -> datetime:
+    # SQLite + tortoise's auto_now_add can return tz-naive datetimes; treat
+    # them as UTC so timedelta arithmetic is sound.
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+@dataclass
+class _LivePoint:
+    issued_at: datetime
+    expires_at: datetime
+    entry_index: int
+
+
+@dataclass(frozen=True)
+class _ReplayResult:
+    live_count: int
+    next_expiry: Optional[datetime]
+    per_entry_live: tuple[int, ...]
+
+
+def _replay(entries: "Iterable[StaffActionEntry]", now: datetime) -> _ReplayResult:
+    """Walk ``entries`` (must be chronological by ``created_at``) and
+    return the live-point snapshot at ``now``.
+
+    ``per_entry_live[i]`` carries how many of ``entries[i]``'s points
+    are still alive at ``now`` -- used by the cog to dim fully-expired
+    rows in the ``~warnings`` embed. Pure function; no I/O.
+    """
+    entries_list = list(entries)
+    live: list[_LivePoint] = []
+
+    for idx, e in enumerate(entries_list):
+        created = _coerce_aware(e.created_at)
+        # Drop points that expired before this entry happened.
+        live = [lp for lp in live if lp.expires_at > created]
+
+        delta = e.points
+        if delta > 0:
+            base = len(live)
+            for i in range(delta):
+                exp = created + timedelta(days=_expiry_days(base + i + 1))
+                live.append(_LivePoint(created, exp, idx))
+        elif delta < 0:
+            # Retire oldest-issued first (user spec). Stable sort so
+            # synthetic same-instant entries follow insertion order.
+            live.sort(key=lambda lp: lp.issued_at)
+            del live[: min(-delta, len(live))]
+
+    live = [lp for lp in live if lp.expires_at > now]
+
+    per_entry = [0] * len(entries_list)
+    for lp in live:
+        per_entry[lp.entry_index] += 1
+
+    next_expiry = min((lp.expires_at for lp in live), default=None)
+    return _ReplayResult(
+        live_count=len(live),
+        next_expiry=next_expiry,
+        per_entry_live=tuple(per_entry),
+    )
 
 
 @dataclass
@@ -107,28 +196,39 @@ async def resolve_target(name_or_uuid: str) -> tuple[str, str, MinecraftAccount]
 
 
 async def total_points_for(target_uuid: str) -> int:
-    """Cumulative caution-point total for ``target_uuid``. ``0`` if the
-    target has no entries.
+    """Live caution-point total for ``target_uuid`` at the current
+    moment. ``0`` if every entry has fully decayed (or the target has
+    no entries).
 
-    Sums in Python rather than via SQL ``SUM()`` -- per-target row counts
-    are tiny (rarely more than a few dozen entries) and the values_list
-    query keeps the tortoise-orm idiom simple.
+    Replays the player's audit log through ``_replay`` and applies the
+    decay curve ``y(x) = 21 * (26/3)^((x-1)/4)`` days per point. Expired
+    rows remain in the table for the audit trail but contribute 0.
     """
-    points = await StaffActionEntry.filter(
-        target_uuid=target_uuid
-    ).values_list("points", flat=True)
-    return sum(points)
-
-
-async def history_for(
-    target_uuid: str, limit: int = 25
-) -> list[StaffActionEntry]:
-    """Most-recent entries for ``target_uuid`` first."""
-    return await (
-        StaffActionEntry.filter(target_uuid=target_uuid)
-        .order_by("-created_at")
-        .limit(limit)
+    rows = await (
+        StaffActionEntry.filter(target_uuid=target_uuid).order_by("created_at")
     )
+    return _replay(rows, _utc_now()).live_count
+
+
+async def live_breakdown(
+    target_uuid: str, *, limit: int = 25
+) -> tuple[int, Optional[datetime], list[tuple[StaffActionEntry, int]]]:
+    """One-shot snapshot for the ``~warnings`` embed and the GET
+    endpoint: live count, soonest unexpired ``expires_at`` (or ``None``
+    if no live points), and a most-recent-first list of
+    ``(entry, live_points_of_this_entry)`` pairs truncated to ``limit``.
+
+    A pair's second element being ``0`` means every point that entry
+    contributed has already decayed -- callers render those rows dimly
+    but keep them in the list (the audit trail is the whole point).
+    """
+    rows = list(
+        await StaffActionEntry.filter(target_uuid=target_uuid).order_by("created_at")
+    )
+    result = _replay(rows, _utc_now())
+    paired = list(zip(rows, result.per_entry_live))
+    paired.reverse()
+    return result.live_count, result.next_expiry, paired[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +351,13 @@ async def record_adjustment(
     reason: Optional[str],
 ) -> ActionResult:
     """Insert an admin-override "adjustment" row that bumps a target's
-    cumulative point total by ``delta`` (positive or negative).
+    live point total by ``delta`` (positive or negative).
+
+    Negative deltas retire up to ``|delta|`` of the player's currently
+    live points (oldest-issued first; see ``_replay``). If the player
+    has fewer live points than ``|delta|`` the excess is dropped --
+    live count can't go below zero, so the negative-balance "buffer"
+    admins could previously rely on no longer exists.
 
     Unlike :func:`record_action`, this path is **side-effect-light**:
     no DM, no blocklist add, no EJECT notice, no in-game push.
@@ -267,7 +373,10 @@ async def record_adjustment(
     """
     target_uuid, canonical_username, _mc = await resolve_target(target_username)
     prior_total = await total_points_for(target_uuid)
-    new_total = prior_total + delta
+    # Live count can't go below zero -- negative deltas clamp to 0 once
+    # all live points have been retired. The audit row still records the
+    # raw ``delta`` so the history shows what the admin actually typed.
+    new_total = max(0, prior_total + delta)
 
     await StaffActionEntry.create(
         target_uuid=target_uuid,

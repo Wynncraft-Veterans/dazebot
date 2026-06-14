@@ -300,13 +300,16 @@ class Blocklist(Model):
 
 class StaffActionEntry(Model):
     """Audit row for a single caution / warning / eject event recorded by
-    in-game guild staff against a Minecraft player. See
-    ``../.claude/staff_actions.md`` for the full spec.
+    in-game guild staff against a Minecraft player.
 
-    Cumulative caution-point total for a target = SUM(points) over all
-    rows for ``target_uuid``. Three caution points = one "warning point";
-    two warning points (= 6 caution points) trips the auto-ban
-    threshold. Decay is not implemented; entries persist forever.
+    Live caution-point total for a target is *not* the simple SUM of
+    ``points`` across their rows -- each individual point decays on the
+    curve ``y(x) = 21 * (26/3)^((x-1)/4)`` days after the entry's
+    ``created_at`` (the *x*-th live point being slower than the first).
+    The total is computed by replaying the audit log; see
+    ``lib/staff/staff_actions.py::_replay``. Three live points = formal
+    warning DM; six = auto-ban. Expired rows stay in the table for the
+    audit trail but contribute 0 to the live total.
 
     Read by ``GET /api/internal/staff-actions/{uuid}`` (consumed by
     vetsmod's ``/wv check``) and by the Discord ``~warnings`` command.

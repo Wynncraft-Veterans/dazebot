@@ -68,19 +68,22 @@ class StaffActions(commands.Cog):
             await ctx.reply(f"Failed to resolve `{username}` (Wynncraft API error).")
             return
 
-        total = await staff_actions.total_points_for(target_uuid)
-        rows = await staff_actions.history_for(target_uuid)
+        total, next_expiry, paired = await staff_actions.live_breakdown(target_uuid)
 
         embed = discord.Embed(
             title=f"Caution history -- {canonical}",
             color=_color_for_total(total),
         )
+        total_value = _format_total(total)
+        if next_expiry is not None:
+            ts = int(_to_aware(next_expiry).timestamp())
+            total_value = f"{total_value}\nNext point clears <t:{ts}:R>"
         embed.add_field(
             name="Total points",
-            value=_format_total(total),
+            value=total_value,
             inline=False,
         )
-        if not rows:
+        if not paired:
             embed.add_field(
                 name="History",
                 value="_(no entries)_",
@@ -89,20 +92,39 @@ class StaffActions(commands.Cog):
             await ctx.reply(embed=embed, allowed_mentions=discord.AllowedMentions.none())
             return
 
-        # Most-recent first; Discord embed field caps at 25, history_for
-        # already limits to 25.
+        # Most-recent first; live_breakdown already truncated to 25.
         lines = []
-        for r in rows:
+        for r, live_pts in paired:
             ts = int(_to_aware(r.created_at).timestamp())
-            head = f"{_kind_label(r.kind)} (+{r.points}) by `{r.actor_username_at_time}` <t:{ts}:R>"
+            # Render an entry's points-contribution with a live/raw tag
+            # when the entry has partially or fully decayed. Adjustments
+            # (which can be negative) skip the live-tag -- their raw
+            # delta is the meaningful number.
+            if r.kind == "adjustment" or r.points <= 0:
+                contrib = f"({r.points:+d})"
+            elif live_pts < r.points:
+                contrib = f"(+{r.points}, {live_pts} live)"
+            else:
+                contrib = f"(+{r.points})"
+            head = (
+                f"{_kind_label(r.kind)} {contrib} by "
+                f"`{r.actor_username_at_time}` <t:{ts}:R>"
+            )
             if r.message:
                 # Trim to keep embed under Discord's 6000-char total.
                 trimmed = r.message.strip()
                 if len(trimmed) > 200:
                     trimmed = trimmed[:200] + "..."
-                lines.append(f"{head}\n> {trimmed}")
+                line = f"{head}\n> {trimmed}"
             else:
-                lines.append(head)
+                line = head
+            # Strike through any positive-point entry whose contribution
+            # has fully decayed. Negative adjustments and the "no points
+            # left to remove" case are never struck (they aren't decaying
+            # in the same sense -- they retired other points instantly).
+            if r.points > 0 and live_pts == 0:
+                line = _strike(line)
+            lines.append(line)
 
         # Discord field value max 1024 chars; chunk if we'd overflow.
         chunk = ""
@@ -213,11 +235,9 @@ class StaffActions(commands.Cog):
         reason: Optional[str] = None,
     ):
         """``/warnings-adjust <username> <delta> [reason]`` -- positive
-        ``delta`` adds points, negative ``delta`` removes them. The
-        running total is allowed to go below zero (admin's call); the
-        warning/eject thresholds still apply to *commits*, not to
-        adjustments, so a negative balance just absorbs future
-        cautions silently.
+        ``delta`` adds points, negative ``delta`` removes live points
+        (oldest-issued first; up to the player's current live count --
+        the live total clamps at 0).
         """
         if delta == 0:
             await ctx.reply("`delta` must be non-zero.")
@@ -276,6 +296,22 @@ def _to_aware(dt: datetime) -> datetime:
 
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _strike(text: str) -> str:
+    """Discord ``~~strikethrough~~`` only fits on one line, so wrap each
+    line of ``text`` individually. Blockquote prefixes (``> ``) are
+    preserved outside the strike so the quote bar still renders.
+    """
+    out = []
+    for line in text.splitlines():
+        if not line.strip():
+            out.append(line)
+        elif line.startswith("> "):
+            out.append(f"> ~~{line[2:]}~~")
+        else:
+            out.append(f"~~{line}~~")
+    return "\n".join(out)
 
 
 async def setup(bot: Bot):

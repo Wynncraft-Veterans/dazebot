@@ -166,7 +166,9 @@ class CTPCog(commands.Cog):
     async def ctp_status(self, ctx: commands.Context) -> None:
         disc = await balance_svc.get_or_create_disc(str(ctx.author.id))
         bal = await balance_svc.compute_balance(disc)
-        rank, total, glinted = await glints_svc.rank_of(disc=disc, bot=self.bot)
+        rank, total, glinted, cutoff_tie_size = await glints_svc.rank_of(
+            disc=disc, bot=self.bot,
+        )
         member = ctx.author if isinstance(ctx.author, discord.Member) else None
         board_enums = await _board_memberships(disc, member)
         lines = formatting.format_status_lines(
@@ -175,6 +177,8 @@ class CTPCog(commands.Cog):
             is_glinted=glinted,
             glint_total=total,
             board_enums=board_enums,
+            cutoff_tie_size=cutoff_tie_size,
+            rotation_hours=glints_svc.TIE_ROTATION_PERIOD_SECONDS // 3600,
         )
         await ctx.reply("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
 
@@ -247,7 +251,16 @@ class CTPCog(commands.Cog):
         if not glinted and not standby:
             await ctx.reply("No glint investments yet.")
             return
-        lines = formatting.format_glint_leaderboard_lines(glinted, standby)
+        tie_rank, _tie_total, tie_size = glints_svc.find_cutoff_tied_group(
+            glinted + standby, glints_svc.GLINT_VISIBLE_CUTOFF,
+        )
+        lines = formatting.format_glint_leaderboard_lines(
+            glinted,
+            standby,
+            cutoff_tie_rank=tie_rank,
+            cutoff_tie_size=tie_size,
+            rotation_hours=glints_svc.TIE_ROTATION_PERIOD_SECONDS // 3600,
+        )
         embeds = from_lines("Invested Points in Glints", lines, GLINTS_LINES_PER_PAGE, logger)
         view = Paginator(embeds) if len(embeds) > 1 else None
         await ctx.reply(embed=embeds[0], view=view, allowed_mentions=discord.AllowedMentions.none())
@@ -281,7 +294,7 @@ class CTPCog(commands.Cog):
         _, new_total = await glints_svc.invest(
             disc=disc, amount=number, actor_disc_uuid=str(ctx.author.id),
         )
-        rank, _, is_glinted = await glints_svc.rank_of(disc=disc, bot=self.bot)
+        rank, _, is_glinted, _tie = await glints_svc.rank_of(disc=disc, bot=self.bot)
         if rank is None:
             tail = "You currently aren't eligible for the leaderboard, but your investment is recorded."
         else:

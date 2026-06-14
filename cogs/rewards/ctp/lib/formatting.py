@@ -135,9 +135,18 @@ def format_info_history_lines(entries: Iterable[CTPLedger]) -> list[str]:
 def format_glint_leaderboard_lines(
     glinted: list[tuple[discord.Member, int]],
     standby: list[tuple[discord.Member, int]],
+    *,
+    cutoff_tie_rank: int = 0,
+    cutoff_tie_size: int = 0,
+    rotation_hours: int = 0,
 ) -> list[str]:
     """Build the ``~ctp glints bids`` body. Two sections mirroring the
     spec example at chore_torn_palace.md lines 75–86.
+
+    When ``cutoff_tie_size >= 2``, a footer line explains the
+    rotation: e.g. *"3 bidders tied at rank 8; the cutoff slot rotates
+    among them every 3 h."* Callers compute the tie context via
+    ``glints_svc.find_cutoff_tied_group``.
     """
     lines: list[str] = []
     if glinted:
@@ -152,6 +161,12 @@ def format_glint_leaderboard_lines(
         offset = len(glinted)
         for i, (m, total) in enumerate(standby, start=offset + 1):
             lines.append(f"{i}. {m.mention}: {total} points")
+    if cutoff_tie_size >= 2 and rotation_hours > 0:
+        lines.append("")
+        lines.append(
+            f"*{cutoff_tie_size} bidders tied at rank {cutoff_tie_rank}; "
+            f"the cutoff slot rotates among them every {rotation_hours} h.*"
+        )
     return lines
 
 
@@ -250,9 +265,17 @@ def format_status_lines(
     is_glinted: bool,
     glint_total: int,
     board_enums: list[str],
+    cutoff_tie_size: int = 0,
+    rotation_hours: int = 0,
 ) -> list[str]:
     """Build the ``~ctp status`` body. Mirrors chore_torn_palace.md
     lines 8–15.
+
+    When ``cutoff_tie_size >= 2`` the user is in a tied group that
+    straddles the cutoff this rotation bucket, so the glint line is
+    suffixed with "(tied with N others; rotates every X h)" — surfaces
+    the rotation so users don't read it as a bug when their is_glinted
+    flips every few hours.
     """
     lines = [f"You have **{balance}** points in the chore-torn palace!"]
     if glint_rank is None:
@@ -264,9 +287,13 @@ def format_status_lines(
             lines.append("You have not invested any points in glints yet.")
     else:
         verb = "are" if is_glinted else "are not"
-        lines.append(
-            f"You are number **{glint_rank}** on the glint board and **{verb}** glinted!"
-        )
+        line = f"You are number **{glint_rank}** on the glint board and **{verb}** glinted!"
+        if cutoff_tie_size >= 2 and rotation_hours > 0:
+            line += (
+                f" (tied with {cutoff_tie_size - 1} other(s); "
+                f"rotates every {rotation_hours} h)"
+            )
+        lines.append(line)
     if board_enums:
         lines.append("You have joined the following CTP boards:")
         for e in board_enums:

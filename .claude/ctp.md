@@ -50,6 +50,14 @@ Visible cutoff: `glints.GLINT_VISIBLE_CUTOFF = 8`. Ranks 1–8 render under **Cu
 
 Note: HIATUS users are NOT blocked from running `~ctp glints bid` — they keep accruing investment so re-joining the guild puts them back in the right position. Only the visible leaderboard and the `is_glinted` flag filter.
 
+### Tied bidders
+
+When two or more eligible bidders share the same `total_invested`, the cutoff slot rotates among them on a deterministic wall-clock cadence (`glints.TIE_ROTATION_PERIOD_SECONDS = 3 * 3600`, boundaries at 00:00 / 03:00 / 06:00 ... UTC). The rotation index is `epoch_seconds // PERIOD`; each tied group is sorted by `member.id` and rotated by `index mod group_size`. This applies before the cutoff slice in `_ranked_eligible`, so `~ctp glints bids`, `~ctp status` `is_glinted`, and `/api/internal/glinted` all agree on who is currently glinted within a 5-min poll window of each boundary (vetsmod's `SupportersPoller` cadence).
+
+The rotation only changes who is glinted when a tied group **straddles** the cutoff (e.g. 7 bidders tied at rank 1 with `GLINT_VISIBLE_CUTOFF = 8` — all 7 fit; but with the API cutoff at 6, one of the 7 rotates out each bucket). Tied groups entirely above the cutoff (everyone glinted) or entirely below (nobody glinted) rotate internally but the membership of the cutoff is unchanged.
+
+`~ctp glints bids` appends a footer "*N bidders tied at rank K; the cutoff slot rotates among them every 3 h.*" when a tie straddles the display cutoff. `~ctp status` for a user inside a cutoff-straddling tie appends "(tied with M others; rotates every 3 h)" so the rotation doesn't read as a bug.
+
 ## Board membership (manual vs role-derived)
 
 A user "is on" a board if **either** of:

@@ -712,7 +712,7 @@ class CTPPrize(Model):
     """
 
     id = fields.UUIDField(pk=True)
-    category = fields.CharField(max_length=16)  # "Access" | "Change" | "Service" | "Gift"
+    category = fields.CharField(max_length=16)  # admin-defined; titlecased on insert by `prizes.normalize_category`
     enum_name = fields.CharField(max_length=32)
     cost = fields.IntField()
     duration_seconds: Optional[int] = fields.IntField(null=True)  # type: ignore

@@ -30,7 +30,7 @@ from config import CurrConfig
 from lib.auth import Tier, current_tier, is_admin, is_guild, is_registered, is_staff
 from lib.discord_utils.converters import CaseInsensitiveMember
 from lib.discord_utils.paginated_embed import Paginator, from_lines
-from orm import CTPBoard, DiscordAccount
+from orm import CTPBoard, CTPLedger, CTPPrize, DiscordAccount
 
 logger = logging.getLogger("dazebot.cogs.rewards.ctp")
 
@@ -90,6 +90,20 @@ async def _board_memberships(
     return sorted(enums)
 
 
+def _summarise_bulk(targets: list[CTPPrize], verb: str) -> str:
+    """Reply blurb shared by the bulk-capable prize CRUD commands.
+    Single-target case preserves the pre-wildcard one-line format
+    (``Disabled `Access.CHIEF`.``); multi-target case (from ``<Cat>.*``)
+    names the count and lists the enums.
+    """
+    if len(targets) == 1:
+        p = targets[0]
+        return f"{verb} `{p.category}.{p.enum_name}`."
+    cat = targets[0].category
+    names = ", ".join(f"`{p.enum_name}`" for p in targets)
+    return f"{verb} {len(targets)} prizes in `{cat}`: {names}."
+
+
 class CTPCog(commands.Cog):
     bot: Bot
 
@@ -134,7 +148,10 @@ class CTPCog(commands.Cog):
             sections.append(
                 "**Admin**\n"
                 "- `~ctp board <ENUM> <num> [role_id]` — create/move/role-change/delete a board\n"
+                "- `~ctp board list` — list all CTP boards\n"
                 "- `~ctp prize add|edit|disable|enable|remove|disclaim ...` — prize catalog CRUD\n"
+                "  (the disable/enable/remove/disclaim forms also accept `<Category>.*` to bulk-target a category)\n"
+                "- `~ctp prize info` (admin) — also surfaces disabled rows, marked `(disabled)`\n"
                 "- `~ctp set <user> <value>` — forcibly set a user's balance"
             )
         if not sections:
@@ -629,7 +646,11 @@ class CTPCog(commands.Cog):
         await self._render_prize_info(ctx)
 
     async def _render_prize_info(self, ctx: commands.Context) -> None:
-        prizes = await prizes_svc.all_visible()
+        # Admins also see disabled rows in the same paginated embed,
+        # marked with `(disabled)` and strikethrough — there's no
+        # separate "list all" command on purpose.
+        tier = await current_tier(ctx)
+        prizes = await prizes_svc.all_visible(include_disabled=tier >= Tier.ADMIN)
         embeds = formatting.build_prize_info_embeds(prizes, CurrConfig.CTP_PRIZE_ARTWORK_URL)
         view = Paginator(embeds) if len(embeds) > 1 else None
         await ctx.reply(embed=embeds[0], view=view, allowed_mentions=discord.AllowedMentions.none())
@@ -649,16 +670,20 @@ class CTPCog(commands.Cog):
         *,
         display: str,
     ) -> None:
-        if prizes_svc.normalize_category(category) is None:
-            await ctx.reply(f"Unknown category `{category}`. Expected one of: {', '.join(prizes_svc.CATEGORIES)}.")
+        # Categories are admin-defined — ``normalize_category`` titlecases
+        # the input and the row gets stored verbatim. A brand-new category
+        # is materialised silently; admins can verify via ``~ctp prize info``.
+        canon = prizes_svc.normalize_category(category)
+        if canon is None:
+            await ctx.reply("Category cannot be empty.")
             return
         duration = None if duration_seconds == 0 else duration_seconds
         prize = await prizes_svc.create(
-            category=category, enum_name=enum_name, cost=cost,
+            category=canon, enum_name=enum_name, cost=cost,
             duration_seconds=duration, display=display,
         )
         if prize is None:
-            await ctx.reply(f"Prize `{category.upper()}.{enum_name.upper()}` already exists.")
+            await ctx.reply(f"Prize `{canon}.{enum_name.upper()}` already exists.")
             return
         await ctx.reply(
             f"Added `{prize.category}.{prize.enum_name}` (`{prize.cost}` points, "
@@ -693,75 +718,91 @@ class CTPCog(commands.Cog):
         await self._prize_set_disabled(ctx, category_enum, False)
 
     async def _prize_set_disabled(self, ctx: commands.Context, category_enum: str, value: bool) -> None:
-        parsed = prizes_svc.parse_dotted_key(category_enum)
-        if parsed is None:
-            await ctx.reply(f"Could not parse `{category_enum}` — expected `CATEGORY.ENUM`.")
+        targets, err = await prizes_svc.resolve_targets(category_enum)
+        if err is not None:
+            await ctx.reply(err)
             return
-        cat, enum_name = parsed
-        prize = await prizes_svc.find(cat, enum_name)
-        if prize is None:
-            await ctx.reply(f"No prize `{cat}.{enum_name}`.")
-            return
-        await prizes_svc.set_disabled(prize, value)
+        for prize in targets:
+            await prizes_svc.set_disabled(prize, value)
         verb = "Disabled" if value else "Re-enabled"
-        await ctx.reply(f"{verb} `{cat}.{enum_name}`.")
+        await ctx.reply(_summarise_bulk(targets, verb))
 
     @prize_group.command(name="remove", description="(Admin) Delete a prize from the catalog.")
     @is_admin()
     async def prize_remove(self, ctx: commands.Context, *, category_enum: str) -> None:
-        parsed = prizes_svc.parse_dotted_key(category_enum)
-        if parsed is None:
-            await ctx.reply(f"Could not parse `{category_enum}` — expected `CATEGORY.ENUM`.")
+        targets, err = await prizes_svc.resolve_targets(category_enum)
+        if err is not None:
+            await ctx.reply(err)
             return
-        cat, enum_name = parsed
-        prize = await prizes_svc.find(cat, enum_name)
-        if prize is None:
-            await ctx.reply(f"No prize `{cat}.{enum_name}`.")
-            return
-        await prizes_svc.delete(prize)
-        await ctx.reply(f"Deleted `{cat}.{enum_name}`. Existing ledger snapshots are preserved.")
+        for prize in targets:
+            await prizes_svc.delete(prize)
+        tail = " Existing ledger snapshots are preserved."
+        await ctx.reply(_summarise_bulk(targets, "Deleted") + tail)
 
     @prize_group.command(name="disclaim", description="(Admin) Attach a disclaimer to a prize.")
     @is_admin()
     async def prize_disclaim(self, ctx: commands.Context, category_enum: str, *, msg: str) -> None:
-        parsed = prizes_svc.parse_dotted_key(category_enum)
-        if parsed is None:
-            await ctx.reply(f"Could not parse `{category_enum}` — expected `CATEGORY.ENUM`.")
-            return
-        cat, enum_name = parsed
-        prize = await prizes_svc.find(cat, enum_name)
-        if prize is None:
-            await ctx.reply(f"No prize `{cat}.{enum_name}`.")
+        targets, err = await prizes_svc.resolve_targets(category_enum)
+        if err is not None:
+            await ctx.reply(err)
             return
         cleared = msg.strip().lower() in {"none", "clear", "off"}
-        await prizes_svc.set_disclaimer(prize, None if cleared else msg)
-        await ctx.reply(
-            f"{'Cleared' if cleared else 'Updated'} disclaimer for `{cat}.{enum_name}`."
-        )
+        new_disclaimer = None if cleared else msg
+        for prize in targets:
+            await prizes_svc.set_disclaimer(prize, new_disclaimer)
+        verb = "Cleared" if cleared else "Updated"
+        await ctx.reply(_summarise_bulk(targets, f"{verb} disclaimer for"))
 
     # --- Admin tier (boards + set) ------------------------------------
 
-    @ctp_group.command(
+    @ctp_group.group(
         name="board",
-        description="(Admin) Create/move/role-change/delete a board.",
+        description="(Admin) Create/move/role-change/delete a board, or list all boards.",
+        invoke_without_command=True,
     )
     @is_admin()
     async def ctp_board(
         self,
         ctx: commands.Context,
-        enum: str,
-        value: str,
+        enum: Optional[str] = None,
+        value: Optional[str] = None,
         role_id: Optional[str] = None,
     ) -> None:
-        # Two-arg form (``enum value``) handles move/role/delete; three-arg
-        # form (``enum value role_id``) creates or replaces the board.
-        # See ``boards.apply_board_command`` for the dispatch table.
+        # ``invoke_without_command=True`` routes ``~ctp board list`` to
+        # ``ctp_board_list`` without entering this body — the body handles
+        # the overloaded ``~ctp board ENUM <args>`` forms: two-arg
+        # (``enum value``) for move/role/delete, three-arg
+        # (``enum value role_id``) for create. See
+        # ``boards.apply_board_command`` for the dispatch table.
+        if enum is None or value is None:
+            await ctx.reply(
+                "Use `~ctp board <ENUM> <board_number> [role_id]` to create/move/role/delete, "
+                "or `~ctp board list` to enumerate.",
+            )
+            return
         args = [value] if role_id is None else [value, role_id]
         result = await boards_svc.apply_board_command(enum, args)
         await ctx.reply(result.message, allowed_mentions=discord.AllowedMentions.none())
         logger.info(
             "ctp board: enum=%s args=%s -> %s by %s", enum, args, result.action, ctx.author,
         )
+
+    @ctp_board.command(name="list", description="(Admin) List all CTP boards.")
+    @is_admin()
+    async def ctp_board_list(self, ctx: commands.Context) -> None:
+        boards = await boards_svc.list_all()
+        if not boards:
+            await ctx.reply("No CTP boards configured.")
+            return
+        lines = []
+        for b in boards:
+            role_part = f"role <@&{b.role_id}>" if b.role_id else "(no role)"
+            lines.append(
+                f"`{b.enum}` → [board {b.board_number}]({boards_svc.format_board_url(b)}) ({role_part})"
+            )
+        embeds = from_lines("CTP boards", lines, HISTORY_LINES_PER_PAGE, logger)
+        view = Paginator(embeds) if len(embeds) > 1 else None
+        await ctx.reply(embed=embeds[0], view=view, allowed_mentions=discord.AllowedMentions.none())
 
     @ctp_group.command(name="set", description="(Admin) Forcibly set a user's CTP balance.")
     @is_admin()

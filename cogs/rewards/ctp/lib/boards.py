@@ -40,6 +40,11 @@ async def find_by_enum(enum: str) -> Optional[CTPBoard]:
     return await CTPBoard.filter(enum__iexact=enum.upper()).first()
 
 
+async def list_all() -> list[CTPBoard]:
+    """All board rows ordered by ``enum`` for ``~ctp board list``."""
+    return await CTPBoard.all().order_by("enum")
+
+
 def format_board_url(board: CTPBoard) -> str:
     """The tasks.wynnvets.org URL for the board's page, used in command
     output (e.g. ``~ctp info`` history lines).

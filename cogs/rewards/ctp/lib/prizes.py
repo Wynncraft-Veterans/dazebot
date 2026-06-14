@@ -1,10 +1,10 @@
 """Prize catalog CRUD and redemption logic for the ``~ctp prize`` /
 ``~ctp redeem`` / ``~ctp access`` commands.
 
-``(category, enum_name)`` is the prize lookup key. Categories are spelled
-in the canonical capitalised form (``Access``/``Change``/``Service``/
-``Gift``) at write time so the table renders cleanly without re-casing;
-match is case-insensitive on read.
+``(category, enum_name)`` is the prize lookup key. Categories are
+admin-defined — there is no system-side allowlist. Any non-empty input
+is titlecased on write, and subsequent lookups resolve case-
+insensitively against the stored capitalisation.
 """
 
 from __future__ import annotations
@@ -19,19 +19,17 @@ from cogs.rewards.ctp.lib import balance as balance_svc
 from orm import CTPLedger, CTPPrize, DiscordAccount
 
 
-CATEGORIES = ("Access", "Change", "Service", "Gift")
-
-
 def normalize_category(value: str) -> Optional[str]:
-    """Return the canonical capitalisation of ``value`` if it names a
-    known category, else None. ``"access"``, ``"ACCESS"``, and
-    ``"Access"`` all map to ``"Access"``.
+    """Titlecase ``value`` for storage / lookup. Returns None only when
+    the input is empty/whitespace. Categories are entirely admin-
+    defined: ``~ctp prize add <NewCategory> <ENUM> ...`` mints a fresh
+    one on first use, and ``~ctp prize edit newcategory.ENUM ...``
+    resolves back to it via the same titlecase rule.
     """
-    lo = value.strip().lower()
-    for c in CATEGORIES:
-        if c.lower() == lo:
-            return c
-    return None
+    s = value.strip()
+    if not s:
+        return None
+    return s[0].upper() + s[1:].lower()
 
 
 def parse_dotted_key(arg: str) -> Optional[tuple[str, str]]:
@@ -78,14 +76,52 @@ async def resolve_loose(category: str, enum_arg: str) -> Optional[CTPPrize]:
     )
 
 
-async def all_visible() -> list[CTPPrize]:
-    """All non-disabled prizes, ordered by category (canonical) then
-    enum_name. Used by ``~ctp prize info``.
+async def all_visible(include_disabled: bool = False) -> list[CTPPrize]:
+    """Prizes ordered alphabetically by category then enum_name. Used
+    by ``~ctp prize info``. With ``include_disabled=True`` (admin view)
+    the ``disabled=False`` filter is dropped so admins can see hidden
+    rows in the same paginated embed.
     """
-    order = {c: i for i, c in enumerate(CATEGORIES)}
-    rows = await CTPPrize.filter(disabled=False)
-    rows.sort(key=lambda p: (order.get(p.category, 99), p.enum_name))
+    rows = (
+        await CTPPrize.all()
+        if include_disabled
+        else await CTPPrize.filter(disabled=False)
+    )
+    rows.sort(key=lambda p: (p.category, p.enum_name))
     return rows
+
+
+async def resolve_targets(
+    category_enum: str,
+) -> tuple[list[CTPPrize], Optional[str]]:
+    """Resolve the ``<category.enum>`` argument used by the bulk-capable
+    admin commands (``~ctp prize disable`` / ``enable`` / ``remove`` /
+    ``disclaim``) into the list of prizes to operate on.
+
+    * ``Access.CHIEFS_CORNER`` → ``([single_prize], None)`` if it exists,
+      else ``([], "No prize ...")``.
+    * ``Access.*`` → every prize in the (canonicalised) category,
+      regardless of ``disabled``. Empty category returns an error so the
+      caller can tell the admin nothing happened.
+    * Anything else (no dot, unknown category, ``*`` enum on bad
+      category, etc.) returns ``([], "Could not parse ...")``.
+    """
+    parsed = parse_dotted_key(category_enum)
+    if parsed is None:
+        return (
+            [],
+            f"Could not parse `{category_enum}` — expected `CATEGORY.ENUM` or `CATEGORY.*`.",
+        )
+    cat, enum_name = parsed
+    if enum_name == "*":
+        rows = await CTPPrize.filter(category=cat).order_by("enum_name")
+        if not rows:
+            return [], f"No prizes in `{cat}` to operate on."
+        return list(rows), None
+    prize = await find(cat, enum_name)
+    if prize is None:
+        return [], f"No prize `{cat}.{enum_name}`."
+    return [prize], None
 
 
 async def create(

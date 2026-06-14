@@ -195,17 +195,29 @@ def build_prize_info_embeds(
     for p in prizes:
         by_category.setdefault(p.category, []).append(p)
 
-    populated = [c for c in ("Access", "Change", "Service", "Gift") if by_category.get(c)]
+    # Categories are entirely admin-defined; render pages in
+    # alphabetical order, then append the Glints page (the only
+    # system-side rendering hook).
+    populated = sorted(by_category)
     pages = len(populated) + 1  # +1 for the always-present Glints page
 
     embeds: list[discord.Embed] = []
     for page_idx, category in enumerate(populated, start=1):
         embed = discord.Embed(title=f"CTP Prizes — {category}")
         for p in by_category[category]:
-            value = f"`{p.cost}` points · {format_duration(p.duration_seconds)}"
+            # Disabled rows are only surfaced when build_prize_info_embeds was
+            # fed the admin view (~ctp prize info as admin). Mark them so
+            # admins can tell at a glance which rows the user-facing list omits.
+            if p.disabled:
+                value = f"~~`{p.cost}` points · {format_duration(p.duration_seconds)}~~"
+            else:
+                value = f"`{p.cost}` points · {format_duration(p.duration_seconds)}"
             if p.disclaimer:
                 value += f"\n*{p.disclaimer}*"
-            embed.add_field(name=f"{p.display}  (`{p.enum_name}`)", value=value, inline=False)
+            name = f"{p.display}  (`{p.enum_name}`)"
+            if p.disabled:
+                name = f"{name} — (disabled)"
+            embed.add_field(name=name, value=value, inline=False)
         embed.set_footer(text=f"Page {page_idx}/{pages}")
         if page_idx == 1 and artwork_url:
             embed.set_image(url=artwork_url)

@@ -84,9 +84,22 @@ Dispatched by [`boards.apply_board_command`](../cogs/rewards/ctp/lib/boards.py).
 
 `~ctp prize info` renders one embed per category. When `CurrConfig.CTP_PRIZE_ARTWORK_URL` is set, the **first** embed only gets `set_image(url=...)` so paginating to a later page doesn't re-show the artwork. Set / clear via the `/config` admin command (persisted in `BotConfigOverride`).
 
+## Admin-only surfaces folded into existing commands
+
+- **`~ctp prize info` is tier-aware.** Admins additionally see disabled rows (marked `(disabled)` with strikethrough on the cost/duration line); non-admins see the same filtered view as before. There is no separate `~ctp prize list` — the same command renders the admin view via `prizes_svc.all_visible(include_disabled=True)`.
+- **`~ctp board list`** (admin) enumerates every `CTPBoard` row. The parent `~ctp board ENUM <args>` overload still routes to `boards.apply_board_command` via the group's `invoke_without_command=True`. Both the bare body and the `list` subcommand carry their own `@is_admin()` — with `invoke_without_command=True`, the parent's check isn't run on subcommand dispatch.
+
+## Admin-defined categories
+
+Prize categories are entirely admin-defined — there is no system-side allowlist. `~ctp prize add <Category> <ENUM> <cost> <duration> <display>` titlecases the category arg via `prizes.normalize_category` and stores the row verbatim; subsequent commands resolve the category case-insensitively. `~ctp prize info` pages render alphabetically by category, with the always-on "Glints" page appended at the end (the only system-side rendering hook). The seed script just (re)creates a specific set of admin-defined categories; promoting a category to "always present after reseat" means adding rows under it to the seed `ROWS` list.
+
+## Bulk `<Category>.*` form
+
+`~ctp prize disable`, `enable`, `remove`, and `disclaim` accept either the original `<Category>.<ENUM>` arg or the wildcard `<Category>.*`, which targets every prize in that (canonicalised) category — including disabled ones for `enable`/`remove`/`disclaim`. Resolution lives in `prizes_svc.resolve_targets`; the cog handlers share `_summarise_bulk` for the reply (single-target keeps the pre-wildcard one-line format; multi-target names the count and lists the enums). `prize edit` is intentionally NOT wildcard-capable — its `<field> <value>` syntax doesn't make sense applied to a heterogeneous set.
+
 ## Seeding
 
-Boards are populated in-place by admins via `~ctp board <ENUM> <num> <role_id>` after deploy. The prize catalog ships with a one-off seed: [seed-dazebot-ctp-catalog.sh](../../vets-deploy/scripts/one-off/seed-dazebot-ctp-catalog.sh). The seed is merge-safe — re-running picks up newly added rows without touching existing ones (admins still use `~ctp prize edit` for changes).
+Boards are populated in-place by admins via `~ctp board <ENUM> <num> <role_id>` after deploy. `~ctp board list` (admin) enumerates them. The prize catalog has a reseat-from-source script: [seed-dazebot-ctp-catalog.sh](../../vets-deploy/scripts/one-off/seed-dazebot-ctp-catalog.sh). The script is **destructive** — it backs the full DB up to `/opt/docker/backups/db-dumps/dazebot/` (online-backup API, same shape as `manage update`'s pre-flight dump), then `DELETE`s `ctp_prizes` and reinserts the seed list verbatim. Use it to recover from drift; for incremental tweaks use `~ctp prize add` / `edit` instead. Set `NONINTERACTIVE=1` to skip the confirm prompt.
 
 ## Top-glinted export — `GET /api/internal/glinted`
 

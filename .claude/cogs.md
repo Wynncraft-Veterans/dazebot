@@ -21,7 +21,6 @@ Auto-discovery: `bot.py:_load_cogs` walks every `.py` file under `cogs/` (recurs
 |---|---|
 | [`admin.py`](../cogs/moderation/admin.py) | `/admin sync\|reload\|load\|unload`, `/say`, `/embed`, `/shouts set`, and the full `/link` group (set, remove, check, alt, request, requests, approve, code, info). |
 | [`staff_actions.py`](../cogs/moderation/staff_actions.py) | `/warnings` read-only display for caution/warning/eject records; admin override commands. Writes come from the in-game API (`/api/internal/staff-action`). |
-| [`anni.py`](../cogs/moderation/anni.py) | Anniversary listener. |
 
 ## `cogs/activity/` — Wynncraft polling
 

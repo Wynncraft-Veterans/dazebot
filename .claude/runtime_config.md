@@ -10,7 +10,7 @@ Only **flat scalar attributes** on the top-level `Config` class (`config.py`). S
 - value is `int`, `float`, `bool`, `str`, or `timedelta`
 
 Things that are deliberately NOT overridable:
-- Nested config classes (`VanityRolesConfig`, `AnniConfig`, `DocumentationConfig`)
+- Nested config classes (`VanityRolesConfig`, `DocumentationConfig`)
 - `@property` accessors
 - `list[...]`, `dict[...]`, or any structured type
 

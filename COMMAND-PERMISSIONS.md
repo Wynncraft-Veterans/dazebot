@@ -138,7 +138,7 @@ Special, non-hierarchical:
 ## Background / listener-only cogs (no slash surface)
 
 * `cogs/membership/join.py` — janitor tasks: `clear_old_requests`, `waitlist_cleanup`.
-* `cogs/moderation/anni.py`, `cogs/membership/vanity_roles.py`, `cogs/integrations/api_server.py` — listeners only.
+* `cogs/membership/vanity_roles.py`, `cogs/integrations/api_server.py` — listeners only.
 
 ## Notes & migration log (phase 7)
 

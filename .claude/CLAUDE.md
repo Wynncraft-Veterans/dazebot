@@ -56,7 +56,6 @@ dazebot/                 (repo root)
   cogs/
     activity.py        Periodic guild check + role enforcement
     admin.py           Owner/admin commands
-    anni.py            Annihilation timer
     api.py             (empty stub — joindate merged into /info)
     api_server.py      Mounts the FastAPI app inside the bot's asyncio loop on $DAZEBOT_PORT
     documentation.py   /help-style commands

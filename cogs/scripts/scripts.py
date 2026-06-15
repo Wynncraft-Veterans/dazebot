@@ -18,7 +18,6 @@ import discord
 from discord.ext import commands
 
 from bot import Bot
-from config import CurrConfig
 from lib.auth import is_operator
 
 logger = logging.getLogger("dazebot.cogs.scripts.scripts")
@@ -187,13 +186,19 @@ class Scripts(commands.Cog):
         }[result]
         await ctx.reply(note, ephemeral=True)
 
+    # Stamp / anni-announcement channel — magbot posts the
+    # @Prelude to Annihilation alerts here. Hardcoded because the
+    # AnniConfig wrapper was removed when the role-ping cog moved to
+    # fishbot; this operator dump script is the last consumer.
+    _ANNI_DUMP_CHANNEL_ID = 1339393368672702567
+
     @script_group.command(
         name="extract_anni_timestamps",
         description="(Operator) Dump all anni-channel messages from the last 3 years as gzipped JSONL attachments for offline debug.",
     )
     @is_operator()
     async def script_extract_anni_timestamps(self, ctx: commands.Context):
-        """Dump raw history of ``AnniConfig.CHANNEL_ID`` to JSONL.gz.
+        """Dump raw history of the anni-announcement channel to JSONL.gz.
 
         Iterates ``channel.history(limit=None, after=utcnow-3y,
         oldest_first=True)`` and writes one JSON object per message with
@@ -223,10 +228,10 @@ class Scripts(commands.Cog):
             await ctx.reply("❌ Must be run in a guild context.")
             return
 
-        channel = ctx.guild.get_channel(CurrConfig.AnniConfig.CHANNEL_ID)
+        channel = ctx.guild.get_channel(self._ANNI_DUMP_CHANNEL_ID)
         if not isinstance(channel, discord.TextChannel):
             await ctx.reply(
-                f"❌ AnniConfig.CHANNEL_ID ({CurrConfig.AnniConfig.CHANNEL_ID}) "
+                f"❌ Anni dump channel ({self._ANNI_DUMP_CHANNEL_ID}) "
                 "is not a readable text channel in this guild."
             )
             return

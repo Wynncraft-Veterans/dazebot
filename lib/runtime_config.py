@@ -7,8 +7,8 @@ into the live ``Config`` object on bot startup. Updates flow through
 persist the change.
 
 Only flat scalar attributes on the top-level ``Config`` class are exposed; the
-nested ``VanityRolesConfig`` / ``AnniConfig`` / ``DocumentationConfig`` classes
-and ``@property`` accessors are intentionally skipped to avoid surprises.
+nested ``VanityRolesConfig`` / ``DocumentationConfig`` classes and
+``@property`` accessors are intentionally skipped to avoid surprises.
 """
 
 from __future__ import annotations

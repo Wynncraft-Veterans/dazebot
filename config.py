@@ -139,12 +139,6 @@ class Config:
         887089019190640640  # @wenweia
     }
 
-    class AnniConfig:
-        ROLE_ID = 1457366058951249970
-        CHANNEL_ID = 1339393368672702567
-        WEBHOOK_ID = 1396669909077070007
-        TRIGGER = "@Prelude to Annihilation"
-
     class DocumentationConfig:
         ALLOWED_CHANNELS = {1313786489112494080}
 
@@ -191,8 +185,6 @@ class DevConfig(Config):
     ADMINS = {
         174134334628823041  # @sjourd
     }
-
-    class AnniConfig(Config.AnniConfig): ...
 
     class DocumentationConfig(Config.DocumentationConfig): ...
 

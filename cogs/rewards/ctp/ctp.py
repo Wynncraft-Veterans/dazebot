@@ -20,6 +20,7 @@ import discord
 from discord.ext import commands
 
 from bot import Bot
+from cogs.rewards.ctp import retroactive as retroactive_form
 from cogs.rewards.ctp.lib import balance as balance_svc
 from cogs.rewards.ctp.lib import boards as boards_svc
 from cogs.rewards.ctp.lib import formatting
@@ -125,7 +126,8 @@ class CTPCog(commands.Cog):
                 "- `~ctp status` — your CTP balance & glint rank\n"
                 "- `~ctp history` — your full CTP history\n"
                 "- `~ctp gift <user> <points>` — gift points to another user\n"
-                "- `~ctp prize info` — browse the prize catalog"
+                "- `~ctp prize info` — browse the prize catalog\n"
+                "- `~ctp retroactive` — submit work you did before the reward program existed"
             )
         if tier >= Tier.GUILD:
             sections.append(
@@ -236,6 +238,14 @@ class CTPCog(commands.Cog):
             view=None,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    @ctp_group.command(
+        name="retroactive",
+        description="(Registered) Submit work you did before the CTP reward program existed.",
+    )
+    @is_registered()
+    async def ctp_retroactive(self, ctx: commands.Context) -> None:
+        await retroactive_form.handle_retroactive(ctx)
 
     # --- Guild tier (glints) ------------------------------------------
 

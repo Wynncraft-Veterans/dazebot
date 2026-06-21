@@ -47,7 +47,13 @@ from typing import Iterable, Optional
 import discord
 from discord.ext import commands
 
-from cogs.events.returns import Tier, register, register_manage, register_tick
+from cogs.events.returns import (
+    Tier,
+    register,
+    register_manage,
+    register_startup,
+    register_tick,
+)
 from cogs.events.returns._common import is_persist_context, send_feedback
 from config import CurrConfig
 from lib.mc.linking import dm_or_log
@@ -990,15 +996,16 @@ async def _handle_draw_lot(interaction: discord.Interaction) -> None:
         f"🎲 You drew **{roll}** for `{dash_cult}`.", ephemeral=True,
     )
 
-    # If all four are drawn now, advance to active.
+    # If all four are drawn now, advance to active (which also refreshes).
+    # Otherwise refresh ALL dashboards — the lots table on every cult's
+    # dashboard reflects all four cults' state, not just the clicker's.
     state = await _load_state()  # re-read with the new value
     assert state is not None
     n_drawn, _ = _lots_status(state)
     if n_drawn == 4:
         await _transition_to_active(interaction.client, state)
     else:
-        # Just re-render this cult's dashboard so the new lot shows.
-        await _refresh_dashboard(interaction.client, dash_cult)
+        await _refresh_all_dashboards(interaction.client)
 
 
 # ---------------------------------------------------------------------------
@@ -1231,6 +1238,20 @@ async def _advance_one_turn(bot: discord.Client, state: Return3GameState) -> Non
 # ---------------------------------------------------------------------------
 # Tick — registered to the shared 60s loop in return_cmd
 # ---------------------------------------------------------------------------
+
+
+@register_startup(WEEK)
+async def startup(bot: discord.Client) -> None:
+    """Re-render every dashboard on bot start.
+
+    Without this, a restart that happened between (say) a lot-draw and
+    the next state change would leave the pinned posts stuck on the
+    pre-draw render — Discord doesn't re-edit messages on its own. Cheap
+    enough (4 edits) to do unconditionally.
+    """
+    if await _load_state() is None:
+        return
+    await _refresh_all_dashboards(bot)
 
 
 @register_tick(WEEK)
@@ -1598,7 +1619,7 @@ async def _manage_force_lot(ctx: commands.Context, args: list[str]) -> None:
             persist=persist,
         )
     else:
-        await _refresh_dashboard(ctx.bot, cult)
+        await _refresh_all_dashboards(ctx.bot)
         await send_feedback(
             ctx, f"Set `{cult}`={val}. {n_drawn}/4 drawn.", persist=persist,
         )

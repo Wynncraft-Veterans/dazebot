@@ -88,12 +88,22 @@ class ManageSubcommand:
 REGISTRY: dict[int, UserHandler] = {}
 MANAGE_REGISTRY: dict[int, dict[str, ManageSubcommand]] = {}
 
+
+
 # A week may register an async ``tick(bot)`` to be invoked on a shared
 # 60-second cadence by the Returns cog (see :mod:`cogs.events.return_cmd`).
 # Handlers self-gate on time (e.g. "did the 24h turn deadline elapse?") so
 # the dispatcher stays cadence-agnostic.
 TickCallback = Callable[[discord.Client], Awaitable[None]]
 TICK_REGISTRY: dict[int, TickCallback] = {}
+
+# A week may register an async ``startup(bot)`` to be invoked once at bot
+# start, after the gateway is ready. Used to re-sync any DB-backed UI
+# (e.g. return_3 dashboards) so it reflects current state even after a
+# restart that happened mid-event. Runs alongside the existing per-week
+# backfills in :meth:`cogs.events.return_cmd.Returns._run_startup_backfill`.
+StartupCallback = Callable[[discord.Client], Awaitable[None]]
+STARTUP_REGISTRY: dict[int, StartupCallback] = {}
 
 
 def register(
@@ -160,6 +170,24 @@ def register_tick(week: int):
     return decorator
 
 
+def register_startup(week: int):
+    """Decorator: register an async ``startup(bot)`` to run once at boot.
+
+    Invoked by :meth:`cogs.events.return_cmd.Returns._run_startup_backfill`
+    after the gateway is ready. Use this to re-sync any DB-backed UI a
+    week owns (pinned dashboards, role mirrors, etc.) so its visible state
+    reflects the DB even if the bot was offline through several changes.
+    """
+
+    def decorator(fn: StartupCallback) -> StartupCallback:
+        if week in STARTUP_REGISTRY:
+            raise RuntimeError(f"Duplicate startup handler for week {week}")
+        STARTUP_REGISTRY[week] = fn
+        return fn
+
+    return decorator
+
+
 def _autoload_weeks() -> None:
     """Import every ``week_*.py`` sibling so their decorator calls run."""
     for mod in pkgutil.iter_modules(__path__):
@@ -169,9 +197,11 @@ def _autoload_weeks() -> None:
 
 _autoload_weeks()
 logger.info(
-    "Loaded %d /return user handlers: %s; manage subcommands for weeks: %s; ticks for weeks: %s",
+    "Loaded %d /return user handlers: %s; manage subcommands for weeks: %s; "
+    "ticks for weeks: %s; startups for weeks: %s",
     len(REGISTRY),
     sorted(REGISTRY),
     {w: sorted(subs) for w, subs in MANAGE_REGISTRY.items()},
     sorted(TICK_REGISTRY),
+    sorted(STARTUP_REGISTRY),
 )

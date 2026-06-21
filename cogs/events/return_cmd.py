@@ -19,7 +19,7 @@ import logging
 from discord.ext import commands, tasks
 
 from bot import Bot
-from cogs.events.returns import REGISTRY, TICK_REGISTRY
+from cogs.events.returns import REGISTRY, STARTUP_REGISTRY, TICK_REGISTRY
 from cogs.events.returns._common import tier_allows
 from cogs.events.returns.week_0 import (
     backfill_cult_threads,
@@ -88,6 +88,13 @@ class Returns(commands.Cog):
             await _sync_week_2_thread_role(self.bot)
         except Exception:
             logger.exception("week_2 thread/role sync failed")
+        # Per-week startup hooks (e.g. return_3 dashboard re-render so
+        # restart doesn't leave the pinned posts stale).
+        for week, fn in STARTUP_REGISTRY.items():
+            try:
+                await fn(self.bot)
+            except Exception:
+                logger.exception("return week=%s startup hook failed", week)
 
     @commands.hybrid_command(name="return")
     async def return_cmd(

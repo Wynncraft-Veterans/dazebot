@@ -32,6 +32,7 @@ from lib.mc.resolve import refresh_mc_guild
 from lib.mc.wynn_api.errors import WynnApiError
 from lib.role_state import RoleState, ensure_linked_baseline, state_of
 from lib.staff import staff_actions
+from cogs.activity.activity import currently_online_returners_mc_ids
 from cogs.rewards.ctp.lib import glints as glints_svc
 from cogs.rewards.donations.lib import svc as donations_svc
 from config import CurrConfig
@@ -663,21 +664,32 @@ def create_app(bot: Bot) -> FastAPI:
     ):
         """Return the 8-slot "currently glinted" list for temporary-server.
 
-        Slots 1-6 are filled from the top 6 entries of
+        Slots 1-5 are filled from the top 5 entries of
         ``glints.leaderboard(bot)`` (already filtered to MEMBER /
         WAITLISTED / HONOURARY by ``is_eligible_member``).
+
+        Slot 6 is the top cumulative donation recipient among Returners
+        observed online in the last ``ONLINE_RECENCY_SECONDS`` (180s),
+        deduped against the mc_ids already occupying slots 1-5 and 7-8.
+        Unique to this slot: dedup/ineligibility *falls through* to the
+        next-best candidate rather than yielding null — the intent is
+        "recognise the top historical donor who's around right now",
+        so a conflict should keep searching, not waste the slot.
+        ``null`` only when no eligible online donor exists at all.
 
         Slots 7-8 are filled from the two most-recent distinct recipients
         with a qualifying donation milestone (``value >= 5%`` of their
         cumulative-received total at the time of that donation). Subject
         to the same MEMBER / WAITLISTED / HONOURARY eligibility filter as
-        slots 1-6 — an ineligible/unlinked recipient yields ``null``
+        slots 1-5 — an ineligible/unlinked recipient yields ``null``
         rather than promoting a lower-ranked donor.
 
-        Slot positions are positional: if any slot can't be filled
-        (no linked MC, ineligible role, fewer than 6 CTP glinters or
-        fewer than 2 milestone donors), that slot is ``null`` rather
-        than promoting another candidate into the gap.
+        Slot positions are positional: if a slot can't be filled (no
+        linked MC, ineligible role, fewer than 5 CTP glinters, fewer
+        than 2 milestone donors, or — for slot 6 only — no eligible
+        online donor), that slot is ``null``. Slot 6 is the sole
+        exception to "no promotion": it walks the online-donor ranking
+        until it finds an eligible non-duplicate.
 
         Response::
 
@@ -695,9 +707,17 @@ def create_app(bot: Bot) -> FastAPI:
         if x_introspect_secret != expected:
             raise HTTPException(status_code=401, detail="unauthorized")
 
+        # Pre-fetch slot 7-8 candidates up front so slot 6 can dedup
+        # against them. Reusing the list also avoids a second DB call
+        # when we fill slots 7-8 below.
         glinted_members, _standby = await glints_svc.leaderboard(bot)
+        milestone_recipients = await donations_svc.donation_milestone_recipients(limit=2)
+        guild = bot.get_guild(CurrConfig.GUILD)
+
+        # Slots 1-5: top 5 CTP glinters. Track filled mc_ids for slot-6 dedup.
         slots: list[dict | None] = []
-        for member, _total in glinted_members[:6]:
+        used_mc_ids: set = set()
+        for member, _total in glinted_members[:5]:
             disc = (
                 await DiscordAccount.filter(disc_uuid=str(member.id))
                 .select_related("minecraft_account")
@@ -708,16 +728,37 @@ def create_app(bot: Bot) -> FastAPI:
                 slots.append(None)
                 continue
             slots.append({"mc_uuid": mc.uuid, "mc_username": mc.mc_username})
-        # Pad slots 1-6 to exactly 6 entries before appending the donation
-        # milestone slots, so they always occupy positions 7-8.
-        while len(slots) < 6:
+            used_mc_ids.add(mc.id)
+        while len(slots) < 5:
             slots.append(None)
 
+        # Slot 6: top cumulative donor among currently-online Returners,
+        # de-duped against slots 1-5 and the about-to-be-filled 7-8.
+        # Unlike slots 7-8, this slot *falls through* on dedup or
+        # ineligibility — see endpoint docstring.
+        used_mc_ids |= {mc.id for mc in milestone_recipients}
+        online_mc_ids = await currently_online_returners_mc_ids()
+        ranked_online = await donations_svc.leaderboard_totals_for_mc_ids(online_mc_ids)
+        slot6: dict | None = None
+        for mc, _total in ranked_online:
+            if mc.id in used_mc_ids:
+                continue
+            disc = await DiscordAccount.filter(minecraft_account_id=mc.id).first()
+            member = None
+            if disc is not None and guild is not None:
+                try:
+                    member = guild.get_member(int(disc.disc_uuid))
+                except (TypeError, ValueError):
+                    member = None
+            if member is None or not glints_svc.is_eligible_member(member):
+                continue
+            slot6 = {"mc_uuid": mc.uuid, "mc_username": mc.mc_username}
+            break
+        slots.append(slot6)
+
         # Slots 7-8: two most recent distinct donation-milestone
-        # recipients, same eligibility filter as 1-6.
-        guild = bot.get_guild(CurrConfig.GUILD)
-        donation_recipients = await donations_svc.donation_milestone_recipients(limit=2)
-        for mc in donation_recipients:
+        # recipients, same eligibility filter as 1-5.
+        for mc in milestone_recipients:
             disc = (
                 await DiscordAccount.filter(minecraft_account_id=mc.id).first()
                 if guild is not None else None

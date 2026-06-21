@@ -84,6 +84,31 @@ async def leaderboard_totals() -> list[tuple[MinecraftAccount, int]]:
     return sorted(totals.values(), key=lambda t: t[1], reverse=True)
 
 
+async def leaderboard_totals_for_mc_ids(
+    mc_ids,
+) -> list[tuple[MinecraftAccount, int]]:
+    """Same shape as :func:`leaderboard_totals`, restricted to recipients
+    whose ``MinecraftAccount.id`` is in ``mc_ids``.
+
+    Empty ``mc_ids`` returns ``[]`` rather than degenerating into "all
+    recipients" — the caller (``/api/internal/glinted`` slot 6) is asking
+    "of these online accounts, who has received the most", and an empty
+    online set means "nobody is online", not "show everyone".
+    """
+    if not mc_ids:
+        return []
+    donations = await Donation.filter(
+        recipient_mc_id__in=list(mc_ids)
+    ).select_related("recipient_mc")
+    totals: dict = {}
+    for d in donations:
+        mc = d.recipient_mc
+        existing = totals.get(mc.id)
+        new_total = (existing[1] if existing else 0) + d.value_emeralds
+        totals[mc.id] = (mc, new_total)
+    return sorted(totals.values(), key=lambda t: t[1], reverse=True)
+
+
 async def highest_donations(limit: int = DEFAULT_HIGHEST_LIMIT) -> list[Donation]:
     """Single donations ordered by value desc; recipients may repeat."""
     return list(

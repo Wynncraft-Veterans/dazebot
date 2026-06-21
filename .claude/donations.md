@@ -74,7 +74,7 @@ value_emeralds * 20 >= cumulative_received_total_for_recipient (including this d
 
 — i.e. the donation is at least 5% of the recipient's cumulative-received total at the time it was recorded. The first donation a recipient ever gets always qualifies (100% of cumulative).
 
-The two most recent *distinct* recipients with a qualifying milestone fill slots 7-8 of `GET /api/internal/glinted` (slot 7 = most recent, slot 8 = second most recent). Subject to the same MEMBER / WAITLISTED / HONOURARY eligibility filter as slots 1-6: an ineligible / unlinked recipient yields `null` rather than promoting a lower-ranked donor. See [ctp.md](ctp.md) for the broader endpoint docstring.
+The two most recent *distinct* recipients with a qualifying milestone fill slots 7-8 of `GET /api/internal/glinted` (slot 7 = most recent, slot 8 = second most recent). Subject to the same MEMBER / WAITLISTED / HONOURARY eligibility filter as slots 1-5: an ineligible / unlinked recipient yields `null` rather than promoting a lower-ranked donor. See [ctp.md](ctp.md) for the broader endpoint docstring (slot 6 is a separate online-donor slot fed from `leaderboard_totals_for_mc_ids`, also in [svc.py](../cogs/rewards/donations/lib/svc.py)).
 
 **Computed live** by [`donation_milestone_recipients`](../cogs/rewards/donations/lib/svc.py): walks all donations chronologically, tracks per-recipient cumulative, marks each donation's qualification, then ranks recipients by their latest qualifying timestamp. No separate "milestone events" table — donations are editable / removable, so a derived ledger would need invalidation. At expected volume (tens to low hundreds per week), the full walk on each endpoint hit is cheap.
 
@@ -84,4 +84,5 @@ Edits and removes propagate naturally: if an admin lowers a qualifying donation'
 
 - **Parser**: `uv run pytest tests/test_emerald.py -v` — covers every example from the spec plus parse-error edge cases.
 - **Milestone math**: `uv run pytest tests/test_donation_milestone.py -v` — covers single donation qualifies, small follow-up doesn't, big later donation requalifies, remove reshuffles, `limit=2` deduplicates.
+- **Filtered-totals math** (slot 6 source): `uv run pytest tests/test_donations_filtered_totals.py -v` — covers empty mc_ids returns `[]` (not all), single-recipient sum, desc ordering, non-matching mc_ids excluded.
 - **End-to-end**: in channel `1336152747644551248`, run `~donations record <mc> 5436584 hello` (with an image), `~donations recent`, `~donations info 1`, `~donations edit 1 value 1stx`, `~donations edit 1 remove`. Hit `GET /api/internal/glinted` to confirm slots 7-8 populate after a qualifying donation.

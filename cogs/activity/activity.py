@@ -32,6 +32,35 @@ from tortoise.expressions import Q
 ROLES_ALLOWED_TO_SHOUT = [1402295013169172500, 1436108975132119221, 1436109140195020892]
 
 
+# How fresh ``MinecraftAccount.last_online`` must be to count as "currently
+# online" for the glinted-slot-6 query in api/main.py. The check_guild
+# ticker below runs every 2 min (``@tasks.loop(minutes=2)``) and bumps
+# ``last_online`` to "now" for every member the Wynncraft /v3/guild
+# response reports as ``online=True``. A window tighter than 120s would
+# intermittently miss online members whose row was written by the most
+# recent successful tick; 180s = one tick + 60s of slack for tick duration
+# and server_watcher's additional last_online bumps for privacy-hidden
+# players.
+ONLINE_RECENCY_SECONDS = 180
+
+
+async def currently_online_returners_mc_ids() -> set:
+    """``MinecraftAccount.id``s for Returners observed online within the
+    last ``ONLINE_RECENCY_SECONDS``.
+
+    Used by ``/api/internal/glinted`` slot 6 to pick the top cumulative
+    donation recipient among online members. Privacy-opted-out members
+    whose ``last_online`` is the ``UNKNOWN_LAST_ONLINE`` sentinel won't
+    appear here — accepted limitation.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=ONLINE_RECENCY_SECONDS)
+    ids = await MinecraftAccount.filter(
+        guild="Returners",
+        last_online__gte=cutoff,
+    ).values_list("id", flat=True)
+    return set(ids)
+
+
 # honestly, such a small impl it doesnt need to be in wynn_api folder
 # also because it doesnt have any pydantic classes wrapped around the result
 async def get_server_players(server: str):

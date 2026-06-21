@@ -80,8 +80,9 @@ class Scripts(commands.Cog):
             return
 
         new_content = (
-            "# IN-GAME VETS GUILD MEMBERS!\n"
-            "## Use this to unlock guild-specific channels!"
+            "# Link your Wynn!\n"
+            "## This will unlock some features and channels, especially "
+            "if you are an in-game vets guild member!"
         )
         try:
             await msg.edit(content=new_content, embed=None, view=FirstInstallView())

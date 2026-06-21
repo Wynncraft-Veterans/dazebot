@@ -1451,8 +1451,11 @@ async def _manage_start(ctx: commands.Context, args: list[str]) -> None:
 
 
 @register_manage(
-    WEEK, "status", tier=Tier.STAFF,
-    help="Show phase, current turn, tile counts, dominance streak, subscriber count.",
+    WEEK, "status", tier=Tier.ADMIN,
+    help="Admin omniscient view: phase, turn, tile counts, dominance "
+         "streak, subscriber count, AND a fog-of-war-free copy of the "
+         "full map + every tile's army count. Gated to ADMIN because the "
+         "no-fog map is intel the playing cults aren't allowed to see.",
 )
 async def _manage_status(ctx: commands.Context, args: list[str]) -> None:
     persist = is_persist_context(ctx)
@@ -1461,11 +1464,12 @@ async def _manage_status(ctx: commands.Context, args: list[str]) -> None:
         await send_feedback(ctx, "Return 3 isn't started.", persist=persist)
         return
     tiles = await _load_tiles()
+    tiles_by_id = _tile_index(tiles)
     counts = _tile_counts(tiles)
     sub_count = await Return3Subscription.all().count()
 
     lines = [
-        f"**Return 3 — phase: `{state.phase}`**",
+        f"**Return 3 — phase: `{state.phase}`** (admin view, fog-of-war disabled)",
         f"Started: <t:{int(state.started_at.timestamp())}:f>",
     ]
     if state.phase == "drafting":
@@ -1495,6 +1499,20 @@ async def _manage_status(ctx: commands.Context, args: list[str]) -> None:
         f"`{c}`={counts.get(c, 0)}" for c in ALL_CULTS
     ) + f", neutral={TILE_COUNT - sum(counts.values())}")
     lines.append(f"Alert subscribers: {sub_count}")
+
+    # Full map + armies, every tile visible.
+    all_visible = set(range(TILE_COUNT))
+    lines.append("")
+    lines.append("**Map (no fog):**")
+    lines.append(_render_grid_emoji(tiles_by_id, all_visible))
+    lines.append("**Armies:**")
+    lines.append(f"```\n{_render_armies(tiles_by_id, all_visible)}\n```")
+
+    if state.phase == "active":
+        tallies = await _render_vote_tallies(state)
+        lines.append("**Current votes (active cult):**")
+        lines.extend(tallies)
+
     await send_feedback(ctx, "\n".join(lines), persist=persist)
 
 

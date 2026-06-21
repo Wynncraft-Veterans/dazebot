@@ -612,10 +612,13 @@ async def _render_dashboard_embed(
     embed.add_field(name="Map (fog-of-war)", value=grid, inline=False)
     embed.add_field(name="Armies", value=f"```\n{armies}\n```", inline=False)
 
-    if state.phase == "active":
+    # Vote tallies are intel — only the active cult sees its own votes.
+    # Showing them on opponent dashboards leaks the planned move and
+    # defeats the fog-of-war.
+    if state.phase == "active" and _current_cult(state) == cult:
         tallies = await _render_vote_tallies(state)
         embed.add_field(
-            name="Current votes (active cult only)",
+            name="Current votes",
             value="\n".join(tallies),
             inline=False,
         )

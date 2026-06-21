@@ -83,6 +83,13 @@ class Bot(commands.Bot):
             self.add_view(RecruitmentButtonView())
         except Exception as e:
             logger.error(f"Failed to register RecruitmentButtonView: {e}")
+        try:
+            from cogs.events.returns.week_3 import Return3ActionView, Return3DraftView
+
+            self.add_view(Return3ActionView())
+            self.add_view(Return3DraftView())
+        except Exception as e:
+            logger.error(f"Failed to register Return3 views: {e}")
         await self._load_cogs()
 
     async def _load_cogs(self):

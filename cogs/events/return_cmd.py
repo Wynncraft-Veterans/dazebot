@@ -16,10 +16,10 @@ This cog also bootstraps two startup tasks that need the bot to be ready:
 
 import logging
 
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from bot import Bot
-from cogs.events.returns import REGISTRY
+from cogs.events.returns import REGISTRY, TICK_REGISTRY
 from cogs.events.returns._common import tier_allows
 from cogs.events.returns.week_0 import (
     backfill_cult_threads,
@@ -46,6 +46,31 @@ class Returns(commands.Cog):
         _register_week_2_listeners(self.bot)
         # Threads need the gateway-cached parent channel; wait for ready.
         self.bot.loop.create_task(self._run_startup_backfill())
+        self.returns_tick.start()
+
+    async def cog_unload(self) -> None:
+        self.returns_tick.cancel()
+
+    @tasks.loop(seconds=60)
+    async def returns_tick(self) -> None:
+        """Shared 60s tick dispatcher for every ``@register_tick`` handler.
+
+        Cogs that need to schedule cant live under ``cogs/events/returns/``
+        because :data:`bot.COG_SKIP_DIRS` excludes that subtree. Instead,
+        week modules register a ``tick(bot)`` via
+        :func:`cogs.events.returns.register_tick`; this loop iterates the
+        registry once a minute and isolates failures per-handler. Handlers
+        self-gate on time (e.g. "is the 24h turn deadline up?").
+        """
+        for week, fn in TICK_REGISTRY.items():
+            try:
+                await fn(self.bot)
+            except Exception:
+                logger.exception("return week=%s tick failed", week)
+
+    @returns_tick.before_loop
+    async def _wait_returns_tick(self) -> None:
+        await self.bot.wait_until_ready()
 
     async def _run_startup_backfill(self) -> None:
         await self.bot.wait_until_ready()

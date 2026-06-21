@@ -88,6 +88,13 @@ class ManageSubcommand:
 REGISTRY: dict[int, UserHandler] = {}
 MANAGE_REGISTRY: dict[int, dict[str, ManageSubcommand]] = {}
 
+# A week may register an async ``tick(bot)`` to be invoked on a shared
+# 60-second cadence by the Returns cog (see :mod:`cogs.events.return_cmd`).
+# Handlers self-gate on time (e.g. "did the 24h turn deadline elapse?") so
+# the dispatcher stays cadence-agnostic.
+TickCallback = Callable[[discord.Client], Awaitable[None]]
+TICK_REGISTRY: dict[int, TickCallback] = {}
+
 
 def register(
     week: int,
@@ -135,6 +142,24 @@ def register_manage(
     return decorator
 
 
+def register_tick(week: int):
+    """Decorator: register an async ``tick(bot)`` for the shared 60s loop.
+
+    The :class:`cogs.events.return_cmd.Returns` cog runs every registered
+    tick once per minute and swallows exceptions per-handler. Handlers
+    self-gate on wall-clock time (e.g. "is the 24h turn deadline up?") so
+    the dispatcher doesn't need to know any per-week cadence.
+    """
+
+    def decorator(fn: TickCallback) -> TickCallback:
+        if week in TICK_REGISTRY:
+            raise RuntimeError(f"Duplicate tick handler for week {week}")
+        TICK_REGISTRY[week] = fn
+        return fn
+
+    return decorator
+
+
 def _autoload_weeks() -> None:
     """Import every ``week_*.py`` sibling so their decorator calls run."""
     for mod in pkgutil.iter_modules(__path__):
@@ -144,8 +169,9 @@ def _autoload_weeks() -> None:
 
 _autoload_weeks()
 logger.info(
-    "Loaded %d /return user handlers: %s; manage subcommands for weeks: %s",
+    "Loaded %d /return user handlers: %s; manage subcommands for weeks: %s; ticks for weeks: %s",
     len(REGISTRY),
     sorted(REGISTRY),
     {w: sorted(subs) for w, subs in MANAGE_REGISTRY.items()},
+    sorted(TICK_REGISTRY),
 )

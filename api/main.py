@@ -777,4 +777,47 @@ def create_app(bot: Bot) -> FastAPI:
             slots.append(None)
         return {"slots": slots}
 
+    @app.get("/api/internal/donor_candidates")
+    async def donor_candidates(
+        x_introspect_secret: str | None = Header(default=None),
+    ):
+        """Return the top-20 cumulative donation recipients, filtered to
+        members holding MEMBER / WAITLISTED / HONOURARY, ranked desc by
+        cumulative-donation total.
+
+        Consumed by temporary-server's ``donor_pool_poller``, which proxies
+        to ``GET /v1/outbound/donor_pool`` for vetsmod. vetsmod intersects
+        this list with its real-time tab-list observation to pick the
+        highest-ranked currently-online donor and shimmer them — the slot-6
+        equivalent, but computed client-side at game-tick cadence so the
+        shimmer lights up effectively instantly on login (vs. the
+        ``glinted`` endpoint's worst-case ~5min refresh).
+
+        Response::
+
+            {"donors": [{"mc_uuid": str, "mc_username": str}, ...]}
+
+        Up to 20 entries. No "currently online" filter — that happens in
+        vetsmod. No dedup against CTP slots 1-5 / milestone slots 7-8;
+        set-union on the vetsmod side handles overlap.
+
+        Same auth + fail-closed pattern as ``/api/internal/glinted``.
+        """
+        expected = os.environ.get("DAZEBOT_INTROSPECT_SECRET")
+        if not expected:
+            logger.error(
+                "donor_candidates: DAZEBOT_INTROSPECT_SECRET not set; refusing"
+            )
+            raise HTTPException(status_code=503, detail="donor_candidates disabled")
+        if x_introspect_secret != expected:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+        ranked = await donations_svc.top_eligible_donors(bot, limit=20)
+        return {
+            "donors": [
+                {"mc_uuid": mc.uuid, "mc_username": mc.mc_username}
+                for mc, _total in ranked
+            ]
+        }
+
     return app

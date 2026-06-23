@@ -84,6 +84,47 @@ async def leaderboard_totals() -> list[tuple[MinecraftAccount, int]]:
     return sorted(totals.values(), key=lambda t: t[1], reverse=True)
 
 
+async def top_eligible_donors(
+    bot, limit: int = 20
+) -> list[tuple[MinecraftAccount, int]]:
+    """Top ``limit`` cumulative donation recipients filtered to members
+    currently holding MEMBER / WAITLISTED / HONOURARY in the configured
+    guild, sorted by total desc.
+
+    No "online" filter — the consumer (vetsmod) applies a real-time
+    tab-list filter to pick the highest-ranked currently-online donor
+    and shimmer them. No dedup against CTP slots — set-union on the
+    client side handles overlap.
+
+    Composed from :func:`leaderboard_totals` + the eligibility check
+    used by ``/api/internal/glinted``. ``limit`` is applied **after**
+    the eligibility filter, so the result is always "top-N eligible"
+    rather than "first-N raw, then filter (might end up shorter)".
+    """
+    from cogs.rewards.ctp.lib.glints import is_eligible_member
+    from orm import DiscordAccount
+    from config import CurrConfig
+    guild = bot.get_guild(CurrConfig.GUILD)
+    totals = await leaderboard_totals()
+    out: list[tuple[MinecraftAccount, int]] = []
+    for mc, total in totals:
+        if len(out) >= limit:
+            break
+        if guild is None:
+            continue
+        disc = await DiscordAccount.filter(minecraft_account_id=mc.id).first()
+        if disc is None:
+            continue
+        try:
+            member = guild.get_member(int(disc.disc_uuid))
+        except (TypeError, ValueError):
+            member = None
+        if member is None or not is_eligible_member(member):
+            continue
+        out.append((mc, total))
+    return out
+
+
 async def leaderboard_totals_for_mc_ids(
     mc_ids,
 ) -> list[tuple[MinecraftAccount, int]]:

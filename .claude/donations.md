@@ -85,4 +85,19 @@ Edits and removes propagate naturally: if an admin lowers a qualifying donation'
 - **Parser**: `uv run pytest tests/test_emerald.py -v` — covers every example from the spec plus parse-error edge cases.
 - **Milestone math**: `uv run pytest tests/test_donation_milestone.py -v` — covers single donation qualifies, small follow-up doesn't, big later donation requalifies, remove reshuffles, `limit=2` deduplicates.
 - **Filtered-totals math** (slot 6 source): `uv run pytest tests/test_donations_filtered_totals.py -v` — covers empty mc_ids returns `[]` (not all), single-recipient sum, desc ordering, non-matching mc_ids excluded.
+- **Top eligible donors** (donor-pool endpoint source): `uv run pytest tests/test_top_eligible_donors.py -v` — covers empty donations, limit cap, eligibility filter, ordering, no-guild defensive behaviour.
+
+## Donor-pool endpoint (`GET /api/internal/donor_candidates`)
+
+Sibling to `/api/internal/glinted`, also gated by `DAZEBOT_INTROSPECT_SECRET`. Returns the top-20 cumulative donation recipients filtered to MEMBER / WAITLISTED / HONOURARY, ranked by total desc. No "currently online" filter — that happens in vetsmod against the live tab list (~1s latency vs. the 5-min poll cycle that drives `/api/internal/glinted`).
+
+Shape:
+
+```
+{"donors": [{"mc_uuid": str, "mc_username": str}, ...]}
+```
+
+Computed by [`top_eligible_donors`](../cogs/rewards/donations/lib/svc.py) from the existing `leaderboard_totals()` + `is_eligible_member`. The cap is applied **after** eligibility, so a result of 20 entries is always 20 *eligible* recipients (not "first 20 raw, may shrink after filter"). The vetsmod side stores this as a ranked list and, on every game tick, picks the highest-ranked entry currently in the tab list to shimmer.
+
+This co-exists with the `/api/internal/glinted` slot-6 logic during the rollout; once new vetsmod is widely deployed, slot 6 can be removed server-side.
 - **End-to-end**: in channel `1336152747644551248`, run `~donations record <mc> 5436584 hello` (with an image), `~donations recent`, `~donations info 1`, `~donations edit 1 value 1stx`, `~donations edit 1 remove`. Hit `GET /api/internal/glinted` to confirm slots 7-8 populate after a qualifying donation.

@@ -159,9 +159,39 @@ async def _on_thread_member_remove(tm: discord.ThreadMember) -> None:
         logger.warning("week_2 remove on leave %s failed: %s", tm.id, e)
 
 
+async def _on_role_ping_attempt(message: discord.Message) -> None:
+    """Forward a role-X ping from a role-X member whose ping didn't fire.
+
+    Members of ROLE_ID don't have the mention-everyone permission, so when
+    they include ``<@&ROLE_ID>`` in a message, the tag renders but no
+    notification is delivered. Dazebot has the perm, so it re-posts the
+    mention right after so the rest of the role actually gets pinged.
+    """
+    if message.author.bot or message.guild is None:
+        return
+    role = message.guild.get_role(ROLE_ID)
+    if role is None or role.mentionable:
+        return
+    if role not in message.role_mentions:
+        return
+    member = message.author if isinstance(message.author, discord.Member) else None
+    if member is None or role not in member.roles:
+        return
+    try:
+        await message.channel.send(
+            f"{role.mention} (forwarded from {member.mention})",
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False, users=False, roles=[role]
+            ),
+        )
+    except discord.HTTPException as e:
+        logger.warning("week_2 role re-ping for msg %s failed: %s", message.id, e)
+
+
 def register_listeners(bot: commands.Bot) -> None:
     bot.add_listener(_on_thread_member_join, name="on_thread_member_join")
     bot.add_listener(_on_thread_member_remove, name="on_thread_member_remove")
+    bot.add_listener(_on_role_ping_attempt, name="on_message")
 
 
 # ---------------------------------------------------------------------------

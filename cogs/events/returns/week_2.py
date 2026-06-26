@@ -172,7 +172,10 @@ async def _on_role_ping_attempt(message: discord.Message) -> None:
     role = message.guild.get_role(ROLE_ID)
     if role is None or role.mentionable:
         return
-    if role not in message.role_mentions:
+    # Use raw_role_mentions (parsed from content), not role_mentions: the
+    # latter mirrors the API's mention_roles field, which Discord strips of
+    # any role the author couldn't actually ping — i.e. our exact trigger.
+    if ROLE_ID not in message.raw_role_mentions:
         return
     member = message.author if isinstance(message.author, discord.Member) else None
     if member is None or role not in member.roles:

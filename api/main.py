@@ -35,6 +35,7 @@ from lib.staff import staff_actions
 from cogs.activity.activity import currently_online_returners_mc_ids
 from cogs.rewards.ctp.lib import glints as glints_svc
 from cogs.rewards.donations.lib import svc as donations_svc
+from cogs.rewards.shopping.lib import svc as shopping_svc
 from config import CurrConfig
 from lib.staff.rank_alerts import post_rank_alert
 from lib.staff.verify_keys import _find_member, introspect, resolve_tier
@@ -664,9 +665,18 @@ def create_app(bot: Bot) -> FastAPI:
     ):
         """Return the 8-slot "currently glinted" list for temporary-server.
 
-        Slots 1-5 are filled from the top 5 entries of
+        Slots 1-4 are filled from the top 4 entries of
         ``glints.leaderboard(bot)`` (already filtered to MEMBER /
         WAITLISTED / HONOURARY by ``is_eligible_member``).
+
+        Slot 5 is the top shopping-donation recipient over the rolling
+        30-day window, restricted to currently-online Returners (same
+        180s recency as slot 6). NO FALLTHROUGH — if the top monthly
+        shopping donor is offline, ineligible, or already occupying an
+        earlier / later slot, this position is ``null``. The intent is
+        to spotlight the current top shopping contributor when they're
+        around; a duplicate or offline situation just leaves the slot
+        empty rather than promoting a lower-ranked donor.
 
         Slot 6 is the top cumulative donation recipient among Returners
         observed online in the last ``ONLINE_RECENCY_SECONDS`` (180s),
@@ -685,11 +695,11 @@ def create_app(bot: Bot) -> FastAPI:
         rather than promoting a lower-ranked donor.
 
         Slot positions are positional: if a slot can't be filled (no
-        linked MC, ineligible role, fewer than 5 CTP glinters, fewer
-        than 2 milestone donors, or — for slot 6 only — no eligible
-        online donor), that slot is ``null``. Slot 6 is the sole
-        exception to "no promotion": it walks the online-donor ranking
-        until it finds an eligible non-duplicate.
+        linked MC, ineligible role, fewer than 4 CTP glinters, no
+        eligible online top monthly shopper, no online donor, fewer
+        than 2 milestone donors), that slot is ``null``. Slot 6 is the
+        sole exception to "no promotion": it walks the online-donor
+        ranking until it finds an eligible non-duplicate.
 
         Response::
 
@@ -707,17 +717,19 @@ def create_app(bot: Bot) -> FastAPI:
         if x_introspect_secret != expected:
             raise HTTPException(status_code=401, detail="unauthorized")
 
-        # Pre-fetch slot 7-8 candidates up front so slot 6 can dedup
+        # Pre-fetch slot 7-8 candidates up front so slots 5 and 6 can dedup
         # against them. Reusing the list also avoids a second DB call
-        # when we fill slots 7-8 below.
+        # when we fill slots 7-8 below. Online set is used by BOTH slot 5
+        # (shopping) and slot 6 (donations) — fetch once.
         glinted_members, _standby = await glints_svc.leaderboard(bot)
         milestone_recipients = await donations_svc.donation_milestone_recipients(limit=2)
+        online_mc_ids = await currently_online_returners_mc_ids()
         guild = bot.get_guild(CurrConfig.GUILD)
 
-        # Slots 1-5: top 5 CTP glinters. Track filled mc_ids for slot-6 dedup.
+        # Slots 1-4: top 4 CTP glinters. Track filled mc_ids for slot-5/6 dedup.
         slots: list[dict | None] = []
         used_mc_ids: set = set()
-        for member, _total in glinted_members[:5]:
+        for member, _total in glinted_members[:4]:
             disc = (
                 await DiscordAccount.filter(disc_uuid=str(member.id))
                 .select_related("minecraft_account")
@@ -729,15 +741,32 @@ def create_app(bot: Bot) -> FastAPI:
                 continue
             slots.append({"mc_uuid": mc.uuid, "mc_username": mc.mc_username})
             used_mc_ids.add(mc.id)
-        while len(slots) < 5:
+        while len(slots) < 4:
             slots.append(None)
 
-        # Slot 6: top cumulative donor among currently-online Returners,
-        # de-duped against slots 1-5 and the about-to-be-filled 7-8.
-        # Unlike slots 7-8, this slot *falls through* on dedup or
-        # ineligibility — see endpoint docstring.
+        # Slot 5: top monthly shopping donor among currently-online Returners.
+        # NO FALLTHROUGH — offline / dedup / ineligible => slot = None.
+        # Deduped against slots 1-4 and the about-to-be-filled 7-8.
         used_mc_ids |= {mc.id for mc in milestone_recipients}
-        online_mc_ids = await currently_online_returners_mc_ids()
+        top_shopper = await shopping_svc.top_monthly_shopping_donor_online(online_mc_ids)
+        slot5: dict | None = None
+        if top_shopper is not None and top_shopper.id not in used_mc_ids:
+            disc = await DiscordAccount.filter(minecraft_account_id=top_shopper.id).first()
+            member = None
+            if disc is not None and guild is not None:
+                try:
+                    member = guild.get_member(int(disc.disc_uuid))
+                except (TypeError, ValueError):
+                    member = None
+            if member is not None and glints_svc.is_eligible_member(member):
+                slot5 = {"mc_uuid": top_shopper.uuid, "mc_username": top_shopper.mc_username}
+                used_mc_ids.add(top_shopper.id)
+        slots.append(slot5)
+
+        # Slot 6: top cumulative donor among currently-online Returners,
+        # de-duped against slots 1-5 (via used_mc_ids) and 7-8. Unlike
+        # slots 5, 7, 8, this slot *falls through* on dedup or
+        # ineligibility — see endpoint docstring.
         ranked_online = await donations_svc.leaderboard_totals_for_mc_ids(online_mc_ids)
         slot6: dict | None = None
         for mc, _total in ranked_online:
@@ -757,7 +786,7 @@ def create_app(bot: Bot) -> FastAPI:
         slots.append(slot6)
 
         # Slots 7-8: two most recent distinct donation-milestone
-        # recipients, same eligibility filter as 1-5.
+        # recipients, same eligibility filter as slots 1-4.
         for mc in milestone_recipients:
             disc = (
                 await DiscordAccount.filter(minecraft_account_id=mc.id).first()

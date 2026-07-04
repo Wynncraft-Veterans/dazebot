@@ -804,6 +804,109 @@ class Donation(Model):
         table = "donations"
 
 
+class ShoppingRequest(Model):
+    """A staff-tracked "we want to buy X" wishlist entry.
+
+    Populated by ``~shopping request`` (staff). Closed automatically when
+    ``qty_remaining`` reaches 0 via ``~shopping record`` fulfilments, or
+    manually via ``~shopping close``. ``qty_remaining`` is denormalized
+    on-row for hot-path reads (``~shopping list`` filters
+    ``closed_at IS NULL``); the append-only ``ShoppingRequestAdjustment``
+    log is the authoritative history of manual deltas.
+
+    ``item_name_lower`` is the lookup key for ``~shopping record`` — kept
+    alongside ``item_name`` to preserve display casing (which comes from
+    Wynnventory's canonical form).
+    """
+
+    id = fields.IntField(pk=True)
+    item_name = fields.CharField(max_length=255, index=True)
+    item_name_lower = fields.CharField(max_length=255, index=True)
+    unit_value_emeralds = fields.BigIntField()
+    qty_initial = fields.IntField()
+    qty_remaining = fields.IntField()
+    requester_disc_uuid = fields.CharField(max_length=255)
+    comment: Optional[str] = fields.TextField(null=True)  # type: ignore
+    closed_at: Optional[datetime] = fields.DatetimeField(null=True)  # type: ignore
+    created_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "shopping_requests"
+
+
+class ShoppingRequestAdjustment(Model):
+    """Append-only log of manual qty deltas on a :class:`ShoppingRequest`.
+
+    Every ``~shopping adjust`` and ``~shopping close`` inserts one row;
+    nothing ever mutates or deletes them. The parent request's
+    ``qty_remaining`` is bumped in the same transaction so hot reads stay
+    a single-row lookup, but the true history is here.
+
+    ``delta_qty`` is signed: ``+3`` bumps the wanted qty up, ``-2`` down.
+    """
+
+    id = fields.IntField(pk=True)
+    request: fields.ForeignKeyRelation[ShoppingRequest] = fields.ForeignKeyField(
+        "models.ShoppingRequest", related_name="adjustments",
+        on_delete=fields.RESTRICT,
+    )
+    delta_qty = fields.IntField()
+    reason: Optional[str] = fields.TextField(null=True)  # type: ignore
+    actor_disc_uuid = fields.CharField(max_length=255)
+    created_at = fields.DatetimeField(auto_now_add=True, index=True)
+
+    class Meta:
+        table = "shopping_request_adjustments"
+
+
+class ShoppingDonation(Model):
+    """A staff-recorded fulfilment against a :class:`ShoppingRequest`.
+
+    Donations exceeding the parent request's ``qty_remaining`` are split:
+    the fulfilling portion counts at 100% of ``unit_value_emeralds_at_time``,
+    the excess counts at 20%. ``qty_at_full_value`` captures the split so
+    the value math is transparent and re-derivable.
+
+    Removes are soft: ``~shopping edit donation <id> void`` sets
+    ``voided_at`` and restores ``qty_at_full_value`` to the parent
+    request's ``qty_remaining`` (reopening the request if needed). All
+    leaderboard/glint queries filter ``voided_at__isnull=True``. The row
+    itself is preserved so the audit trail stays intact — this is a
+    deliberate divergence from :class:`Donation` which supports hard
+    delete via ``~donations edit remove``.
+
+    FK to ``ShoppingRequest`` uses ``SET_NULL`` so admin-deleting a request
+    (should that ever be supported) doesn't cascade-destroy donation
+    history; ``unit_value_emeralds_at_time`` is snapshotted at insert so
+    later edits to the parent request's unit value don't retroactively
+    rewrite historical credit.
+    """
+
+    id = fields.IntField(pk=True)
+    request: fields.ForeignKeyRelation[ShoppingRequest] = fields.ForeignKeyField(
+        "models.ShoppingRequest", related_name="donations",
+        null=True, on_delete=fields.SET_NULL,
+    )
+    recipient_mc: fields.ForeignKeyRelation[MinecraftAccount] = fields.ForeignKeyField(
+        "models.MinecraftAccount", related_name="shopping_donations_received",
+        on_delete=fields.RESTRICT,
+    )
+    qty = fields.IntField()
+    unit_value_emeralds_at_time = fields.BigIntField()
+    qty_at_full_value = fields.IntField()
+    value_emeralds = fields.BigIntField(index=True)
+    comment: Optional[str] = fields.TextField(null=True)  # type: ignore
+    recorder_disc_uuid = fields.CharField(max_length=255)
+    voided_at: Optional[datetime] = fields.DatetimeField(null=True, index=True)  # type: ignore
+    voided_by_disc_uuid: Optional[str] = fields.CharField(max_length=255, null=True)  # type: ignore
+    voided_reason: Optional[str] = fields.TextField(null=True)  # type: ignore
+    created_at = fields.DatetimeField(auto_now_add=True, index=True)
+
+    class Meta:
+        table = "shopping_donations"
+
+
 class BucketPull(Model):
     """A staff-awarded "pull" token in one of six prize buckets.
 
@@ -941,7 +1044,8 @@ _EXPECTED_MODEL_TABLES = frozenset({
     "intercult_messages", "janitor_alerts", "link_code", "link_requests",
     "minecraft_accounts", "minecraft_alts", "mojang_name_cache",
     "profession_categories", "recruitment_queries",
-    "scores", "shouts", "staff_action_entries",
+    "scores", "shopping_donations", "shopping_request_adjustments",
+    "shopping_requests", "shouts", "staff_action_entries",
     "user_vanity_choices", "verify_keys", "waitlist", "weekly_events",
 })
 

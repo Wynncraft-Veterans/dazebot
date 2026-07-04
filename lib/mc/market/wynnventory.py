@@ -86,6 +86,7 @@ class WynnventoryRequestor(metaclass=SingletonMeta):
         self.background_deq: collections.deque[tuple[UUID, str, str, dict[str, Any]]] = collections.deque()
         self.out: dict[UUID, ClientResponse] = {}
         self._session: Optional[aiohttp.ClientSession] = None
+        self._public_session: Optional[aiohttp.ClientSession] = None
         self._task: Optional[asyncio.Task] = None
 
     async def _ensure_loop(self) -> None:
@@ -110,6 +111,27 @@ class WynnventoryRequestor(metaclass=SingletonMeta):
                 timeout=aiohttp.ClientTimeout(total=_DEFAULT_TIMEOUT_SECONDS),
             )
         return self._session
+
+    async def _get_public_session(self) -> aiohttp.ClientSession:
+        """Session for Wynnventory endpoints documented as public (no key).
+
+        Kept separate from :attr:`_session` so that the keyed session can
+        stay warm (and rate-limit-scoped to dazebot's key) even when a
+        public call happens to fire — and, crucially, so this method
+        doesn't raise :class:`WynnventoryConfigError` when the env var is
+        unset. Callers that only need public endpoints (e.g. the shopping
+        cog's item-name fallback) can use :meth:`get_public` without any
+        env dependency.
+        """
+        if self._public_session is None or self._public_session.closed:
+            headers = {
+                "User-Agent": "dazebot/1.0 (wynnventory-client)",
+            }
+            self._public_session = aiohttp.ClientSession(
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=_DEFAULT_TIMEOUT_SECONDS),
+            )
+        return self._public_session
 
     @staticmethod
     def _resolve_url(url_or_path: str) -> str:
@@ -269,10 +291,43 @@ class WynnventoryRequestor(metaclass=SingletonMeta):
         uuid = await self._enqueue(self.prio_deq, "POST", url_or_path, **kwargs)
         return await self._await_result(uuid)
 
+    async def get_public(self, url_or_path: str, **kwargs: Any) -> ClientResponse:
+        """Un-queued, un-authenticated GET for Wynnventory's public endpoints.
+
+        Bypasses the priority queue and the ``X-API-Key`` header. Sized for
+        the shopping cog's item-name fallback, which fires only on WAPI
+        misses (rare). Handles 429 with a one-shot retry against
+        ``RateLimit-Reset`` / ``Retry-After`` / 1s.
+
+        Deliberately not merged into :meth:`get` so that (a) callers with
+        a keyed workload keep their scoped rate-limit accounting isolated
+        and (b) this method can be invoked without ``WYNNVENTORY_API_KEY``
+        being set.
+        """
+        session = await self._get_public_session()
+        url = self._resolve_url(url_or_path)
+        res = await session.request("GET", url, **kwargs)
+        if res.status == 429:
+            reset_hdr = (
+                res.headers.get("RateLimit-Reset")
+                or res.headers.get("Retry-After")
+            )
+            try:
+                reset = float(reset_hdr) if reset_hdr is not None else 1.0
+            except ValueError:
+                reset = 1.0
+            logger.info("Public probe hit 429, retrying after %s seconds", reset)
+            await asyncio.sleep(reset)
+            res = await session.request("GET", url, **kwargs)
+        return res
+
     async def close(self) -> None:
-        """Shut down the aiohttp session and the drain loop. Idempotent."""
+        """Shut down the aiohttp sessions and the drain loop. Idempotent."""
         if self._session and not self._session.closed:
             await self._session.close()
+
+        if self._public_session and not self._public_session.closed:
+            await self._public_session.close()
 
         if self._task:
             self._task.cancel()

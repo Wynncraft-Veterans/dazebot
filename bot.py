@@ -6,6 +6,7 @@ from discord.ext import commands
 import os
 
 from config import Config, CurrConfig
+from lib.mc.market.wynnventory import WynnventoryRequestor
 from lib.mc.wynn_api.requestor import Requestor
 from orm import close_db, init_db
 
@@ -129,6 +130,7 @@ class Bot(commands.Bot):
         logger.info("Shutting down bot...")
         await close_db()
         await Requestor().close()
+        await WynnventoryRequestor().close()
         await super().close()
 
     async def on_command_error(self, ctx: commands.Context, error):

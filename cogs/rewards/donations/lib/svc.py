@@ -18,7 +18,6 @@ from typing import Optional
 
 from orm import Donation, MinecraftAccount
 
-DEFAULT_RECENT_LIMIT = 100
 DEFAULT_HIGHEST_LIMIT = 200
 
 # Donation qualifies as a "glint milestone" when value_emeralds is at least
@@ -55,12 +54,17 @@ async def get_donation(donation_id: int) -> Optional[Donation]:
     return await Donation.filter(id=donation_id).select_related("recipient_mc").first()
 
 
-async def list_recent(limit: int = DEFAULT_RECENT_LIMIT) -> list[Donation]:
-    """Newest-first list of recent donations, with recipient prefetched."""
+async def list_recent() -> list[Donation]:
+    """Every donation, newest-first, with recipient prefetched.
+
+    Unbounded — the paginator on ``~donations recent`` needs the full
+    history so moderators can page back to donation #1. At the current
+    scale (a few hundred rows) this is cheap; revisit if the table grows
+    into the tens of thousands.
+    """
     return list(
         await Donation.all()
         .order_by("-created_at")
-        .limit(limit)
         .select_related("recipient_mc")
     )
 

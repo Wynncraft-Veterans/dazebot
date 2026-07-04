@@ -80,9 +80,16 @@ def format_donation_history_line(d: ShoppingDonation) -> str:
     Voided donations are struck through so the audit trail stays visible
     without confusing the "current credit" total.
     """
+    qty_over = d.qty - d.qty_at_full_value
+    if qty_over > 0 and d.unit_value_emeralds_at_time > 0:
+        full_credit = d.qty_at_full_value * d.unit_value_emeralds_at_time
+        over_credit = d.value_emeralds - full_credit
+        over_pct = round(100 * over_credit / (qty_over * d.unit_value_emeralds_at_time))
+    else:
+        over_pct = 0
     base = (
         f"#{d.id} {d.qty}× to **{d.recipient_mc.mc_username}** "
-        f"({d.qty_at_full_value} at 100%, {d.qty - d.qty_at_full_value} at 20%) — "
+        f"({d.qty_at_full_value} at 100%, {qty_over} at {over_pct}%) — "
         f"credit {format_emeralds_as_stx(d.value_emeralds)} — "
         f"<@{d.recorder_disc_uuid}> {_discord_relative_ts(d.created_at)}"
     )

@@ -46,7 +46,6 @@ logger = logging.getLogger("dazebot.cogs.rewards.donations")
 
 DONATIONS_CHANNEL_ID = 1336152747644551248
 LINES_PER_PAGE = 10
-RECENT_FETCH_LIMIT = 100
 HIGHEST_FETCH_LIMIT = 200
 
 
@@ -153,13 +152,13 @@ class DonationsCog(commands.Cog):
 
     @donations_group.command(
         name="recent",
-        description="(Staff) Show the most recent donations, paginated.",
+        description="(Staff) Show all donations newest-first, paginated.",
     )
     @is_staff()
     async def donations_recent(self, ctx: commands.Context) -> None:
         if not await _channel_ok(ctx):
             return
-        donations = await svc.list_recent(RECENT_FETCH_LIMIT)
+        donations = await svc.list_recent()
         if not donations:
             await ctx.reply("No donations recorded yet.")
             return

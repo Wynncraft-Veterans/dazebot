@@ -26,6 +26,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from config import CurrConfig
 from orm import (
     MinecraftAccount,
     ShoppingDonation,
@@ -79,21 +80,45 @@ async def get_request(request_id: int) -> Optional[ShoppingRequest]:
 async def find_open_request_for_item(item_name_lower: str) -> Optional[ShoppingRequest]:
     """Oldest open request matching the (already lowercased) item name.
 
-    Oldest-first so donors fill the request queue in the order staff
-    posted it. Returns ``None`` when no open request matches.
+    Prefers ``qty_remaining > 0`` outstanding requests over ``qty_remaining
+    == 0`` wishlist entries, so a fresh donation fulfils real demand
+    first and only spills over to the always-open wishlist row when no
+    outstanding request exists. Within each bucket, oldest-first so
+    donors fill the queue in the order staff posted it. Returns ``None``
+    when no open request matches.
     """
+    outstanding = (
+        await ShoppingRequest
+        .filter(
+            item_name_lower=item_name_lower,
+            closed_at__isnull=True,
+            qty_remaining__gt=0,
+        )
+        .order_by("created_at", "id")
+        .first()
+    )
+    if outstanding is not None:
+        return outstanding
     return (
         await ShoppingRequest
-        .filter(item_name_lower=item_name_lower, closed_at__isnull=True)
+        .filter(
+            item_name_lower=item_name_lower,
+            closed_at__isnull=True,
+            qty_remaining=0,
+        )
         .order_by("created_at", "id")
         .first()
     )
 
 
 async def list_open_requests() -> list[ShoppingRequest]:
+    # qty_remaining == 0 rows are "wishlist" entries (see create_request):
+    # staff still credit overflow donations against them via
+    # find_open_request_for_item, but they're hidden from the public-ish
+    # ~shopping list so members don't see satisfied items in the queue.
     return list(
         await ShoppingRequest
-        .filter(closed_at__isnull=True)
+        .filter(closed_at__isnull=True, qty_remaining__gt=0)
         .order_by("created_at", "id")
     )
 
@@ -184,13 +209,21 @@ def _compute_split(qty: int, qty_remaining: int, unit_value: int) -> tuple[int, 
     at :data:`OVER_REQUEST_NUMERATOR` / :data:`OVER_REQUEST_DENOMINATOR`
     of unit value (20% by default). Integer floor on the over-request
     portion — donors don't get fractional emeralds.
+
+    When ``CurrConfig.SHOPPING_OVERFLOW_PENALTY_ENABLED`` is False, the
+    penalty is bypassed and overflow qty is credited at full value. The
+    check is done at record time (not stored), so a later flip does not
+    retro-rewrite past donations.
     """
     qty_at_full = min(qty, max(0, qty_remaining))
     qty_over = qty - qty_at_full
-    value = (
-        qty_at_full * unit_value
-        + (qty_over * unit_value * OVER_REQUEST_NUMERATOR) // OVER_REQUEST_DENOMINATOR
-    )
+    if CurrConfig.SHOPPING_OVERFLOW_PENALTY_ENABLED:
+        overflow_value = (
+            qty_over * unit_value * OVER_REQUEST_NUMERATOR
+        ) // OVER_REQUEST_DENOMINATOR
+    else:
+        overflow_value = qty_over * unit_value
+    value = qty_at_full * unit_value + overflow_value
     return qty_at_full, value
 
 

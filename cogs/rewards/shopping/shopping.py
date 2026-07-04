@@ -110,9 +110,9 @@ class ShoppingCog(commands.Cog):
         if not await _channel_ok(ctx):
             return
 
-        if qty <= 0:
+        if qty < 0:
             await ctx.reply(
-                "Quantity must be greater than zero.",
+                "Quantity must be zero or greater.",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
@@ -147,14 +147,24 @@ class ShoppingCog(commands.Cog):
             comment=comment,
         )
 
-        total = format_emeralds_as_stx(unit_value_emeralds * qty)
-        await ctx.reply(
-            f"Recorded shopping request **#{request.id}**: "
-            f"**{qty} × {canonical}** @ "
-            f"**{format_emeralds_as_stx(unit_value_emeralds)}**/ea "
-            f"(total budget {total}).",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        unit_value_stx = format_emeralds_as_stx(unit_value_emeralds)
+        if qty == 0:
+            await ctx.reply(
+                f"Recorded shopping wishlist entry **#{request.id}**: "
+                f"**{canonical}** @ **{unit_value_stx}**/ea. "
+                f"Hidden from `~shopping list` (no outstanding demand); "
+                f"staff can still `~shopping record` overflow donations "
+                f"against it at the over-request rate.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        else:
+            total = format_emeralds_as_stx(unit_value_emeralds * qty)
+            await ctx.reply(
+                f"Recorded shopping request **#{request.id}**: "
+                f"**{qty} × {canonical}** @ **{unit_value_stx}**/ea "
+                f"(total budget {total}).",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     @shopping_group.command(
         name="record",
@@ -207,8 +217,12 @@ class ShoppingCog(commands.Cog):
         qty_over = qty - donation.qty_at_full_value
         split_note = ""
         if qty_over > 0:
+            full_credit = donation.qty_at_full_value * donation.unit_value_emeralds_at_time
+            over_credit = donation.value_emeralds - full_credit
+            over_pct = round(100 * over_credit / (qty_over * donation.unit_value_emeralds_at_time))
             split_note = (
-                f" ({donation.qty_at_full_value} at 100%, {qty_over} at 20%)"
+                f" ({donation.qty_at_full_value} at 100%, "
+                f"{qty_over} at {over_pct}%)"
             )
         closed_note = ""
         if request.closed_at is not None:

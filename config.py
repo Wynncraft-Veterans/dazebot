@@ -91,6 +91,13 @@ class Config:
     # Settable at runtime via ``/config`` (persisted to ``BotConfigOverride``).
     CTP_PRIZE_ARTWORK_URL: str | None = None
 
+    # ~shopping over-request donations: when True (default), overflow qty
+    # (delivered past the request's qty_remaining) is credited at 20% of
+    # unit value. Admin toggle for staff crediting one-off overflow at
+    # full value via ``~script config SHOPPING_OVERFLOW_PENALTY_ENABLED
+    # false``; flip back with ``true`` when the exception is done.
+    SHOPPING_OVERFLOW_PENALTY_ENABLED = True
+
     # --- CTP link-bonus reconciler (cogs/rewards/link_bonus_reconciler.py) ---
     # Awards 1 CTP point per user for each of: linking MC, issuing a vetsmod
     # key, declaring a fishbot role. Runs once on startup (retroactive

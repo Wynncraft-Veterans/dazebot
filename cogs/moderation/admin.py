@@ -1,6 +1,6 @@
 """Admin cog: bot-maintenance (``/admin sync|reload|load|unload``),
-``/say``/``/embed``, the ``/link`` group (set/remove/check/alt/request/
-requests/approve/code/info), and ``/shouts set``."""
+``~say`` (prefix-only) / ``/embed``, the ``/link`` group (set/remove/
+check/alt/request/requests/approve/code/info), and ``/shouts set``."""
 
 import logging
 from typing import Annotated
@@ -93,18 +93,22 @@ class Admin(commands.Cog):
             await ctx.send(f"Failed to unload {cog_name}: {e}")
 
     # =================================================================
-    # /say, /embed (admin)
+    # ~say (prefix-only), /embed (admin)
     # =================================================================
 
-    @commands.hybrid_command(name="say")
+    @commands.command(name="say")
     @is_admin()
     async def say(self, ctx: commands.Context, *, msg: str):
-        # Slash-modal fields can't carry real newlines; allow literal \n.
+        # Allow literal \n in the message to become real newlines.
         msg = msg.replace("\\n", "\n")
         if msg:
             await ctx.send(msg)
         else:
             await ctx.send("I cant repeat an empty message you dummy 😡😡😡")
+        try:
+            await ctx.message.delete()
+        except (discord.Forbidden, discord.NotFound, AttributeError):
+            pass
 
     # TODO: Snagged from the internet. May not be the most optimal.
     @commands.hybrid_command(name="embed")

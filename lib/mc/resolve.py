@@ -33,6 +33,13 @@ from config import CurrConfig
 from lib.discord_utils.converters import CaseInsensitiveMember
 from lib.mc.mojang import get_mc_uuid
 from lib.mc.wynn_api.errors import WynnApiError
+# >>> PATCH BEGIN: WYNN-STALE-WORKAROUND (2026-07-11)
+# Reason: /v3/player/{uuid}.guild ~12h stale for offline players.
+# Remove: when Wynncraft invalidates the player endpoint on
+#   officer-write events, or exposes a webhook, or an offline-player
+#   spot-check shows <10min staleness.
+from lib.mc.wynn_api.guild import get_guild
+# <<< PATCH END: WYNN-STALE-WORKAROUND
 from lib.mc.wynn_api.player import get_player_stats
 from orm import DiscordAccount, MinecraftAccount, UNKNOWN_LAST_ONLINE
 
@@ -135,7 +142,50 @@ async def refresh_mc_guild(mc: MinecraftAccount) -> MinecraftAccount:
     Best-effort: on any API failure the stored value is left untouched
     (matches the pre-existing inline behaviour in ``try_consume_code``).
     Mutates and saves ``mc``; returns it for call chaining.
+
+    .. note:: PATCH: WYNN-STALE-WORKAROUND (2026-07-11).
+       ``/v3/player/{uuid}.guild`` runs ~12 h stale for offline players
+       (nowhere near its advertised ``max-age=120``) because officer-side
+       writes to another player's membership don't trigger a
+       regeneration of that player's materialised profile row. To
+       work around this we short-circuit through ``/v3/guild/Returners``
+       (which IS on the officer-write invalidation path -- Nori and
+       Wynnpool invert the same way for the same reason). Rip out the
+       fenced blocks below once the upstream lag is fixed.
     """
+    # >>> PATCH BEGIN: WYNN-STALE-WORKAROUND (2026-07-11)
+    # Reason: /v3/player/{uuid}.guild ~12h stale for offline players.
+    # Remove: when Wynncraft invalidates the player endpoint on
+    #   officer-write events, or exposes a webhook, or an offline-player
+    #   spot-check shows <10min staleness.
+    # Roster-first crosscheck: /v3/guild/Returners IS invalidated on
+    # officer writes, so a hit here is authoritative. Only fall through
+    # to the (stale) player endpoint when the roster says "no" -- because
+    # the player endpoint is the only source of a non-Returners guild
+    # name, which we still need for the HIATUS -> REGISTERED (joined
+    # other guild) transition path.
+    try:
+        returners = await get_guild("Returners")
+    except Exception:  # noqa: BLE001 - third-party API; best-effort contract
+        logger.warning(
+            "refresh_mc_guild: Returners roster lookup failed for %s; "
+            "leaving stored guild %r untouched",
+            mc.uuid, mc.guild,
+        )
+        return mc
+    in_returners = any(
+        member.uuid == mc.uuid for member in returners.members.all_members()
+    )
+    if in_returners:
+        if mc.guild != "Returners":
+            logger.info(
+                "refresh_mc_guild: %s guild %r -> 'Returners' (via roster crosscheck)",
+                mc.uuid, mc.guild,
+            )
+            mc.guild = "Returners"
+            await mc.save(update_fields=["guild"])
+        return mc
+    # <<< PATCH END: WYNN-STALE-WORKAROUND
     try:
         fs = await get_player_stats(mc.uuid, full=True)
     except Exception:  # noqa: BLE001 - third-party API
@@ -145,6 +195,20 @@ async def refresh_mc_guild(mc: MinecraftAccount) -> MinecraftAccount:
         )
         return mc
     live_guild = fs.guild.name if fs.guild else None
+    # >>> PATCH BEGIN: WYNN-STALE-WORKAROUND (2026-07-11)
+    # Reason: /v3/player/{uuid}.guild ~12h stale for offline players.
+    # Remove: when Wynncraft invalidates the player endpoint on
+    #   officer-write events, or exposes a webhook, or an offline-player
+    #   spot-check shows <10min staleness.
+    # Roster was authoritative above and said "not in Returners". If the
+    # player endpoint still names Returners, it's provably stale; coerce
+    # to None so we save the truth rather than the lie. (A non-Returners
+    # name here is still the freshest signal we have for that guild --
+    # its own roster's invalidation path is opaque to us -- so let it
+    # through unchanged.)
+    if live_guild == "Returners":
+        live_guild = None
+    # <<< PATCH END: WYNN-STALE-WORKAROUND
     if mc.guild != live_guild:
         logger.info("refresh_mc_guild: %s guild %r -> %r", mc.uuid, mc.guild, live_guild)
         mc.guild = live_guild

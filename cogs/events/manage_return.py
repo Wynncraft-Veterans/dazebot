@@ -62,7 +62,11 @@ class ManageReturn(commands.Cog):
             if not persist:
                 try:
                     await ctx.message.delete()
-                except (discord.Forbidden, discord.NotFound, AttributeError):
+                except (discord.HTTPException, AttributeError):
+                    # HTTPException covers Forbidden/NotFound plus edge
+                    # cases like "Thread is archived" (code 50083), which
+                    # is expected when a subcommand (disband) archives the
+                    # very thread the invoker typed in. Swallow and move on.
                     pass
 
     async def _dispatch(

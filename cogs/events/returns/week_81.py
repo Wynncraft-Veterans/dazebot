@@ -46,6 +46,8 @@ import json
 import logging
 import random
 import re
+import time
+import urllib.parse
 from typing import Optional
 
 import discord
@@ -151,10 +153,25 @@ CELL_TO_POST_INDEX: dict[str, int] = {
     for cell in row
 }
 
-# Placeholder image used before a slot has been submitted. Discord doesn't
-# render a broken URL well; a 1x1 transparent PNG hosted somewhere stable is
-# ideal. Overridable at runtime via ``~manage_return 81`` if needed.
-PLACEHOLDER_IMAGE_URL = "https://raw.githubusercontent.com/Wynncraft-Veterans/dazebot/master/assets/r81_placeholder.png"
+# External placeholder-image service. Renders the cell name + caption
+# text directly onto a solid-colour PNG so no image library is needed on
+# our (weak) VPS. Free, no API key. If it goes down, embeds show a broken
+# image but the flow still works — user submissions replace them anyway.
+_PLACEHOLDER_HOST = "https://placehold.co"
+_PLACEHOLDER_SIZE = "512x512"
+_PLACEHOLDER_BG = "1e2230"  # dark navy
+_PLACEHOLDER_FG = "f0f0f0"  # off-white
+# placehold.co supported fonts (as of 2026-07): Lato, Lora, Montserrat,
+# Noto Sans, Open Sans, Oswald, Playfair Display, Poppins, PT Sans,
+# Raleway, Roboto, Source Sans Pro. Open Sans is the closest to Discord's
+# UI font and reads well at 512x512 with multi-line captions.
+_PLACEHOLDER_FONT = "open sans"
+
+# Arbitrary anchor URL: 4 embeds in one message that share the same ``url``
+# collapse into a 2x2 gallery in the Discord client — that's how we get
+# four independent images inside "one embed" without an image library.
+# The URL doesn't need to resolve; it's just an equality key.
+_GROUPING_URL_PREFIX = "https://wynnvets.org/r81/team"
 
 # Timeout for the ephemeral "click to invite" button that /return 81 posts.
 # The persistent invite/pick/bonus views use timeout=None.
@@ -374,8 +391,52 @@ def _detect_new_bingos(
 # ---------------------------------------------------------------------------
 
 
-def _placeholder_image_url() -> str:
-    return PLACEHOLDER_IMAGE_URL
+# Rough character width used to decide when to wrap. placehold.co uses a
+# centred, non-monospaced font whose exact metrics we don't know; ~18 chars
+# per line renders comfortably on a 512x512 square. Adjust if captions
+# look cramped or over-wrapped in practice.
+_PLACEHOLDER_WRAP_WIDTH = 18
+
+
+def _wrap_for_placeholder(text: str, width: int = _PLACEHOLDER_WRAP_WIDTH) -> list[str]:
+    """Word-wrap ``text`` to ~``width`` chars per line. Never splits a word."""
+    lines: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for word in text.split():
+        add = len(word) + (1 if current else 0)
+        if current and current_len + add > width:
+            lines.append(" ".join(current))
+            current = [word]
+            current_len = len(word)
+        else:
+            current.append(word)
+            current_len += add
+    if current:
+        lines.append(" ".join(current))
+    return lines
+
+
+def _placeholder_url(cell: str, caption: str, version: int) -> str:
+    """Build a placehold.co URL that bakes the cell name + wrapped caption
+    into a 512x512 PNG.
+
+    Uses ``\\n`` (literal backslash-n) between wrapped lines — placehold.co
+    interprets it as a line break in the rendered image. The ``version``
+    is appended as a cache-buster so Discord's CDN proxy re-fetches after
+    every regen / edit.
+    """
+    lines: list[str] = [cell, ""]  # cell label on its own line, then a blank
+    lines.extend(_wrap_for_placeholder(caption))
+    text_param = "\\n".join(lines)  # literal backslash-n; placehold.co splits on it
+    q = urllib.parse.urlencode(
+        {"text": text_param, "font": _PLACEHOLDER_FONT},
+        quote_via=urllib.parse.quote_plus,
+    )
+    return (
+        f"{_PLACEHOLDER_HOST}/{_PLACEHOLDER_SIZE}"
+        f"/{_PLACEHOLDER_BG}/{_PLACEHOLDER_FG}/png?{q}&_v={version}"
+    )
 
 
 # In-memory name override for `~manage_return 81 fakeTest` teams. Keyed by
@@ -501,54 +562,50 @@ def _status_text(filled: set[str]) -> str:
     )
 
 
-def _embed_for_post(
+def _embeds_for_post(
     post_index: int,
     *,
+    team_number: int,
     captions: dict[str, str],
     submissions: dict[str, str],
-) -> discord.Embed:
-    """Render one of the four 2x2 embed posts.
+    version: int,
+) -> list[discord.Embed]:
+    """Return four embeds — one per cell in the 2x2 layout.
 
-    Uses one field per cell; each field's value is the cell caption.
-    ``image`` on the embed can only hold one URL, so we use the top-level
-    ``image`` for the first submitted cell of the post (if any) and inline
-    URLs as field values for the rest. This keeps the display readable
-    without spawning 4 embeds per post.
+    All four embeds share the same ``url`` field; Discord's client groups
+    same-URL embeds attached to a single message into a gallery, giving
+    us four visible images inside what reads as one post. The first embed
+    carries the post title + submit-command hint; the others are
+    image-only so they collapse cleanly into the gallery.
+
+    ``version`` is threaded through the placeholder URL as a cache-buster
+    so an edit forces Discord's proxy to re-fetch a fresh image.
     """
     layout = _POST_LAYOUTS[post_index - 1]
-    header_cells = " · ".join(cell for row in layout for cell in row)
-    embed = discord.Embed(
-        title=f"Return 81 — {header_cells}",
-        description=SUBMIT_COMMAND_HINT,
+    cells_flat = [cell for row in layout for cell in row]
+    header_cells = " · ".join(cells_flat)
+    grouping_url = (
+        f"{_GROUPING_URL_PREFIX}/{team_number}/post/{post_index}"
     )
-    for row in layout:
-        for cell in row:
-            caption = captions.get(cell, "(missing caption)")
-            submitted = submissions.get(cell)
-            if submitted:
-                embed.add_field(
-                    name=f"{cell} ✅",
-                    value=f"[photo]({submitted})\n_{caption}_",
-                    inline=True,
-                )
-            else:
-                embed.add_field(
-                    name=f"{cell}",
-                    value=f"_{caption}_",
-                    inline=True,
-                )
-    # Use the first submitted cell's photo as the embed's large image so
-    # at least one photo renders inline. Falls back to the placeholder.
-    hero: Optional[str] = None
-    for row in layout:
-        for cell in row:
-            if cell in submissions:
-                hero = submissions[cell]
-                break
-        if hero is not None:
-            break
-    embed.set_image(url=hero or _placeholder_image_url())
-    return embed
+
+    embeds: list[discord.Embed] = []
+    for idx, cell in enumerate(cells_flat):
+        caption = captions.get(cell, "(missing caption)")
+        submitted = submissions.get(cell)
+        if idx == 0:
+            embed = discord.Embed(
+                title=f"Return 81 — {header_cells}",
+                description=SUBMIT_COMMAND_HINT,
+                url=grouping_url,
+            )
+        else:
+            embed = discord.Embed(url=grouping_url)
+        if submitted:
+            embed.set_image(url=submitted)
+        else:
+            embed.set_image(url=_placeholder_url(cell, caption, version))
+        embeds.append(embed)
+    return embeds
 
 
 async def _load_captions(team: BingoTeam) -> dict[str, str]:
@@ -583,6 +640,10 @@ async def _rerender_team_dashboard(
         except (discord.NotFound, discord.HTTPException) as e:
             logger.warning("rerender status edit failed: %s", e)
 
+    # ``version`` doubles as a per-edit cache-buster on the placehold.co
+    # URLs. time_ns() gives strict monotonicity even for back-to-back
+    # edits within the same second.
+    version = time.time_ns()
     for i in range(1, 5):
         if only_post is not None and i != only_post:
             continue
@@ -592,8 +653,12 @@ async def _rerender_team_dashboard(
         try:
             msg = await thread.fetch_message(msg_id)
             await msg.edit(
-                embed=_embed_for_post(
-                    i, captions=captions, submissions=submissions
+                embeds=_embeds_for_post(
+                    i,
+                    team_number=team.team_number,
+                    captions=captions,
+                    submissions=submissions,
+                    version=version,
                 )
             )
         except (discord.NotFound, discord.HTTPException) as e:
@@ -989,9 +1054,16 @@ async def _post_pinned_dashboard(thread: discord.Thread, team: BingoTeam) -> Non
         logger.warning("r81 pin status failed: %s", e)
     team.status_msg_id = status_msg.id
 
+    version = time.time_ns()
     for i in range(1, 5):
         msg = await thread.send(
-            embed=_embed_for_post(i, captions=captions, submissions=submissions)
+            embeds=_embeds_for_post(
+                i,
+                team_number=team.team_number,
+                captions=captions,
+                submissions=submissions,
+                version=version,
+            )
         )
         try:
             await msg.pin()

@@ -2847,6 +2847,39 @@ async def _manage_rerender_hard(ctx: commands.Context, args: list[str]) -> None:
         caught_up = target_exp
 
     deleted, missing = await _delete_pinned_dashboard(ctx.bot, team)
+
+    # Sweep any bot-authored pinned messages still hanging in the thread.
+    # These are the orphans from failed expansions (e.g. an
+    # ``_apply_expansion_if_needed`` that posted + pinned new quadrant
+    # embeds but the follow-up save raised on stale schema, so the ids
+    # were never persisted to ``embed_msg_ids_json`` and the tracked-id
+    # deletion above couldn't find them). Only touches messages authored
+    # by the bot so staff-pinned announcements are left alone.
+    bot_id = ctx.bot.user.id if ctx.bot.user is not None else None
+    orphan_deleted = 0
+    if bot_id is not None:
+        try:
+            remaining_pins = await thread.pins()
+        except discord.HTTPException as e:
+            logger.warning(
+                "r81 rerenderHard team %s: pins() fetch failed: %s",
+                team.id, e,
+            )
+            remaining_pins = []
+        for pin in remaining_pins:
+            if pin.author.id != bot_id:
+                continue
+            try:
+                await pin.delete()
+                orphan_deleted += 1
+            except discord.NotFound:
+                pass
+            except discord.HTTPException as e:
+                logger.warning(
+                    "r81 rerenderHard team %s: orphan pin %s delete failed: %s",
+                    team.id, pin.id, e,
+                )
+
     # _post_pinned_dashboard writes fresh msg ids into team and saves them,
     # so no manual null-out needed here.
     await _post_pinned_dashboard(thread, team)
@@ -2855,17 +2888,22 @@ async def _manage_rerender_hard(ctx: commands.Context, args: list[str]) -> None:
     caught_up_note = (
         f" caught up to exp={caught_up}." if caught_up else ""
     )
+    orphan_note = (
+        f" swept {orphan_deleted} orphan pin(s)." if orphan_deleted else ""
+    )
     await send_feedback(
         ctx,
         f"✅ Rerendered team {team.team_number} at `{rows}×{cols}` "
         f"({posts} embed posts): deleted {deleted} old message(s) "
         f"({missing} were already missing), sent + pinned {1 + posts} fresh ones."
-        + caught_up_note,
+        + caught_up_note + orphan_note,
         persist=persist,
     )
     logger.info(
-        "r81 rerenderHard team %s (#%d) by %s: deleted=%d missing=%d exp=%d",
-        team.id, team.team_number, ctx.author.id, deleted, missing, _team_exp(team),
+        "r81 rerenderHard team %s (#%d) by %s: deleted=%d missing=%d "
+        "orphans=%d exp=%d",
+        team.id, team.team_number, ctx.author.id, deleted, missing,
+        orphan_deleted, _team_exp(team),
     )
 
 

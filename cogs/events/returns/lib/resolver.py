@@ -74,9 +74,17 @@ def _pack_adjective() -> str:
     return f"{_article_for(adj)} {adj}"
 
 
+# Skin-tone-adjacent colours excluded from "why X is objectively the best" —
+# the prompt reads badly with black/brown/white/tan etc.
+_COLOUR_OR_FOOD_SKIN_BLOCKLIST = frozenset(
+    {"BLACK", "BROWN", "WHITE", "TAN", "BEIGE", "IVORY", "OLIVE"}
+)
+
+
 def _colour_or_food() -> str:
     if random.random() < 0.5:
-        return random.choice(_load("colours.yaml")).lower()
+        pool = [c for c in _load("colours.yaml") if c not in _COLOUR_OR_FOOD_SKIN_BLOCKLIST]
+        return random.choice(pool).lower()
     return random.choice(_load("foods.yaml"))
 
 

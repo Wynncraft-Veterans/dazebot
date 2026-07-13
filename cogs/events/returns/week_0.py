@@ -240,6 +240,9 @@ async def backfill_cult_threads(bot) -> None:
         if thread is None:
             failed += 1
             continue
+        if thread.guild.get_member(disc_id) is None:
+            skipped += 1
+            continue
         if disc_id in members:
             already += 1
             continue

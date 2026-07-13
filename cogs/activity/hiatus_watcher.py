@@ -82,6 +82,12 @@ class HiatusWatcher(commands.Cog):
 
         try:
             res = await Requestor().get(BULK_ENDPOINT)
+            if res.status != 200:
+                logger.warning(
+                    "bulk /v3/player returned status=%d (%s); skipping tick",
+                    res.status, res.content_type,
+                )
+                return
             data = await res.json()
         except Exception:
             logger.exception("bulk /v3/player fetch failed; skipping tick")

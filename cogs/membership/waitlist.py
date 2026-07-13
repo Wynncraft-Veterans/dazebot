@@ -48,7 +48,7 @@ class WaitlistCog(commands.Cog):
 
     @waitlist_group.command(
         name="add",
-        description="(Staff) Add a user (Discord identifier or Minecraft IGN) to the waitlist; `username` required if a Discord user isn't linked.",
+        description="(Staff) Add a user to the waitlist by Discord identifier or Minecraft IGN.",
     )
     @is_staff()
     async def waitlist_add(

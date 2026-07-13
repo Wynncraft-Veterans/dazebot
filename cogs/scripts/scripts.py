@@ -195,7 +195,7 @@ class Scripts(commands.Cog):
 
     @script_group.command(
         name="extract_anni_timestamps",
-        description="(Operator) Dump all anni-channel messages from the last 3 years as gzipped JSONL attachments for offline debug.",
+        description="(Operator) Dump 3 years of anni-channel messages as gzipped JSONL for offline debug.",
     )
     @is_operator()
     async def script_extract_anni_timestamps(self, ctx: commands.Context):

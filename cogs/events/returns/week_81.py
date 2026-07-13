@@ -2111,6 +2111,63 @@ async def _manage_show(ctx: commands.Context, args: list[str]) -> None:
 
 
 @register_manage(
+    WEEK, "links", tier=Tier.ADMIN,
+    help="Dump every accepted r81 submission link with its cell caption.",
+    usage="",
+)
+async def _manage_links(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+
+    def _cell_sort_key(cell: str) -> tuple[int, int]:
+        i = 0
+        while i < len(cell) and cell[i].isalpha():
+            i += 1
+        letters, num = cell[:i], cell[i:]
+        row = 0
+        for ch in letters:
+            row = row * 26 + (ord(ch.upper()) - ord("A") + 1)
+        return (row - 1, int(num) if num else 0)
+
+    teams = await BingoTeam.exclude(state="disbanded").order_by("team_number")
+    entries: list[str] = []
+    for t in teams:
+        subs = await BingoSubmission.filter(team=t)
+        if not subs:
+            continue
+        cells = await BingoCellState.filter(team=t)
+        caption_by_cell = {c.cell: c.caption for c in cells}
+        subs.sort(key=lambda s: _cell_sort_key(s.cell))
+        for s in subs:
+            caption = caption_by_cell.get(s.cell)
+            if not caption:
+                continue
+            entries.append(
+                f"(Team {t.team_number} image {s.cell}) {s.image_url}\n"
+                f"> {caption}"
+            )
+
+    if not entries:
+        await send_feedback(ctx, "No r81 submissions yet.", persist=persist)
+        return
+
+    # Chunk to fit Discord's 2000-char message limit; keep each entry whole.
+    chunks: list[str] = []
+    buf = ""
+    for e in entries:
+        block = e + "\n\n"
+        if buf and len(buf) + len(block) > 1900:
+            chunks.append(buf.rstrip())
+            buf = block
+        else:
+            buf += block
+    if buf:
+        chunks.append(buf.rstrip())
+
+    for chunk in chunks:
+        await send_feedback(ctx, chunk, persist=persist)
+
+
+@register_manage(
     WEEK, "sample", tier=Tier.STAFF,
     help=(
         "Preview N randomly-generated cell captions using real Wynn guild "

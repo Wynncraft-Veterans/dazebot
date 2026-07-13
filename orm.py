@@ -1216,6 +1216,22 @@ def _ensure_r81_schema(returns_path: str) -> None:
         def cols(table: str) -> set[str]:
             return {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')}
 
+        def indexes_on(table: str) -> dict[str, set[str]]:
+            """Map of ``{index_name: {column_name, ...}}`` for ``table``.
+
+            SQLite refuses ``DROP COLUMN`` if the column is still indexed,
+            so we look these up first and drop any indexes that mention a
+            column we're about to remove.
+            """
+            out: dict[str, set[str]] = {}
+            for row in conn.execute(f'PRAGMA index_list("{table}")'):
+                idx_name = row[1]
+                idx_cols = {
+                    r[2] for r in conn.execute(f'PRAGMA index_info("{idx_name}")')
+                }
+                out[idx_name] = idx_cols
+            return out
+
         teams_cols = cols("return_81_teams")
         events_cols = cols("return_81_bingo_events")
         if not teams_cols:
@@ -1278,6 +1294,25 @@ def _ensure_r81_schema(returns_path: str) -> None:
                     f'SET "embed_msg_ids_json" = {json_expr} '
                     f'WHERE "embed_msg_ids_json" IS NULL AND {not_null_pred}'
                 )
+            # SQLite refuses DROP COLUMN if the column is still part of an
+            # index (e.g. the ``idx_return_81_b_bonus_m_a6c2ad`` index that
+            # migration 2's original form put on ``bonus_msg_id``). Drop
+            # any index that mentions a column we're about to remove.
+            def drop_dependent_indexes(
+                table: str, dropping: list[str]
+            ) -> None:
+                if not dropping:
+                    return
+                dropping_set = set(dropping)
+                for idx_name, idx_cols in indexes_on(table).items():
+                    if idx_name.startswith("sqlite_"):
+                        continue  # skip autoindex for UNIQUE/PK constraints
+                    if idx_cols & dropping_set:
+                        conn.execute(f'DROP INDEX IF EXISTS "{idx_name}"')
+
+            drop_dependent_indexes("return_81_teams", legacy_teams_present)
+            drop_dependent_indexes("return_81_bingo_events", legacy_events_present)
+
             for legacy in legacy_teams_present:
                 conn.execute(
                     f'ALTER TABLE "return_81_teams" DROP COLUMN "{legacy}"'

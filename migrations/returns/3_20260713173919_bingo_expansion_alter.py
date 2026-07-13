@@ -70,17 +70,41 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
             f'WHERE "embed_msg_ids_json" IS NULL AND {not_null_pred}'
         )
 
+    # SQLite < 3.41 refuses DROP COLUMN if the column is still indexed.
+    # Migration 2's original form put ``idx_return_81_b_bonus_m_a6c2ad`` on
+    # ``bonus_msg_id``, so drop any lingering non-autoindex that mentions a
+    # column we're about to remove BEFORE the DROP COLUMN statements.
+    dropping = {
+        "return_81_teams": [c for c in legacy_ids if c in teams_cols],
+        "return_81_bingo_events": [
+            c for c in ("bonus_choice", "bonus_msg_id") if c in events_cols
+        ],
+    }
+    for table, cols_to_drop in dropping.items():
+        if not cols_to_drop:
+            continue
+        cols_set = set(cols_to_drop)
+        _, idx_rows = await db.execute_query(f'PRAGMA index_list("{table}")')
+        for idx_row in idx_rows:
+            idx_name = idx_row["name"]
+            if idx_name.startswith("sqlite_"):
+                continue
+            _, info_rows = await db.execute_query(
+                f'PRAGMA index_info("{idx_name}")'
+            )
+            idx_cols = {r["name"] for r in info_rows}
+            if idx_cols & cols_set:
+                await db.execute_query(f'DROP INDEX IF EXISTS "{idx_name}"')
+
     drop_stmts: list[str] = []
-    for legacy in legacy_ids:
-        if legacy in teams_cols:
-            drop_stmts.append(
-                f'ALTER TABLE "return_81_teams" DROP COLUMN "{legacy}"'
-            )
-    for legacy in ("bonus_choice", "bonus_msg_id"):
-        if legacy in events_cols:
-            drop_stmts.append(
-                f'ALTER TABLE "return_81_bingo_events" DROP COLUMN "{legacy}"'
-            )
+    for legacy in dropping["return_81_teams"]:
+        drop_stmts.append(
+            f'ALTER TABLE "return_81_teams" DROP COLUMN "{legacy}"'
+        )
+    for legacy in dropping["return_81_bingo_events"]:
+        drop_stmts.append(
+            f'ALTER TABLE "return_81_bingo_events" DROP COLUMN "{legacy}"'
+        )
     for stmt in drop_stmts:
         await db.execute_query(stmt)
     return ""

@@ -58,6 +58,7 @@ from typing import Optional
 import discord
 from discord.ext import commands
 from PIL import Image, ImageDraw, ImageFont
+from tortoise.exceptions import OperationalError
 
 from cogs.events.returns import (
     Tier,
@@ -1347,7 +1348,21 @@ async def _post_pinned_dashboard(thread: discord.Thread, team: BingoTeam) -> Non
         msg_ids.append(msg.id)
 
     team.embed_msg_ids_json = json.dumps(msg_ids)
-    await team.save(update_fields=["status_msg_id", "embed_msg_ids_json"])
+    try:
+        await team.save(update_fields=["status_msg_id", "embed_msg_ids_json"])
+    except OperationalError as e:
+        # Stale returns.db schema — the embed_msg_ids_json column doesn't
+        # exist. Fall back to persisting the status id only so the team
+        # can still enter "playing" and accept submissions; the pinned
+        # embeds won't be re-editable until orm._ensure_r81_schema heals
+        # the schema on the next container restart.
+        logger.warning(
+            "r81 team %s: schema stale (missing embed_msg_ids_json); "
+            "saving status_msg_id only, dashboard rerenders disabled "
+            "until container restart. (%s)",
+            team.id, e,
+        )
+        await team.save(update_fields=["status_msg_id"])
 
 
 async def _apply_expansion_if_needed(
@@ -1367,6 +1382,24 @@ async def _apply_expansion_if_needed(
     count = await BingoTeamMember.filter(team=team).count()
     new_exp = max(0, count - 4)
     if new_exp <= _team_exp(team):
+        return False
+
+    # Bail BEFORE any side effect if the container is running against a
+    # stale returns.db that predates the expansion columns. Reads survive
+    # via _team_exp's getattr fallback, but writes (below) would emit an
+    # UPDATE against non-existent columns and SQL-error. Container restart
+    # runs orm._ensure_r81_schema and cures this — until then, skip
+    # expansion cleanly so the picker + member-add still succeed.
+    if not (
+        hasattr(team, "expansion_count")
+        and hasattr(team, "embed_msg_ids_json")
+    ):
+        logger.warning(
+            "r81 team %s: returns.db schema is stale (missing expansion_count "
+            "or embed_msg_ids_json); skipping board expansion. Restart the "
+            "dazebot container so orm._ensure_r81_schema can heal the schema.",
+            team.id,
+        )
         return False
 
     thread = await _resolve_thread(bot, team.thread_id)
@@ -1411,7 +1444,20 @@ async def _apply_expansion_if_needed(
     # reads stale state still only touches the old posts.
     team.embed_msg_ids_json = json.dumps(existing_ids)
     team.expansion_count = new_exp
-    await team.save(update_fields=["embed_msg_ids_json", "expansion_count"])
+    try:
+        await team.save(update_fields=["embed_msg_ids_json", "expansion_count"])
+    except OperationalError as e:
+        # Should have been caught by the hasattr guard above, but if a
+        # partial-heal DB slips through, log and bail without a raise so
+        # the picker click still succeeds. The new pinned embeds will be
+        # orphaned in the thread; a rerender_hard after container restart
+        # will clean them up.
+        logger.warning(
+            "r81 team %s: expansion save failed on stale schema (%s); "
+            "board dims will re-derive from prev expansion_count on next boot",
+            team.id, e,
+        )
+        return False
 
     await _rerender_team_dashboard(bot, team)
     rows, cols = board_dims(new_exp)

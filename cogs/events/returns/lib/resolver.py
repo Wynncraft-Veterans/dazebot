@@ -96,9 +96,26 @@ def _pick_apartment_member(ctx: dict) -> str:
     return random.choice(pool)
 
 
+def _pop_returner(ctx: dict) -> str:
+    """Pop the next MC username from the shuffled Returners pool.
+
+    Each ``%random_in_guild%`` occurrence consumes one, so a template
+    with N slots gets N distinct names when the roster is ≥ N (typical
+    case). The literal string ``"the target"`` in templates refers back
+    to one of these picks — it's static prose, not a resolver token.
+    """
+    pool = ctx.get("returners_pool")
+    if pool is None:
+        raise RuntimeError("resolver: returners_pool not pre-fetched — internal bug")
+    if not pool:
+        raise ValueError("resolver: returners_pool exhausted")
+    return pool.pop(0)
+
+
 _HANDLERS: dict[str, Callable[[str | None, dict], str]] = {
     "player": lambda sub, ctx: _pop_player(ctx),
     "apartment_member": lambda sub, ctx: _pick_apartment_member(ctx),
+    "random_in_guild": lambda sub, ctx: _pop_returner(ctx),
     "adjective": lambda sub, ctx: random.choice(_load("adjectives.yaml")),
     "boss": lambda sub, ctx: random.choice(_load("bosses.yaml")),
     "cave": lambda sub, ctx: random.choice(_load("caves.yaml")),
@@ -136,6 +153,31 @@ async def _fetch_apartment_members() -> list[str]:
     return [r.owner_mc_username for r in rows]
 
 
+async def _fetch_returners_pool(exclude: set[str], needed: int = 10) -> list[str]:
+    """Shuffled list of MC usernames from the ``Returners`` in-game guild,
+    minus ``exclude`` (the calling event's own participants). Hiatus users
+    are naturally excluded — they're not in the in-game guild.
+
+    Popped from sequentially by both ``%random_in_guild%`` (distinct names
+    per occurrence) and ``%target%`` (first pop cached), so the returned
+    list must be big enough for the largest template. Cycles the roster
+    if it's smaller than ``needed``.
+    """
+    from orm import MinecraftAccount
+    rows = await MinecraftAccount.filter(guild="Returners").all()
+    names = [r.mc_username for r in rows if r.mc_username and r.mc_username not in exclude]
+    if not names:
+        # Fallback keeps templates from crashing when the guild roster
+        # hasn't been synced yet (fresh dev DB, etc).
+        return ["a Returner"] * needed
+    random.shuffle(names)
+    while len(names) < needed:
+        extra = list(names)
+        random.shuffle(extra)
+        names.extend(extra)
+    return names[:needed]
+
+
 def _finalise(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     if text and text[-1] not in ".!?":
@@ -147,6 +189,12 @@ def _may_need_apartments(template: str) -> bool:
     # %apartment_member% may appear directly, or inside a %guild_island%
     # expansion (guild_island_places.yaml is the only known source).
     return "%apartment_member%" in template or "%guild_island%" in template
+
+
+def _may_need_returners(template: str) -> bool:
+    # No other resource file currently expands to %random_in_guild%, so
+    # a direct substring check is sufficient.
+    return "%random_in_guild%" in template
 
 
 async def resolve(
@@ -168,6 +216,13 @@ async def resolve(
     ctx: dict[str, Any] = {"players": list(players)}
     if _may_need_apartments(template):
         ctx["apartment_members"] = await _fetch_apartment_members()
+    if _may_need_returners(template):
+        # Exclude the caller's own participants so the target of a
+        # "candid screenshot" isn't a teammate — set(players) captures the
+        # unique names before %player% pops start mutating the pool.
+        ctx["returners_pool"] = await _fetch_returners_pool(
+            exclude=set(players)
+        )
 
     text = template
     for _ in range(max_depth):

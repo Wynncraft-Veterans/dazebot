@@ -93,14 +93,12 @@ class Bot(commands.Bot):
             logger.error(f"Failed to register Return3 views: {e}")
         try:
             from cogs.events.returns.week_81 import (
-                BingoBonusView,
                 BingoInviteConfirmView,
                 BingoRandomPickView,
             )
 
             self.add_view(BingoInviteConfirmView())
             self.add_view(BingoRandomPickView())
-            self.add_view(BingoBonusView())
         except Exception as e:
             logger.error(f"Failed to register week_81 views: {e}")
         await self._load_cogs()

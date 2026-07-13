@@ -16,8 +16,9 @@ Flow
    random from Wynncraft-guild-``Returners`` accounts linked to Discord.
 4. First click on a picker button resolves the wildcard: the picked
    Discord user is added to the thread and made a team member. The bot
-   seeds 16 ``BingoCellState`` captions and pins the 5-message dashboard
-   (status grid + four 2x2 embeds). Team goes into ``playing``.
+   seeds the default-4x4's 16 ``BingoCellState`` captions and pins the
+   5-message dashboard (status grid + four 2x2 embeds). Team goes into
+   ``playing``.
 5. Team members post ``~return 81 submit <cell>`` (e.g.
    ``~return 81 submit A1``) with a photo attachment in the team thread.
    The attachment is what gets submitted; the ``on_message`` listener
@@ -25,11 +26,12 @@ Flow
    show the photo, edits the status post to mark the cell filled, awards
    ``POINTS_PER_CELL`` via ``WeeklyEvent(week=81)`` / ``Score`` to every
    current team member, and detects any newly-completed bingo lines. Each
-   new line posts a ``BingoBonusView`` in the thread offering an extra
-   card (more slots) or an extra teammate. The ``handle`` dispatcher
-   guards against firing the invite flow when the same
-   ``~return 81 submit <cell>`` shape shows up as a prefix command — the
-   listener owns that path.
+   new line awards ``POINTS_PER_BINGO_LINE`` to every teammate and
+   auto-opens an extra-teammate picker; when someone is picked they
+   join AND the board expands by one 2x2 slab (see ``board_dims`` for
+   the growth rule). The ``handle`` dispatcher guards against firing the
+   invite flow when the same ``~return 81 submit <cell>`` shape shows up
+   as a prefix command — the listener owns that path.
 
 Staff surfaces live under ``~manage_return 81 <subcommand>``. See the
 ``@register_manage`` decorators near the bottom.
@@ -42,6 +44,7 @@ rendering.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -125,50 +128,139 @@ PICKER_SIZE = 10
 # disabled at render), just fewer options to choose from.
 EXTRA_MEMBER_PICKER_SIZE = 6
 
-# 4x4 grid cells, row-major.
-BINGO_CELLS: tuple[str, ...] = tuple(
-    f"{row}{col}" for row in "ABCD" for col in "1234"
-)
+# Board geometry is a pure function of ``BingoTeam.expansion_count``.
+# Expansion 0 = the default 4x4 board (4 pinned 2x2 posts).
+#
+# Rule: odd expansions add two columns to every existing row-slab; even
+# expansions (> 0) add two rows spanning every current col-slab. Each
+# expansion's new cells are grouped into fresh 2x2 posts appended to the
+# team's pinned dashboard. See ``board_dims`` for the exact dims formula.
 
-# 10 winning lines: 4 rows + 4 cols + 2 diagonals.
-BINGO_LINES: tuple[tuple[str, ...], ...] = (
-    ("A1", "A2", "A3", "A4"),
-    ("B1", "B2", "B3", "B4"),
-    ("C1", "C2", "C3", "C4"),
-    ("D1", "D2", "D3", "D4"),
-    ("A1", "B1", "C1", "D1"),
-    ("A2", "B2", "C2", "D2"),
-    ("A3", "B3", "C3", "D3"),
-    ("A4", "B4", "C4", "D4"),
-    ("A1", "B2", "C3", "D4"),
-    ("A4", "B3", "C2", "D1"),
-)
 
-# Which of the four 2x2 embed posts (1..4) hosts each cell. Spec split:
-#   post 1: A1 A2 / B1 B2
-#   post 2: A3 A4 / B3 B4
-#   post 3: C1 C2 / D1 D2
-#   post 4: C3 C4 / D3 D4
-_POST_LAYOUTS: tuple[tuple[tuple[str, str], tuple[str, str]], ...] = (
-    (("A1", "A2"), ("B1", "B2")),
-    (("A3", "A4"), ("B3", "B4")),
-    (("C1", "C2"), ("D1", "D2")),
-    (("C3", "C4"), ("D3", "D4")),
-)
-CELL_TO_POST_INDEX: dict[str, int] = {
-    cell: i + 1
-    for i, layout in enumerate(_POST_LAYOUTS)
-    for row in layout
-    for cell in row
-}
+@functools.lru_cache(maxsize=None)
+def board_dims(exp: int) -> tuple[int, int]:
+    """Return ``(rows, cols)`` at the given expansion count.
+
+    exp=0 → (4, 4). Each odd exp adds 2 cols; each even exp > 0 adds 2 rows.
+    So exp=1 → (4, 6), exp=2 → (6, 6), exp=3 → (6, 8), exp=4 → (8, 8), …
+    """
+    rows = 4 + 2 * (exp // 2)
+    cols = 4 + 2 * ((exp + 1) // 2)
+    return rows, cols
+
+
+def row_label(idx: int) -> str:
+    """0→"A", 25→"Z", 26→"AA", 27→"AB", … (spreadsheet-style base-26).
+
+    Practically the board rarely grows past Z (that would need a team of
+    ~30), but the caller doesn't have to think about it.
+    """
+    letters = ""
+    n = idx + 1
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(ord("A") + rem) + letters
+    return letters
+
+
+def cell_name(row_idx: int, col_idx: int) -> str:
+    return f"{row_label(row_idx)}{col_idx + 1}"
+
+
+@functools.lru_cache(maxsize=None)
+def bingo_cells(exp: int) -> tuple[str, ...]:
+    """Row-major flat tuple of every cell name at this expansion."""
+    rows, cols = board_dims(exp)
+    return tuple(
+        cell_name(r, c) for r in range(rows) for c in range(cols)
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def bingo_lines(exp: int) -> tuple[tuple[str, ...], ...]:
+    """All winning lines at this expansion — full rows, full cols, and the
+    two main diagonals anchored at the top corners (length min(rows, cols)).
+    """
+    rows, cols = board_dims(exp)
+    lines: list[tuple[str, ...]] = []
+    for r in range(rows):
+        lines.append(tuple(cell_name(r, c) for c in range(cols)))
+    for c in range(cols):
+        lines.append(tuple(cell_name(r, c) for r in range(rows)))
+    diag_len = min(rows, cols)
+    lines.append(tuple(cell_name(i, i) for i in range(diag_len)))
+    lines.append(tuple(cell_name(i, cols - 1 - i) for i in range(diag_len)))
+    return tuple(lines)
+
+
+@functools.lru_cache(maxsize=None)
+def post_layouts(exp: int) -> tuple[tuple[tuple[str, str], tuple[str, str]], ...]:
+    """Ordered list of every 2x2 pinned-post layout up through ``exp``.
+
+    Index i in this list corresponds to ``BingoTeam.embed_msg_ids_json[i]``.
+    Base 4x4 contributes 4 posts; each subsequent expansion appends the
+    ``new_post_layouts_for(n)`` slab. This function's ordering is the
+    source of truth for post index ↔ layout mapping.
+    """
+    layouts: list[tuple[tuple[str, str], tuple[str, str]]] = []
+    for r in (0, 2):
+        for c in (0, 2):
+            layouts.append(_quadrant(r, c))
+    for n in range(1, exp + 1):
+        layouts.extend(new_post_layouts_for(n))
+    return tuple(layouts)
+
+
+@functools.lru_cache(maxsize=None)
+def new_post_layouts_for(
+    exp: int,
+) -> tuple[tuple[tuple[str, str], tuple[str, str]], ...]:
+    """The 2x2 layouts that expansion ``exp`` (≥ 1) contributes on top of
+    ``exp - 1``. Empty for ``exp <= 0``.
+    """
+    if exp <= 0:
+        return ()
+    prev_rows, prev_cols = board_dims(exp - 1)
+    _, new_cols = board_dims(exp)
+    layouts: list[tuple[tuple[str, str], tuple[str, str]]] = []
+    if new_cols > prev_cols:
+        # Odd expansion: add cols to every existing row-slab.
+        for r in range(0, prev_rows, 2):
+            layouts.append(_quadrant(r, prev_cols))
+    else:
+        # Even expansion: add rows spanning every col-slab of the new width.
+        for c in range(0, new_cols, 2):
+            layouts.append(_quadrant(prev_rows, c))
+    return tuple(layouts)
+
+
+def _quadrant(
+    r0: int, c0: int
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    return (
+        (cell_name(r0, c0), cell_name(r0, c0 + 1)),
+        (cell_name(r0 + 1, c0), cell_name(r0 + 1, c0 + 1)),
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def cell_to_post_index(exp: int) -> dict[str, int]:
+    """Reverse index: cell name → 1-based post index at this expansion."""
+    return {
+        cell: i + 1
+        for i, layout in enumerate(post_layouts(exp))
+        for row in layout
+        for cell in row
+    }
 
 # Placeholder image render settings. We generate cell PNGs locally via
 # Pillow because placehold.co (and every similar free service) truncates
 # long captions — a 512x512 canvas can hold ~200 chars, but the services
 # clip at ~80. Pillow is only used for placeholder text; user submissions
-# stay as their raw Discord CDN URLs. Total Pillow use per team is bounded
-# (16 cells x once at seed, plus staff-triggered regen), so the CPU cost
-# on a weak VPS is negligible.
+# stay as their raw Discord CDN URLs. Total Pillow use per team grows
+# linearly with expansion count (16 cells + ~8-12 per expansion, once at
+# seed plus per rerender for placeholder cells), so the CPU cost on a
+# weak VPS stays negligible.
 _PLACEHOLDER_PX = 512
 _PLACEHOLDER_BG = (30, 34, 48)  # dark navy
 _PLACEHOLDER_FG = (240, 240, 240)  # off-white
@@ -208,7 +300,7 @@ _INVITE_STARTER_TIMEOUT = 600
 # ``handle`` to noop the dispatcher when a submission is inbound, so both
 # sides look at the same pattern.
 _SUBMIT_RE = re.compile(
-    r"^\s*~return\s+81\s+submit\s+([A-Da-d][1-4])\s*$",
+    r"^\s*~return\s+81\s+submit\s+([A-Za-z]{1,4}\d{1,3})\s*$",
     flags=re.IGNORECASE,
 )
 
@@ -421,10 +513,10 @@ def _line_key(line: tuple[str, ...]) -> str:
 
 
 def _detect_new_bingos(
-    filled_before: set[str], filled_after: set[str]
+    filled_before: set[str], filled_after: set[str], exp: int
 ) -> list[tuple[str, ...]]:
     new: list[tuple[str, ...]] = []
-    for line in BINGO_LINES:
+    for line in bingo_lines(exp):
         cells = set(line)
         if cells <= filled_after and not (cells <= filled_before):
             new.append(line)
@@ -650,17 +742,35 @@ async def _resolve_thread(
 # ---------------------------------------------------------------------------
 
 
-def _status_text(filled: set[str]) -> str:
+def _status_text(filled: set[str], exp: int) -> str:
+    """Render the pinned status grid + header.
+
+    Cell tokens are padded to a per-row width so the grid stays aligned
+    in monospace regardless of how many chars the widest cell name uses
+    (``[A1]`` vs ``[AA100]``). Filled cells render as a centred check
+    within the same width; do NOT collapse the padding — a future dev
+    "cleaning up" the spacing will break alignment on wider boards.
+    """
+    rows, cols = board_dims(exp)
+    total_cells = rows * cols
+    max_name_w = max(len(cell_name(r, c)) for r in range(rows) for c in range(cols))
+    box_inner_w = max_name_w  # width inside the brackets
+    fill_token = "✓".center(box_inner_w)
     lines = []
-    for row in "ABCD":
-        cells = []
-        for col in "1234":
-            key = f"{row}{col}"
-            cells.append("[✅]" if key in filled else f"[{key}]")
-        lines.append("".join(cells))
+    for r in range(rows):
+        parts = []
+        for c in range(cols):
+            key = cell_name(r, c)
+            token = fill_token if key in filled else key.ljust(box_inner_w)
+            parts.append(f"[{token}]")
+        lines.append("".join(parts))
+    header = (
+        f"**Return 81 — Team Bingo**  ·  Board `{rows}×{cols}`"
+        f" (expansion {exp})  ·  `{len(filled)}/{total_cells}` cells complete"
+    )
     return (
-        "**Return 81 — Team Bingo**\n"
-        + "```\n" + "\n".join(lines) + "\n```\n"
+        header
+        + "\n```\n" + "\n".join(lines) + "\n```\n"
         + SUBMIT_COMMAND_HINT
     )
 
@@ -668,6 +778,7 @@ def _status_text(filled: set[str]) -> str:
 def _embeds_and_files_for_post(
     post_index: int,
     *,
+    layout: tuple[tuple[str, str], tuple[str, str]],
     team_number: int,
     captions: dict[str, str],
     submissions: dict[str, str],
@@ -690,7 +801,6 @@ def _embeds_and_files_for_post(
     Submitted cells point directly at the user's Discord CDN URL — no
     file upload needed for those.
     """
-    layout = _POST_LAYOUTS[post_index - 1]
     cells_flat = [cell for row in layout for cell in row]
     header_cells = " · ".join(cells_flat)
     grouping_url = (
@@ -731,12 +841,26 @@ async def _load_submissions(team: BingoTeam) -> dict[str, str]:
     return {r.cell: r.image_url for r in rows}
 
 
+def _parse_embed_msg_ids(team: BingoTeam) -> list[int]:
+    raw = team.embed_msg_ids_json
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning(
+            "r81 team %s: embed_msg_ids_json is corrupt (%r)", team.id, raw
+        )
+        return []
+    return [int(x) for x in parsed]
+
+
 async def _rerender_team_dashboard(
     bot: discord.Client, team: BingoTeam, *, only_post: Optional[int] = None
 ) -> None:
-    """Recompute the status message and the four embed posts from DB state.
+    """Recompute the status message and every pinned 2x2 post from DB state.
 
-    If ``only_post`` is set, only that post index (1..4) is edited; the
+    If ``only_post`` is set, only that post index (1-based) is edited; the
     status message is always refreshed.
     """
     thread = await _resolve_thread(bot, team.thread_id)
@@ -749,7 +873,9 @@ async def _rerender_team_dashboard(
     if team.status_msg_id:
         try:
             msg = await thread.fetch_message(team.status_msg_id)
-            await msg.edit(content=_status_text(set(submissions.keys())))
+            await msg.edit(
+                content=_status_text(set(submissions.keys()), team.expansion_count)
+            )
         except (discord.NotFound, discord.HTTPException) as e:
             logger.warning("rerender status edit failed: %s", e)
 
@@ -757,16 +883,18 @@ async def _rerender_team_dashboard(
     # URLs. time_ns() gives strict monotonicity even for back-to-back
     # edits within the same second.
     version = time.time_ns()
-    for i in range(1, 5):
+    msg_ids = _parse_embed_msg_ids(team)
+    layouts = post_layouts(team.expansion_count)
+    for i, (msg_id, layout) in enumerate(zip(msg_ids, layouts), start=1):
         if only_post is not None and i != only_post:
             continue
-        msg_id = getattr(team, f"embed_msg_{i}_id", None)
         if not msg_id:
             continue
         try:
             msg = await thread.fetch_message(msg_id)
             embeds, files = _embeds_and_files_for_post(
                 i,
+                layout=layout,
                 team_number=team.team_number,
                 captions=captions,
                 submissions=submissions,
@@ -842,32 +970,6 @@ class _PickButton(discord.ui.Button):
         except (ValueError, IndexError):
             slot = self._slot
         await _handle_picker_click(interaction, slot)
-
-
-class BingoBonusView(discord.ui.View):
-    """Persistent view for the post-bingo "extra card / extra teammate"
-    prompt. Idempotent: once a ``BingoBingoEvent.bonus_choice`` is set,
-    further clicks reply with "already claimed".
-    """
-
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(
-        label="Extra card",
-        style=discord.ButtonStyle.primary,
-        custom_id="r81:bonus:extra_card",
-    )
-    async def extra_card(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _handle_bonus_click(interaction, "extra_card")
-
-    @discord.ui.button(
-        label="Extra teammate",
-        style=discord.ButtonStyle.secondary,
-        custom_id="r81:bonus:extra_member",
-    )
-    async def extra_member(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _handle_bonus_click(interaction, "extra_member")
 
 
 # ---------------------------------------------------------------------------
@@ -1147,6 +1249,10 @@ async def _handle_picker_click(
             await _post_pinned_dashboard(thread, team)
         team.state = "playing"
         await team.save(update_fields=["state"])
+    else:
+        # Extra-teammate pick (via _announce_bingo). Adding this member
+        # tips the roster past 4, which triggers a board expansion.
+        await _apply_expansion_if_needed(interaction.client, team)
 
     # Delete the picker post outright — the candidate list has served
     # its purpose and shouldn't linger. Then post a fresh, minimal
@@ -1177,8 +1283,15 @@ async def _handle_picker_click(
     )
 
 
-async def _seed_cell_captions(team: BingoTeam) -> None:
-    for cell in BINGO_CELLS:
+async def _seed_cell_captions(
+    team: BingoTeam, *, only_cells: Optional[tuple[str, ...]] = None
+) -> None:
+    """Seed missing captions for either the full board at ``expansion_count``
+    or the given ``only_cells`` subset (used to backfill an expansion slab
+    without re-touching already-seeded cells).
+    """
+    cells = only_cells if only_cells is not None else bingo_cells(team.expansion_count)
+    for cell in cells:
         if await BingoCellState.filter(team=team, cell=cell).exists():
             continue
         caption = await _generate_cell_caption(team)
@@ -1186,10 +1299,15 @@ async def _seed_cell_captions(team: BingoTeam) -> None:
 
 
 async def _post_pinned_dashboard(thread: discord.Thread, team: BingoTeam) -> None:
+    """Post + pin the status message and one 2x2 embed per layout at the
+    current ``expansion_count``. Called once at the ``playing`` handoff.
+    """
     captions = await _load_captions(team)
     submissions = await _load_submissions(team)  # empty at this point
 
-    status_msg = await thread.send(_status_text(set(submissions.keys())))
+    status_msg = await thread.send(
+        _status_text(set(submissions.keys()), team.expansion_count)
+    )
     try:
         await status_msg.pin()
     except discord.HTTPException as e:
@@ -1197,9 +1315,11 @@ async def _post_pinned_dashboard(thread: discord.Thread, team: BingoTeam) -> Non
     team.status_msg_id = status_msg.id
 
     version = time.time_ns()
-    for i in range(1, 5):
+    msg_ids: list[int] = []
+    for i, layout in enumerate(post_layouts(team.expansion_count), start=1):
         embeds, files = _embeds_and_files_for_post(
             i,
+            layout=layout,
             team_number=team.team_number,
             captions=captions,
             submissions=submissions,
@@ -1210,15 +1330,89 @@ async def _post_pinned_dashboard(thread: discord.Thread, team: BingoTeam) -> Non
             await msg.pin()
         except discord.HTTPException as e:
             logger.warning("r81 pin embed %s failed: %s", i, e)
-        setattr(team, f"embed_msg_{i}_id", msg.id)
+        msg_ids.append(msg.id)
 
-    await team.save(update_fields=[
-        "status_msg_id",
-        "embed_msg_1_id",
-        "embed_msg_2_id",
-        "embed_msg_3_id",
-        "embed_msg_4_id",
-    ])
+    team.embed_msg_ids_json = json.dumps(msg_ids)
+    await team.save(update_fields=["status_msg_id", "embed_msg_ids_json"])
+
+
+async def _apply_expansion_if_needed(
+    bot: discord.Client, team: BingoTeam
+) -> bool:
+    """Expand the board when the roster has grown past 4 members.
+
+    Called after every ``BingoTeamMember`` insert that could push the count
+    over the threshold. Idempotent: safe to invoke multiple times per
+    member add, and any concurrent invocation is short-circuited by the
+    ``expansion_count >= new_exp`` guard.
+
+    Returns ``True`` if an expansion was applied, ``False`` otherwise.
+    """
+    if team.state != "playing":
+        return False
+    count = await BingoTeamMember.filter(team=team).count()
+    new_exp = max(0, count - 4)
+    if new_exp <= team.expansion_count:
+        return False
+
+    thread = await _resolve_thread(bot, team.thread_id)
+    if thread is None:
+        logger.warning(
+            "r81 team %s: cannot expand — thread %s unreachable",
+            team.id, team.thread_id,
+        )
+        return False
+
+    # Seed captions for just the new slab's cells.
+    prev_cells = set(bingo_cells(team.expansion_count))
+    new_cells = tuple(c for c in bingo_cells(new_exp) if c not in prev_cells)
+    await _seed_cell_captions(team, only_cells=new_cells)
+
+    # Post + pin one embed per new 2x2 quadrant, in the layout order
+    # ``post_layouts`` guarantees. The first new post index is len(prev).
+    captions = await _load_captions(team)
+    submissions = await _load_submissions(team)
+    version = time.time_ns()
+    existing_ids = _parse_embed_msg_ids(team)
+    new_layouts = new_post_layouts_for(new_exp)
+    for offset, layout in enumerate(new_layouts):
+        post_index = len(existing_ids) + offset + 1
+        embeds, files = _embeds_and_files_for_post(
+            post_index,
+            layout=layout,
+            team_number=team.team_number,
+            captions=captions,
+            submissions=submissions,
+            version=version,
+        )
+        msg = await thread.send(embeds=embeds, files=files)
+        try:
+            await msg.pin()
+        except discord.HTTPException as e:
+            logger.warning("r81 pin expansion embed %s failed: %s", post_index, e)
+        existing_ids.append(msg.id)
+
+    # Persist the new post ids + expansion count. Order matters: write the
+    # ids BEFORE bumping ``expansion_count`` so a concurrent rerender that
+    # reads stale state still only touches the old posts.
+    team.embed_msg_ids_json = json.dumps(existing_ids)
+    team.expansion_count = new_exp
+    await team.save(update_fields=["embed_msg_ids_json", "expansion_count"])
+
+    await _rerender_team_dashboard(bot, team)
+    rows, cols = board_dims(new_exp)
+    try:
+        await thread.send(
+            f"🧩 **Board expanded** — now `{rows}×{cols}` "
+            f"(expansion {new_exp}). {len(new_cells)} new cell(s) added."
+        )
+    except discord.HTTPException as e:
+        logger.warning("r81 expansion notice send failed: %s", e)
+    logger.info(
+        "r81 team %s expanded to exp=%s (%dx%d, +%d cells)",
+        team.id, new_exp, rows, cols, len(new_cells),
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1251,7 +1445,7 @@ async def _on_message_submit(bot: discord.Client, message: discord.Message) -> N
             "Only team members can submit here.", mention_author=False
         )
         return
-    if cell not in BINGO_CELLS:
+    if cell not in bingo_cells(team.expansion_count):
         return
     if not message.attachments:
         await message.reply(
@@ -1291,7 +1485,7 @@ async def _on_message_submit(bot: discord.Client, message: discord.Message) -> N
         )
 
     await _rerender_team_dashboard(
-        bot, team, only_post=CELL_TO_POST_INDEX[cell]
+        bot, team, only_post=cell_to_post_index(team.expansion_count)[cell]
     )
 
     try:
@@ -1309,9 +1503,9 @@ async def _on_message_submit(bot: discord.Client, message: discord.Message) -> N
         except discord.HTTPException:
             pass
 
-    new_lines = _detect_new_bingos(filled_before, filled_after)
+    new_lines = _detect_new_bingos(filled_before, filled_after, team.expansion_count)
     for line in new_lines:
-        await _announce_bingo(message.channel, team, line)
+        await _announce_bingo(bot, message.channel, team, line)
 
 
 async def _award_score(team: BingoTeam, per_member_points: int) -> None:
@@ -1333,6 +1527,15 @@ async def _award_score(team: BingoTeam, per_member_points: int) -> None:
 # members. Cleared/regenerated cells reverse the bonus by passing a
 # negative value.
 POINTS_PER_SUBJECT_BONUS = 1
+
+# Score awarded to every current team member each time a bingo line
+# completes. MUST be strictly greater than POINTS_PER_SUBJECT_BONUS —
+# completing a line should out-earn merely being named in a photo caption
+# so the incentive lines up with the spec ("more points for an actual
+# bingo line than for participation"). Not clawed back when a submission
+# is cleared: rewiring the retroactive line un-detection is not worth the
+# complexity for the once-a-week user impact.
+POINTS_PER_BINGO_LINE = 5
 
 
 async def _award_subject_bonus(
@@ -1405,121 +1608,71 @@ async def _caption_for_cell(team: BingoTeam, cell: str) -> Optional[str]:
 
 
 async def _announce_bingo(
-    thread: discord.Thread, team: BingoTeam, line: tuple[str, ...]
+    bot: discord.Client,
+    thread: discord.Thread,
+    team: BingoTeam,
+    line: tuple[str, ...],
 ) -> None:
+    """Announce a newly-completed bingo line + kick off the extra-teammate
+    picker. Idempotent via the unique constraint on ``BingoBingoEvent.line_key``.
+
+    Awards ``POINTS_PER_BINGO_LINE`` to every current team member, which is
+    strictly greater than ``POINTS_PER_SUBJECT_BONUS`` — completing a line
+    should out-earn just being named in a photo caption.
+
+    If a picker is already live in the thread (e.g. the previous bingo
+    hasn't resolved its picker yet), we skip posting a second one — the
+    ``BingoBingoEvent`` row still records the line so it can't fire again,
+    but no extra teammate is added for that specific bingo. Team gets the
+    points either way.
+    """
     key = _line_key(line)
     exists = await BingoBingoEvent.filter(team=team, line_key=key).first()
     if exists is not None:
         return
-    event = await BingoBingoEvent.create(team=team, line_key=key)
-    text = (
-        f"🎉 **Bingo!** Line: `{' → '.join(line)}`\n"
-        "Pick a bonus:\n"
-        "- **Extra card** — a second 4x4 for more points\n"
-        "- **Extra teammate** — expand the roster and split the load"
+    await BingoBingoEvent.create(team=team, line_key=key)
+    await _award_score(team, POINTS_PER_BINGO_LINE)
+
+    header = (
+        f"🎉 **Bingo!** Line: `{' → '.join(line)}` "
+        f"— `+{POINTS_PER_BINGO_LINE}` to each teammate."
     )
-    msg = await thread.send(text, view=BingoBonusView())
-    event.bonus_msg_id = msg.id
-    await event.save(update_fields=["bonus_msg_id"])
 
-
-# ---------------------------------------------------------------------------
-# Bonus click
-# ---------------------------------------------------------------------------
-
-
-async def _handle_bonus_click(
-    interaction: discord.Interaction, choice: str
-) -> None:
-    msg_id = interaction.message.id if interaction.message else None
-    if msg_id is None:
-        await interaction.response.send_message(
-            "Couldn't identify this bonus post.", ephemeral=True
-        )
-        return
-    event = await BingoBingoEvent.filter(bonus_msg_id=msg_id).prefetch_related("team").first()
-    if event is None:
-        await interaction.response.send_message(
-            "This bonus post is no longer active.", ephemeral=True
-        )
-        return
-    if event.bonus_choice is not None:
-        await interaction.response.send_message(
-            f"Already claimed: `{event.bonus_choice}`.", ephemeral=True
-        )
-        return
-    is_member = await BingoTeamMember.filter(
-        team=event.team, disc_uuid=str(interaction.user.id)
-    ).exists()
-    if not is_member:
-        await interaction.response.send_message(
-            "Only team members can claim this.", ephemeral=True
+    if team.picker_msg_id is not None:
+        await thread.send(
+            f"{header}\n"
+            "A picker is already active in this thread — no extra teammate "
+            "was queued for this bingo. Resolve the current picker first, "
+            "then the next bingo will trigger a fresh one."
         )
         return
 
-    event.bonus_choice = choice
-    await event.save(update_fields=["bonus_choice"])
-
-    if choice == "extra_card":
-        # Placeholder: reroll all captions for empty cells so the team has
-        # "fresh" prompts to keep working from. A dedicated second-card
-        # surface can replace this later.
-        await _reroll_empty_captions(event.team)
-        await _rerender_team_dashboard(interaction.client, event.team)
-        followup = (
-            "✅ Extra card claimed — empty slots have fresh captions."
+    candidates = await _wildcard_candidates_excluding_team(bot, team)
+    candidates = candidates[:EXTRA_MEMBER_PICKER_SIZE]
+    if not candidates:
+        await thread.send(
+            f"{header}\n"
+            "No eligible extra teammates are available right now — team "
+            "keeps the points but doesn't gain a member for this bingo."
         )
-    else:  # extra_member
-        candidates = await _wildcard_candidates_excluding_team(
-            interaction.client, event.team
-        )
-        # Limit to EXTRA_MEMBER_PICKER_SIZE — smaller shortlist than the
-        # initial wildcard pick because by now the team already has
-        # everyone they invited plus a wildcard, and huge menus get noisy.
-        candidates = candidates[:EXTRA_MEMBER_PICKER_SIZE]
-        thread = await _resolve_thread(interaction.client, event.team.thread_id)
-        if not candidates:
-            followup = "No eligible extra teammates are available right now."
-        elif thread is None:
-            followup = "Team thread is unreachable — can't post the picker."
-        elif event.team.picker_msg_id is not None:
-            # A prior picker is still live (either from wildcard or an
-            # earlier extra_member click). Refuse to stack pickers — one
-            # at a time keeps click dispatch unambiguous.
-            followup = (
-                "There's already an active picker in this thread. Resolve "
-                "it first (or ask staff to `~manage_return 81 rerollPool` "
-                "if it's stuck)."
-            )
-        else:
-            picker_msg = await thread.send(
-                content=_picker_intro(candidates),
-                view=_render_picker_view(candidates),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            event.team.picker_msg_id = picker_msg.id
-            event.team.picker_candidates_json = json.dumps(
-                [str(member.id) for member, _mc in candidates]
-            )
-            await event.team.save(
-                update_fields=["picker_msg_id", "picker_candidates_json"]
-            )
-            followup = (
-                f"✅ Extra-teammate picker posted with {len(candidates)} candidate(s). "
-                "Click a button to add them."
-            )
+        return
 
-    await interaction.response.send_message(followup, ephemeral=False)
-    try:
-        if interaction.message is not None:
-            await interaction.message.edit(view=None)
-    except discord.HTTPException:
-        pass
+    picker_msg = await thread.send(
+        content=f"{header}\n\n" + _picker_intro(candidates),
+        view=_render_picker_view(candidates),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    team.picker_msg_id = picker_msg.id
+    team.picker_candidates_json = json.dumps(
+        [str(member.id) for member, _mc in candidates]
+    )
+    await team.save(update_fields=["picker_msg_id", "picker_candidates_json"])
+
 
 
 async def _reroll_empty_captions(team: BingoTeam) -> None:
     filled = set(await BingoSubmission.filter(team=team).values_list("cell", flat=True))
-    for cell in BINGO_CELLS:
+    for cell in bingo_cells(team.expansion_count):
         if cell in filled:
             continue
         caption = await _generate_cell_caption(team)
@@ -1812,10 +1965,12 @@ async def _manage_list(ctx: commands.Context, args: list[str]) -> None:
         members = await BingoTeamMember.filter(team=t).count()
         subs = await BingoSubmission.filter(team=t).count()
         bingos = await BingoBingoEvent.filter(team=t).count()
+        total_cells = len(bingo_cells(t.expansion_count))
         thread = f"<#{t.thread_id}>" if t.thread_id else "(no thread)"
         lines.append(
             f"- **Team {t.team_number}** — state=`{t.state}` "
-            f"members={members} cells={subs}/16 bingos={bingos} {thread} "
+            f"members={members} cells={subs}/{total_cells} "
+            f"exp={t.expansion_count} bingos={bingos} {thread} "
             f"id=`{t.id}`"
         )
     await send_feedback(ctx, "\n".join(lines), persist=persist)
@@ -1839,24 +1994,78 @@ async def _manage_show(ctx: commands.Context, args: list[str]) -> None:
     subs = await BingoSubmission.filter(team=team)
     filled = {s.cell for s in subs}
     bingos = await BingoBingoEvent.filter(team=team)
+    rows, cols = board_dims(team.expansion_count)
     lines = [
         f"**Team {team.team_number}** (state=`{team.state}`, id=`{team.id}`)",
+        f"Board: `{rows}×{cols}` (expansion {team.expansion_count})",
         f"Thread: <#{team.thread_id}>" if team.thread_id else "Thread: (none)",
         "Members:",
     ]
     for m in members:
         lines.append(f"  - <@{m.disc_uuid}> ({m.role})")
     lines.append("Cells filled:")
-    for row in "ABCD":
+    for r in range(rows):
+        row_letter = row_label(r)
         row_cells = " ".join(
-            "✅" if f"{row}{col}" in filled else "·" for col in "1234"
+            "✅" if cell_name(r, c) in filled else "·" for c in range(cols)
         )
-        lines.append(f"  {row}: {row_cells}")
+        lines.append(f"  {row_letter}: {row_cells}")
     if bingos:
         lines.append("Bingos:")
         for b in bingos:
-            claim = f" → {b.bonus_choice}" if b.bonus_choice else ""
-            lines.append(f"  - `{b.line_key}`{claim}")
+            lines.append(f"  - `{b.line_key}`")
+    await send_feedback(ctx, "\n".join(lines), persist=persist)
+
+
+@register_manage(
+    WEEK, "sample", tier=Tier.STAFF,
+    help=(
+        "Preview N randomly-generated cell captions using real Wynn guild "
+        "member names — no DB writes, no team involvement. Handy for "
+        "sanity-checking new resources/main.yaml templates."
+    ),
+    usage="[count=1]",
+)
+async def _manage_sample(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    count = 1
+    if args:
+        try:
+            count = int(args[0])
+        except ValueError:
+            await send_feedback(
+                ctx, f"`{args[0]}` isn't a number.", persist=persist
+            )
+            return
+    count = max(1, min(count, 16))
+
+    roster = await MinecraftAccount.filter(guild=WYNN_GUILD_NAME).values_list(
+        "mc_username", flat=True
+    )
+    roster = [n for n in roster if n]
+    if not roster:
+        await send_feedback(
+            ctx,
+            f"No Wynncraft guild `{WYNN_GUILD_NAME}` members are in the DB "
+            "— nothing to sample against.",
+            persist=persist,
+        )
+        return
+
+    lines: list[str] = [
+        f"**Return 81 — {count} sample caption(s)** "
+        f"(pool drawn from `{WYNN_GUILD_NAME}`, {len(roster)} eligible)"
+    ]
+    for i in range(1, count + 1):
+        picks = random.sample(roster, k=min(4, len(roster)))
+        pool = _make_players_pool(picks)
+        try:
+            body = await _resolver.resolve(players=pool)
+        except Exception:
+            logger.exception("r81 sample: resolver failed")
+            body = "(resolver failed — check logs)"
+        pool_preview = ", ".join(f"`{n}`" for n in picks)
+        lines.append(f"{i}. Post a picture of {body}\n   _pool_: {pool_preview}")
     await send_feedback(ctx, "\n".join(lines), persist=persist)
 
 
@@ -1877,8 +2086,15 @@ async def _manage_regen(ctx: commands.Context, args: list[str]) -> None:
         await send_feedback(ctx, f"No team matches `{args[0]}`.", persist=persist)
         return
     cell = args[1].upper()
-    if cell not in BINGO_CELLS:
-        await send_feedback(ctx, f"`{cell}` isn't a valid cell (A1..D4).", persist=persist)
+    valid = bingo_cells(team.expansion_count)
+    if cell not in valid:
+        rows, cols = board_dims(team.expansion_count)
+        await send_feedback(
+            ctx,
+            f"`{cell}` isn't a valid cell (board is {rows}×{cols} at "
+            f"expansion {team.expansion_count}).",
+            persist=persist,
+        )
         return
     submission = await BingoSubmission.filter(team=team, cell=cell).first()
     if submission is not None:
@@ -1899,7 +2115,7 @@ async def _manage_regen(ctx: commands.Context, args: list[str]) -> None:
         cell_row.caption = new_caption
         await cell_row.save(update_fields=["caption"])
     await _rerender_team_dashboard(
-        ctx.bot, team, only_post=CELL_TO_POST_INDEX[cell]
+        ctx.bot, team, only_post=cell_to_post_index(team.expansion_count)[cell]
     )
     await send_feedback(
         ctx,
@@ -1936,7 +2152,7 @@ async def _manage_clear(ctx: commands.Context, args: list[str]) -> None:
     if caption:
         await _award_subject_bonus(team, caption, -POINTS_PER_SUBJECT_BONUS)
     await _rerender_team_dashboard(
-        ctx.bot, team, only_post=CELL_TO_POST_INDEX[cell]
+        ctx.bot, team, only_post=cell_to_post_index(team.expansion_count)[cell]
     )
     await send_feedback(
         ctx, f"✅ Cleared `{cell}` for team {team.team_number}.", persist=persist
@@ -2068,8 +2284,14 @@ async def _manage_force_add(ctx: commands.Context, args: list[str]) -> None:
             await thread.add_user(discord.Object(id=member.id))
         except discord.HTTPException as e:
             logger.warning("forceAdd add_user failed: %s", e)
+    # A forced insert past the base-4 roster triggers a board expansion.
+    # No-op if the team is still pre-playing or already at the right dims.
+    expanded = await _apply_expansion_if_needed(ctx.bot, team)
+    suffix = " (board expanded)." if expanded else "."
     await send_feedback(
-        ctx, f"✅ Added {member.mention} to team {team.team_number}.", persist=persist
+        ctx,
+        f"✅ Added {member.mention} to team {team.team_number}{suffix}",
+        persist=persist,
     )
 
 
@@ -2441,7 +2663,7 @@ async def _manage_sweep(ctx: commands.Context, args: list[str]) -> None:
 async def _delete_pinned_dashboard(
     bot: discord.Client, team: BingoTeam
 ) -> tuple[int, int]:
-    """Delete the status message + all four embed posts. Returns (deleted, missing).
+    """Delete the status message + every pinned embed post. Returns (deleted, missing).
 
     Silently skips messages that are already gone. Doesn't clear the id
     fields on the team row — the caller is expected to call
@@ -2449,13 +2671,12 @@ async def _delete_pinned_dashboard(
     with the fresh ids.
     """
     thread = await _resolve_thread(bot, team.thread_id)
+    embed_ids = _parse_embed_msg_ids(team)
     if thread is None:
-        return (0, 5)
+        return (0, 1 + len(embed_ids))
     deleted = 0
     missing = 0
-    ids = [team.status_msg_id] + [
-        getattr(team, f"embed_msg_{i}_id", None) for i in range(1, 5)
-    ]
+    ids = [team.status_msg_id, *embed_ids]
     for msg_id in ids:
         if not msg_id:
             missing += 1

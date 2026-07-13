@@ -199,11 +199,12 @@ class Return3Dashboard(Model):
 # Three players form a team via ``/return 81`` (caller + two invitees). Once
 # both invitees accept, a private thread is created under the r81 parent
 # channel and the team picks a fourth wildcard teammate from a shortlist of
-# ten drawn from the in-game guild. The team then works through a 4x4 bingo
-# card (A1..D4) by posting photos with ``~return 81 submit <cell>``; each
-# accepted submission scores the whole team via ``WeeklyEvent(week=81)``.
-# Bingo lines (rows/cols/diagonals) unlock optional "extra card" / "extra
-# teammate" bonuses. See ``cogs/events/returns/week_81.py`` for the flow.
+# ten drawn from the in-game guild. The team then works through a bingo card
+# by posting photos with ``~return 81 submit <cell>``; each accepted
+# submission scores the whole team via ``WeeklyEvent(week=81)``. Scoring a
+# bingo line auto-opens the extra-teammate picker, and every extra teammate
+# past the base 4-person roster expands the board by one 2x2-quadrant slab.
+# See ``cogs/events/returns/week_81.py`` for the geometry rules.
 
 
 class BingoTeam(Model):
@@ -211,10 +212,10 @@ class BingoTeam(Model):
     (wildcard shortlist posted) → playing (bingo card live) → disbanded.
 
     ``team_number`` is the monotonic integer used in the private thread's
-    display name (``r81-Team-<n>``). ``thread_id`` and the five ``*_msg_id``
-    columns are populated during ``_post_pinned_dashboard`` and let the
-    submission listener edit the right embed in place without walking
-    Discord history.
+    display name (``r81-Team-<n>``). ``embed_msg_ids_json`` is an ordered
+    JSON list of pinned dashboard message ids — one per 2x2 quadrant of the
+    current board. Its length grows in lockstep with ``expansion_count``
+    each time a bonus teammate joins.
     """
 
     id = fields.UUIDField(pk=True)
@@ -224,10 +225,13 @@ class BingoTeam(Model):
     state = fields.CharField(max_length=16)  # "pending" | "picking" | "playing" | "disbanded"
     thread_id = fields.BigIntField(null=True)
     status_msg_id = fields.BigIntField(null=True)
-    embed_msg_1_id = fields.BigIntField(null=True)
-    embed_msg_2_id = fields.BigIntField(null=True)
-    embed_msg_3_id = fields.BigIntField(null=True)
-    embed_msg_4_id = fields.BigIntField(null=True)
+    # Ordered JSON list of pinned embed message ids, index i = post i+1.
+    # Length = number of 2x2 quadrants at ``expansion_count``.
+    embed_msg_ids_json = fields.TextField(null=True)
+    # Number of board expansions applied. 0 = default 4x4 (4 posts).
+    # Each expansion adds 2 rows or 2 columns; see ``board_dims`` in
+    # ``week_81.py`` for the rows/cols function of this counter.
+    expansion_count = fields.IntField(default=0)
     picker_msg_id = fields.BigIntField(null=True, index=True)
     # Ordered 10-element JSON list of disc_uuids; slot i is the ith button
     # on the picker post. Populated when the team enters "picking".
@@ -271,8 +275,8 @@ class BingoTeamMember(Model):
     """One confirmed member of a team. ``role`` records how they joined:
     ``creator`` (invoked ``/return 81``), ``invitee`` (accepted invite),
     ``wildcard`` (picked from the random shortlist), ``forced`` (added by
-    staff via ``~manage_return 81 forceAdd``). More ``wildcard`` rows can
-    appear later if the team redeems ``extra_member`` bonuses.
+    staff via ``~manage_return 81 forceAdd``). Any insert that pushes the
+    roster past 4 triggers a board expansion in ``week_81.py``.
     """
 
     id = fields.UUIDField(pk=True)
@@ -289,16 +293,18 @@ class BingoTeamMember(Model):
 
 
 class BingoCellState(Model):
-    """Per-cell placeholder caption, seeded once when the team enters
-    ``playing``. Mutating this row via ``~manage_return 81 regen`` re-rolls
-    the caption without touching submissions or scores.
+    """Per-cell placeholder caption, seeded when a cell is first added to
+    the board — the initial 4x4 grid at ``playing`` transition, plus each
+    expansion slab. Mutating this row via ``~manage_return 81 regen``
+    re-rolls the caption without touching submissions or scores.
     """
 
     id = fields.UUIDField(pk=True)
     team = fields.ForeignKeyField(
         "returns.BingoTeam", related_name="cells", on_delete=fields.CASCADE
     )
-    cell = fields.CharField(max_length=2)  # "A1".."D4"
+    # Cell names like "A1", "D10", or (rarely) "AA100" post-expansion.
+    cell = fields.CharField(max_length=8)
     caption = fields.TextField()
 
     class Meta:
@@ -317,7 +323,7 @@ class BingoSubmission(Model):
     team = fields.ForeignKeyField(
         "returns.BingoTeam", related_name="submissions", on_delete=fields.CASCADE
     )
-    cell = fields.CharField(max_length=2)  # "A1".."D4"
+    cell = fields.CharField(max_length=8)
     submitter_disc_uuid = fields.CharField(max_length=255)
     image_url = fields.TextField()
     created_at = fields.DatetimeField(auto_now_add=True)
@@ -330,18 +336,15 @@ class BingoSubmission(Model):
 class BingoBingoEvent(Model):
     """One completed bingo line for a team. ``line_key`` is the canonical
     pipe-joined cell list (e.g. ``"A1|A2|A3|A4"``) so the same line can't
-    fire twice. ``bonus_choice`` is set the first time the team clicks
-    either follow-up button and the ``BingoBonusView`` becomes idempotent
-    against further clicks.
+    fire twice. Lines grow with the board — a 4x8 board's row line has 8
+    cells — which is why this is TextField rather than a bounded VARCHAR.
     """
 
     id = fields.UUIDField(pk=True)
     team = fields.ForeignKeyField(
         "returns.BingoTeam", related_name="bingos", on_delete=fields.CASCADE
     )
-    line_key = fields.CharField(max_length=32)
-    bonus_choice = fields.CharField(max_length=16, null=True)  # "extra_card" | "extra_member"
-    bonus_msg_id = fields.BigIntField(null=True, index=True)
+    line_key = fields.TextField()
     created_at = fields.DatetimeField(auto_now_add=True)
 
     class Meta:

@@ -2150,21 +2150,9 @@ async def _manage_links(ctx: commands.Context, args: list[str]) -> None:
         await send_feedback(ctx, "No r81 submissions yet.", persist=persist)
         return
 
-    # Chunk to fit Discord's 2000-char message limit; keep each entry whole.
-    chunks: list[str] = []
-    buf = ""
-    for e in entries:
-        block = e + "\n\n"
-        if buf and len(buf) + len(block) > 1900:
-            chunks.append(buf.rstrip())
-            buf = block
-        else:
-            buf += block
-    if buf:
-        chunks.append(buf.rstrip())
-
-    for chunk in chunks:
-        await send_feedback(ctx, chunk, persist=persist)
+    # One message per entry so Discord auto-embeds each image inline.
+    for entry in entries:
+        await send_feedback(ctx, entry, persist=persist)
 
 
 @register_manage(

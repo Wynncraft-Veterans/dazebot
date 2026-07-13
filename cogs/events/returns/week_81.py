@@ -1536,6 +1536,10 @@ def register_listeners(bot: commands.Bot) -> None:
             await _on_message_submit(bot, message)
         except Exception:
             logger.exception("r81 on_message_submit failed")
+        try:
+            await _track_admin_presence(message)
+        except Exception:
+            logger.exception("r81 admin presence tracking failed")
 
     bot.add_listener(_on_message, name="on_message")
 
@@ -2103,6 +2107,168 @@ async def _manage_force_remove(ctx: commands.Context, args: list[str]) -> None:
     )
 
 
+async def _mc_username_of(disc_id: int | str) -> Optional[str]:
+    """MC username linked to this Discord id, or ``None`` if unlinked.
+    Kept as its own helper because both the swap command and any future
+    caller need the same DiscordAccount → MinecraftAccount lookup."""
+    disc = await DiscordAccount.filter(disc_uuid=str(disc_id)).first()
+    if disc is None or disc.minecraft_account_id is None:
+        return None
+    mc = await MinecraftAccount.get_or_none(id=disc.minecraft_account_id)
+    return mc.mc_username if mc and mc.mc_username else None
+
+
+@register_manage(
+    WEEK, "swap", tier=Tier.STAFF,
+    help=(
+        "Swap an existing team member out for another player. Rewrites "
+        "any placeholder captions that mentioned the outgoing member's MC "
+        "username to the incoming member's MC username, then re-renders "
+        "the dashboard."
+    ),
+    usage="<team> <@out> <@in>",
+)
+async def _manage_swap(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    if len(args) < 3:
+        await send_feedback(
+            ctx,
+            "Usage: `~manage_return 81 swap <team> <@out> <@in>`",
+            persist=persist,
+        )
+        return
+    team = await _resolve_team_by_id_or_number(args[0])
+    if team is None:
+        await send_feedback(ctx, f"No team matches `{args[0]}`.", persist=persist)
+        return
+    if team.state == "disbanded":
+        await send_feedback(
+            ctx, f"Team {team.team_number} is disbanded.", persist=persist
+        )
+        return
+
+    out_member, err = await _resolve_invitee(ctx.bot, args[1], CurrConfig.GUILD)
+    if err:
+        await send_feedback(ctx, f"Outgoing: {err}", persist=persist)
+        return
+    assert out_member is not None
+    in_member, err = await _resolve_invitee(ctx.bot, args[2], CurrConfig.GUILD)
+    if err:
+        await send_feedback(ctx, f"Incoming: {err}", persist=persist)
+        return
+    assert in_member is not None
+
+    if out_member.id == in_member.id:
+        await send_feedback(
+            ctx, "The outgoing and incoming users must differ.", persist=persist
+        )
+        return
+
+    out_row = await BingoTeamMember.filter(
+        team=team, disc_uuid=str(out_member.id)
+    ).first()
+    if out_row is None:
+        await send_feedback(
+            ctx,
+            f"{out_member.mention} isn't on team {team.team_number}.",
+            persist=persist,
+        )
+        return
+    if await BingoTeamMember.filter(
+        team=team, disc_uuid=str(in_member.id)
+    ).exists():
+        await send_feedback(
+            ctx,
+            f"{in_member.mention} is already on team {team.team_number}.",
+            persist=persist,
+        )
+        return
+    other_team = await _current_team_for(str(in_member.id))
+    if other_team is not None and other_team.id != team.id:
+        await send_feedback(
+            ctx,
+            f"{in_member.mention} is already on a different r81 team "
+            f"(#{other_team.team_number}). Resolve that first.",
+            persist=persist,
+        )
+        return
+
+    # Fetch MC usernames BEFORE the roster mutation so caption rewrites
+    # see the correct name pair even if the DB rows shift underneath.
+    out_mc = await _mc_username_of(out_member.id)
+    in_mc = await _mc_username_of(in_member.id)
+
+    # Roster mutation: preserve the outgoing role — the incoming player
+    # inherits the slot. (Alternatively we could tag as "forced" to mark
+    # the intervention, but preserving keeps the "how they got here"
+    # semantic more useful — the incoming member replaces them structurally.)
+    original_role = out_row.role
+    await out_row.delete()
+    await BingoTeamMember.create(
+        team=team, disc_uuid=str(in_member.id), role=original_role
+    )
+    if team.creator_disc_uuid == str(out_member.id):
+        team.creator_disc_uuid = str(in_member.id)
+        await team.save(update_fields=["creator_disc_uuid"])
+
+    # Thread membership: add first, then remove — reduces the window where
+    # the team has one fewer visible member and matches the sweeper's
+    # exempt rules (the incoming user is now in BingoTeamMember before
+    # the next tick runs).
+    thread = await _resolve_thread(ctx.bot, team.thread_id)
+    if thread is not None:
+        try:
+            await thread.add_user(discord.Object(id=in_member.id))
+        except discord.HTTPException as e:
+            logger.warning("swap: add %s to thread failed: %s", in_member.id, e)
+        try:
+            await thread.remove_user(discord.Object(id=out_member.id))
+        except (discord.NotFound, discord.HTTPException) as e:
+            logger.debug("swap: remove %s from thread: %s", out_member.id, e)
+
+    # Caption rewrite: word-boundary case-insensitive substitution of the
+    # outgoing MC username with the incoming one across every cell.
+    rewrites = 0
+    if out_mc and in_mc and out_mc.lower() != in_mc.lower():
+        pattern = re.compile(rf"\b{re.escape(out_mc)}\b", re.IGNORECASE)
+        for row in await BingoCellState.filter(team=team):
+            replaced = pattern.sub(in_mc, row.caption)
+            if replaced != row.caption:
+                row.caption = replaced
+                await row.save(update_fields=["caption"])
+                rewrites += 1
+
+    # Any of the 4 posts could have been touched — full rerender.
+    await _rerender_team_dashboard(ctx.bot, team)
+
+    if thread is not None:
+        try:
+            await thread.send(
+                f"🔄 {in_member.mention} has replaced {out_member.mention} on the team.",
+                allowed_mentions=discord.AllowedMentions(
+                    users=True, roles=False, everyone=False
+                ),
+            )
+        except discord.HTTPException as e:
+            logger.warning("swap: thread notice send failed: %s", e)
+
+    mc_note = (
+        f"MC rename: `{out_mc}` → `{in_mc}`."
+        if (out_mc and in_mc and out_mc.lower() != in_mc.lower())
+        else "(No MC name change — captions untouched.)"
+    )
+    await send_feedback(
+        ctx,
+        f"✅ Team {team.team_number}: {out_member.mention} → {in_member.mention}. "
+        f"{rewrites} caption(s) rewritten. {mc_note}",
+        persist=persist,
+    )
+    logger.info(
+        "r81 swap team=%s out=%s in=%s role=%s captions_rewritten=%d",
+        team.team_number, out_member.id, in_member.id, original_role, rewrites,
+    )
+
+
 # --- Thread member sweep -----------------------------------------------------
 #
 # Anything that adds a user to a private thread (a stray @mention, a legacy
@@ -2114,18 +2280,62 @@ async def _manage_force_remove(ctx: commands.Context, args: list[str]) -> None:
 _SWEEP_INTERVAL = timedelta(minutes=10)
 _last_sweep_at = datetime.min.replace(tzinfo=timezone.utc)
 
+# Admin/strategist/operator users who have spoken in a specific team's
+# thread. Once they've posted a message they're treated as "here by their
+# own accord" and get exempted from sweeps — the reasoning is that an
+# admin dragged in by an @-mention is silent by default (they never
+# opened the thread), so speaking is the earliest reliable signal of
+# intentional presence. Keyed by (str(team.id), str(disc_uuid)); cleared
+# on restart (the admin just re-speaks once to re-exempt).
+_ADMIN_SPOKE_IN_THREAD: set[tuple[str, str]] = set()
+
+
+async def _track_admin_presence(message: discord.Message) -> None:
+    """If a privileged user speaks in a team thread, mark them as
+    intentionally present. The sweeper reads
+    :data:`_ADMIN_SPOKE_IN_THREAD` to decide whom to exempt.
+    """
+    if message.author.bot:
+        return
+    if not isinstance(message.channel, discord.Thread):
+        return
+    if not isinstance(message.author, discord.Member):
+        return
+    if not tier_allows(message.author, Tier.STRATEGIST):
+        return
+    team = await BingoTeam.filter(thread_id=message.channel.id).first()
+    if team is None or team.state == "disbanded":
+        return
+    key = (str(team.id), str(message.author.id))
+    if key in _ADMIN_SPOKE_IN_THREAD:
+        return
+    _ADMIN_SPOKE_IN_THREAD.add(key)
+    logger.info(
+        "sweep: exempting privileged lurker %s in team %s thread %s (spoke)",
+        message.author.id, team.team_number, message.channel.id,
+    )
+
 
 async def _sweep_team_threads(bot: discord.Client) -> tuple[int, int, int]:
     """Walk every non-disbanded team's thread and remove users who aren't
     in ``BingoTeamMember``. Returns ``(checked_threads, removed_users,
     unreachable_threads)``.
 
-    The bot itself is never removed. ``NotFound`` on remove is treated as
-    a no-op (user beat us to leaving). Runs sequentially across teams
-    because parallelism isn't worth it for a periodic reconciler.
+    Exemptions:
+    * The bot itself is never removed.
+    * A privileged user (STRATEGIST or higher) who has spoken in the
+      thread this process lifetime — see :data:`_ADMIN_SPOKE_IN_THREAD` —
+      is exempt. "Spoke" is the proxy for "here by their own accord",
+      since Discord doesn't expose how a member was added (self-join vs
+      auto-add-via-mention).
+
+    ``NotFound`` on remove is treated as a no-op (user beat us to leaving).
+    Runs sequentially across teams — parallelism isn't worth it for a
+    periodic reconciler.
     """
     teams = await BingoTeam.exclude(state="disbanded")
     bot_id = bot.user.id if bot.user is not None else None
+    guild = bot.get_guild(CurrConfig.GUILD)
     checked = removed = unreachable = 0
     for team in teams:
         if not team.thread_id:
@@ -2151,6 +2361,13 @@ async def _sweep_team_threads(bot: discord.Client) -> tuple[int, int, int]:
                 continue
             if str(tm.id) in expected:
                 continue
+            # Privileged-lurker exemption: only skips the remove if the
+            # user has spoken in this thread AND is still privileged now
+            # (re-check the role in case they were demoted since).
+            if (str(team.id), str(tm.id)) in _ADMIN_SPOKE_IN_THREAD:
+                gm = guild.get_member(tm.id) if guild is not None else None
+                if gm is not None and tier_allows(gm, Tier.STRATEGIST):
+                    continue
             try:
                 await thread.remove_user(discord.Object(id=tm.id))
                 removed += 1

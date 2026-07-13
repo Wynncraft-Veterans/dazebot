@@ -1256,18 +1256,29 @@ async def _handle_picker_click(
         except (discord.HTTPException, ValueError) as e:
             logger.warning("r81 add wildcard %s to thread: %s", picked_disc_uuid, e)
 
-    if is_wildcard_pick:
-        # Seed cell captions and post the dashboard — the "playing"
-        # transition is a wildcard-pick-only side effect.
-        await _seed_cell_captions(team)
-        if thread is not None:
-            await _post_pinned_dashboard(thread, team)
-        team.state = "playing"
-        await team.save(update_fields=["state"])
-    else:
-        # Extra-teammate pick (via _announce_bingo). Adding this member
-        # tips the roster past 4, which triggers a board expansion.
-        await _apply_expansion_if_needed(interaction.client, team)
+    # Any exception in the side-effect block below would abort the picker
+    # callback and leave the picker message undeleted (visible + clickable
+    # but "interaction failed" on further clicks). Log and continue so the
+    # cleanup steps at the bottom of this function always run.
+    try:
+        if is_wildcard_pick:
+            # Seed cell captions and post the dashboard — the "playing"
+            # transition is a wildcard-pick-only side effect.
+            await _seed_cell_captions(team)
+            if thread is not None:
+                await _post_pinned_dashboard(thread, team)
+            team.state = "playing"
+            await team.save(update_fields=["state"])
+        else:
+            # Extra-teammate pick (via _announce_bingo). Adding this
+            # member tips the roster past 4, which triggers a board
+            # expansion.
+            await _apply_expansion_if_needed(interaction.client, team)
+    except Exception:
+        logger.exception(
+            "r81 team %s: picker side-effect (%s) failed; cleaning up picker",
+            team.id, "wildcard" if is_wildcard_pick else "extra teammate",
+        )
 
     # Delete the picker post outright — the candidate list has served
     # its purpose and shouldn't linger. Then post a fresh, minimal
@@ -1417,6 +1428,9 @@ async def _apply_expansion_if_needed(
 
     # Post + pin one embed per new 2x2 quadrant, in the layout order
     # ``post_layouts`` guarantees. The first new post index is len(prev).
+    # Each send is individually guarded so a mid-loop HTTP hiccup can't
+    # bubble up and leave the caller (picker callback) with the picker
+    # message undeleted and the flow frozen.
     captions = await _load_captions(team)
     submissions = await _load_submissions(team)
     version = time.time_ns()
@@ -1432,7 +1446,15 @@ async def _apply_expansion_if_needed(
             submissions=submissions,
             version=version,
         )
-        msg = await thread.send(embeds=embeds, files=files)
+        try:
+            msg = await thread.send(embeds=embeds, files=files)
+        except discord.HTTPException as e:
+            logger.warning(
+                "r81 team %s: expansion embed %s send failed (%s); "
+                "aborting expansion — persisted state unchanged.",
+                team.id, post_index, e,
+            )
+            return False
         try:
             await msg.pin()
         except discord.HTTPException as e:
@@ -1505,7 +1527,16 @@ async def _on_message_submit(bot: discord.Client, message: discord.Message) -> N
             "Only team members can submit here.", mention_author=False
         )
         return
-    if cell not in bingo_cells(_team_exp(team)):
+    valid_cells = bingo_cells(_team_exp(team))
+    if cell not in valid_cells:
+        rows, cols = board_dims(_team_exp(team))
+        await message.reply(
+            f"`{cell}` isn't on this team's board — currently {rows}×{cols} "
+            f"(cells `{valid_cells[0]}`..`{valid_cells[-1]}`). If the board "
+            "was recently expanded and looks out of sync, ask staff to "
+            f"`~manage_return 81 rerenderHard {team.team_number}`.",
+            mention_author=False,
+        )
         return
     if not message.attachments:
         await message.reply(
@@ -2622,11 +2653,11 @@ async def _sweep_team_threads(bot: discord.Client) -> tuple[int, int, int]:
 
     Exemptions:
     * The bot itself is never removed.
-    * A privileged user (STRATEGIST or higher) who has spoken in the
-      thread this process lifetime — see :data:`_ADMIN_SPOKE_IN_THREAD` —
-      is exempt. "Spoke" is the proxy for "here by their own accord",
-      since Discord doesn't expose how a member was added (self-join vs
-      auto-add-via-mention).
+    * A privileged user (STAFF or higher on the returns Tier) who has
+      spoken in the thread this process lifetime — see
+      :data:`_ADMIN_SPOKE_IN_THREAD` — is exempt. "Spoke" is the proxy
+      for "here by their own accord", since Discord doesn't expose how
+      a member was added (self-join vs auto-add-via-mention).
 
     ``NotFound`` on remove is treated as a no-op (user beat us to leaving).
     Runs sequentially across teams — parallelism isn't worth it for a
@@ -2665,7 +2696,7 @@ async def _sweep_team_threads(bot: discord.Client) -> tuple[int, int, int]:
             # (re-check the role in case they were demoted since).
             if (str(team.id), str(tm.id)) in _ADMIN_SPOKE_IN_THREAD:
                 gm = guild.get_member(tm.id) if guild is not None else None
-                if gm is not None and tier_allows(gm, Tier.STRATEGIST):
+                if gm is not None and tier_allows(gm, Tier.STAFF):
                     continue
             try:
                 await thread.remove_user(discord.Object(id=tm.id))
@@ -2787,19 +2818,54 @@ async def _manage_rerender_hard(ctx: commands.Context, args: list[str]) -> None:
         await send_feedback(ctx, "Team thread is unreachable.", persist=persist)
         return
 
+    # Reconcile expansion_count against the current roster BEFORE deleting
+    # anything. If the team is behind (e.g. an earlier _apply_expansion
+    # posted embeds but the save failed on stale schema, or an operator
+    # forceAdd'd past 4 without an expansion firing), catch the DB state
+    # up so the fresh dashboard renders at the right dims. Cells for
+    # skipped-past expansions get seeded here too, so the captions exist
+    # by the time _post_pinned_dashboard runs.
+    member_count = await BingoTeamMember.filter(team=team).count()
+    target_exp = max(0, member_count - 4)
+    caught_up = 0
+    if target_exp > _team_exp(team):
+        prev_cells = set(bingo_cells(_team_exp(team)))
+        new_cells = tuple(c for c in bingo_cells(target_exp) if c not in prev_cells)
+        await _seed_cell_captions(team, only_cells=new_cells)
+        team.expansion_count = target_exp
+        try:
+            await team.save(update_fields=["expansion_count"])
+        except OperationalError as e:
+            await send_feedback(
+                ctx,
+                f"Team {team.team_number}: schema is stale — restart the "
+                f"container so orm._ensure_r81_schema can heal it, then "
+                f"retry. ({e})",
+                persist=persist,
+            )
+            return
+        caught_up = target_exp
+
     deleted, missing = await _delete_pinned_dashboard(ctx.bot, team)
     # _post_pinned_dashboard writes fresh msg ids into team and saves them,
     # so no manual null-out needed here.
     await _post_pinned_dashboard(thread, team)
+    rows, cols = board_dims(_team_exp(team))
+    posts = len(post_layouts(_team_exp(team)))
+    caught_up_note = (
+        f" caught up to exp={caught_up}." if caught_up else ""
+    )
     await send_feedback(
         ctx,
-        f"✅ Rerendered team {team.team_number}: deleted {deleted} old message(s) "
-        f"({missing} were already missing), sent + pinned 5 fresh ones.",
+        f"✅ Rerendered team {team.team_number} at `{rows}×{cols}` "
+        f"({posts} embed posts): deleted {deleted} old message(s) "
+        f"({missing} were already missing), sent + pinned {1 + posts} fresh ones."
+        + caught_up_note,
         persist=persist,
     )
     logger.info(
-        "r81 rerenderHard team %s (#%d) by %s: deleted=%d missing=%d",
-        team.id, team.team_number, ctx.author.id, deleted, missing,
+        "r81 rerenderHard team %s (#%d) by %s: deleted=%d missing=%d exp=%d",
+        team.id, team.team_number, ctx.author.id, deleted, missing, _team_exp(team),
     )
 
 

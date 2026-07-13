@@ -2064,8 +2064,7 @@ async def _manage_sample(ctx: commands.Context, args: list[str]) -> None:
         except Exception:
             logger.exception("r81 sample: resolver failed")
             body = "(resolver failed — check logs)"
-        pool_preview = ", ".join(f"`{n}`" for n in picks)
-        lines.append(f"{i}. Post a picture of {body}\n   _pool_: {pool_preview}")
+        lines.append(f"{i}. Post a picture of {body}")
     await send_feedback(ctx, "\n".join(lines), persist=persist)
 
 

@@ -44,14 +44,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import re
 import time
-import urllib.parse
+from io import BytesIO
 from typing import Optional
 
 import discord
 from discord.ext import commands
+from PIL import Image, ImageDraw, ImageFont
 
 from cogs.events.returns import (
     Tier,
@@ -153,19 +155,34 @@ CELL_TO_POST_INDEX: dict[str, int] = {
     for cell in row
 }
 
-# External placeholder-image service. Renders the cell name + caption
-# text directly onto a solid-colour PNG so no image library is needed on
-# our (weak) VPS. Free, no API key. If it goes down, embeds show a broken
-# image but the flow still works — user submissions replace them anyway.
-_PLACEHOLDER_HOST = "https://placehold.co"
-_PLACEHOLDER_SIZE = "512x512"
-_PLACEHOLDER_BG = "1e2230"  # dark navy
-_PLACEHOLDER_FG = "f0f0f0"  # off-white
-# placehold.co supported fonts (as of 2026-07): Lato, Lora, Montserrat,
-# Noto Sans, Open Sans, Oswald, Playfair Display, Poppins, PT Sans,
-# Raleway, Roboto, Source Sans Pro. Open Sans is the closest to Discord's
-# UI font and reads well at 512x512 with multi-line captions.
-_PLACEHOLDER_FONT = "open sans"
+# Placeholder image render settings. We generate cell PNGs locally via
+# Pillow because placehold.co (and every similar free service) truncates
+# long captions — a 512x512 canvas can hold ~200 chars, but the services
+# clip at ~80. Pillow is only used for placeholder text; user submissions
+# stay as their raw Discord CDN URLs. Total Pillow use per team is bounded
+# (16 cells x once at seed, plus staff-triggered regen), so the CPU cost
+# on a weak VPS is negligible.
+_PLACEHOLDER_PX = 512
+_PLACEHOLDER_BG = (30, 34, 48)  # dark navy
+_PLACEHOLDER_FG = (240, 240, 240)  # off-white
+_PLACEHOLDER_LABEL_SIZE = 72
+_PLACEHOLDER_CAPTION_SIZE = 28
+_PLACEHOLDER_MARGIN = 32  # px padding on each side
+
+# TrueType font search order. First hit wins. fonts-dejavu-core (installed
+# via the vets-deploy Dockerfile) provides the Linux path; Windows dev has
+# Arial. If none are found we fall back to Pillow's bundled default which
+# is legible in Pillow 10+ (the size argument routes through a scalable
+# vector font, not the tiny 8px bitmap of older releases).
+_FONT_PATHS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "C:\\Windows\\Fonts\\arialbd.ttf",
+    "C:\\Windows\\Fonts\\arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+)
 
 # Arbitrary anchor URL: 4 embeds in one message that share the same ``url``
 # collapse into a 2x2 gallery in the Discord client — that's how we get
@@ -391,52 +408,110 @@ def _detect_new_bingos(
 # ---------------------------------------------------------------------------
 
 
-# Rough character width used to decide when to wrap. placehold.co uses a
-# centred, non-monospaced font whose exact metrics we don't know; ~18 chars
-# per line renders comfortably on a 512x512 square. Adjust if captions
-# look cramped or over-wrapped in practice.
-_PLACEHOLDER_WRAP_WIDTH = 18
+_FONT_CACHE: dict[int, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
 
 
-def _wrap_for_placeholder(text: str, width: int = _PLACEHOLDER_WRAP_WIDTH) -> list[str]:
-    """Word-wrap ``text`` to ~``width`` chars per line. Never splits a word."""
+def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """Try ``_FONT_PATHS`` in order; cache per size; fall back to Pillow's
+    bundled default (which in Pillow 10+ is a scalable TrueType that
+    accepts a ``size`` argument — legible, unlike the tiny bitmap of older
+    releases).
+    """
+    cached = _FONT_CACHE.get(size)
+    if cached is not None:
+        return cached
+    for path in _FONT_PATHS:
+        if os.path.exists(path):
+            try:
+                font = ImageFont.truetype(path, size)
+                _FONT_CACHE[size] = font
+                return font
+            except OSError:
+                continue
+    try:
+        font = ImageFont.load_default(size=size)
+    except TypeError:  # Pillow < 10 doesn't accept size on load_default
+        font = ImageFont.load_default()
+    _FONT_CACHE[size] = font
+    return font
+
+
+def _wrap_to_width(
+    text: str, font, max_width: int
+) -> list[str]:
+    """Greedy word wrap using pixel measurements from ``font``.
+
+    Never splits a word; if a single word is wider than ``max_width`` the
+    caller accepts it overflowing rather than mangling it (unlikely with
+    natural-language captions).
+    """
+    words = text.split()
     lines: list[str] = []
     current: list[str] = []
-    current_len = 0
-    for word in text.split():
-        add = len(word) + (1 if current else 0)
-        if current and current_len + add > width:
+    for word in words:
+        trial = " ".join(current + [word]) if current else word
+        # font.getlength is Pillow 9.2+; falls back to getbbox on older.
+        try:
+            width = font.getlength(trial)
+        except AttributeError:
+            width = font.getbbox(trial)[2]
+        if width <= max_width or not current:
+            current.append(word)
+        else:
             lines.append(" ".join(current))
             current = [word]
-            current_len = len(word)
-        else:
-            current.append(word)
-            current_len += add
     if current:
         lines.append(" ".join(current))
     return lines
 
 
-def _placeholder_url(cell: str, caption: str, version: int) -> str:
-    """Build a placehold.co URL that bakes the cell name + wrapped caption
-    into a 512x512 PNG.
+def _render_cell_png(cell: str, caption: str) -> bytes:
+    """Render a single 512x512 PNG with the cell label + wrapped caption.
 
-    Uses ``\\n`` (literal backslash-n) between wrapped lines — placehold.co
-    interprets it as a line break in the rendered image. The ``version``
-    is appended as a cache-buster so Discord's CDN proxy re-fetches after
-    every regen / edit.
+    Layout: label anchored at the top, caption wrapped and vertically
+    centred in the remaining space. Uses solid-fill background because
+    that's what a placeholder should look like — the user's photo takes
+    over on submission.
     """
-    lines: list[str] = [cell, ""]  # cell label on its own line, then a blank
-    lines.extend(_wrap_for_placeholder(caption))
-    text_param = "\\n".join(lines)  # literal backslash-n; placehold.co splits on it
-    q = urllib.parse.urlencode(
-        {"text": text_param, "font": _PLACEHOLDER_FONT},
-        quote_via=urllib.parse.quote_plus,
+    W = _PLACEHOLDER_PX
+    canvas = Image.new("RGB", (W, W), _PLACEHOLDER_BG)
+    draw = ImageDraw.Draw(canvas)
+
+    label_font = _load_font(_PLACEHOLDER_LABEL_SIZE)
+    caption_font = _load_font(_PLACEHOLDER_CAPTION_SIZE)
+
+    # Label: horizontally centred, near the top.
+    draw.text(
+        (W // 2, _PLACEHOLDER_MARGIN + _PLACEHOLDER_LABEL_SIZE // 2),
+        cell,
+        fill=_PLACEHOLDER_FG,
+        font=label_font,
+        anchor="mm",
     )
-    return (
-        f"{_PLACEHOLDER_HOST}/{_PLACEHOLDER_SIZE}"
-        f"/{_PLACEHOLDER_BG}/{_PLACEHOLDER_FG}/png?{q}&_v={version}"
-    )
+
+    # Caption: wrap to inner width, vertically centre in the remaining band.
+    inner_w = W - 2 * _PLACEHOLDER_MARGIN
+    lines = _wrap_to_width(caption, caption_font, inner_w)
+    line_h = int(_PLACEHOLDER_CAPTION_SIZE * 1.25)
+    caption_band_top = _PLACEHOLDER_MARGIN + _PLACEHOLDER_LABEL_SIZE + 24
+    caption_band_bottom = W - _PLACEHOLDER_MARGIN
+    band_h = caption_band_bottom - caption_band_top
+    total_text_h = line_h * len(lines)
+    y = caption_band_top + max(0, (band_h - total_text_h) // 2) + line_h // 2
+
+    for line in lines:
+        draw.text(
+            (W // 2, y),
+            line,
+            fill=_PLACEHOLDER_FG,
+            font=caption_font,
+            anchor="mm",
+        )
+        y += line_h
+
+    buf = BytesIO()
+    canvas.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
 
 
 # In-memory name override for `~manage_return 81 fakeTest` teams. Keyed by
@@ -562,15 +637,15 @@ def _status_text(filled: set[str]) -> str:
     )
 
 
-def _embeds_for_post(
+def _embeds_and_files_for_post(
     post_index: int,
     *,
     team_number: int,
     captions: dict[str, str],
     submissions: dict[str, str],
     version: int,
-) -> list[discord.Embed]:
-    """Return four embeds — one per cell in the 2x2 layout.
+) -> tuple[list[discord.Embed], list[discord.File]]:
+    """Return (embeds, files) for one 2x2 post.
 
     All four embeds share the same ``url`` field; Discord's client groups
     same-URL embeds attached to a single message into a gallery, giving
@@ -578,8 +653,14 @@ def _embeds_for_post(
     carries the post title + submit-command hint; the others are
     image-only so they collapse cleanly into the gallery.
 
-    ``version`` is threaded through the placeholder URL as a cache-buster
-    so an edit forces Discord's proxy to re-fetch a fresh image.
+    Placeholder cells reference locally-rendered PNGs attached to the
+    same message via ``attachment://<filename>``. ``version`` is baked
+    into the filename so every edit produces new attachment CDN URLs,
+    which is what actually busts Discord's client-side image cache
+    (query-string cache-busters get stripped by some clients).
+
+    Submitted cells point directly at the user's Discord CDN URL — no
+    file upload needed for those.
     """
     layout = _POST_LAYOUTS[post_index - 1]
     cells_flat = [cell for row in layout for cell in row]
@@ -589,6 +670,7 @@ def _embeds_for_post(
     )
 
     embeds: list[discord.Embed] = []
+    files: list[discord.File] = []
     for idx, cell in enumerate(cells_flat):
         caption = captions.get(cell, "(missing caption)")
         submitted = submissions.get(cell)
@@ -603,9 +685,12 @@ def _embeds_for_post(
         if submitted:
             embed.set_image(url=submitted)
         else:
-            embed.set_image(url=_placeholder_url(cell, caption, version))
+            png_bytes = _render_cell_png(cell, caption)
+            fname = f"r81_t{team_number}_p{post_index}_{cell}_v{version}.png"
+            files.append(discord.File(BytesIO(png_bytes), filename=fname))
+            embed.set_image(url=f"attachment://{fname}")
         embeds.append(embed)
-    return embeds
+    return embeds, files
 
 
 async def _load_captions(team: BingoTeam) -> dict[str, str]:
@@ -652,15 +737,17 @@ async def _rerender_team_dashboard(
             continue
         try:
             msg = await thread.fetch_message(msg_id)
-            await msg.edit(
-                embeds=_embeds_for_post(
-                    i,
-                    team_number=team.team_number,
-                    captions=captions,
-                    submissions=submissions,
-                    version=version,
-                )
+            embeds, files = _embeds_and_files_for_post(
+                i,
+                team_number=team.team_number,
+                captions=captions,
+                submissions=submissions,
+                version=version,
             )
+            # attachments= replaces the message's file list wholesale;
+            # each rerender uploads new PNGs with unique filenames so the
+            # new CDN URLs bust any client-side image cache.
+            await msg.edit(embeds=embeds, attachments=files)
         except (discord.NotFound, discord.HTTPException) as e:
             logger.warning("rerender embed %s edit failed: %s", i, e)
 
@@ -1056,15 +1143,14 @@ async def _post_pinned_dashboard(thread: discord.Thread, team: BingoTeam) -> Non
 
     version = time.time_ns()
     for i in range(1, 5):
-        msg = await thread.send(
-            embeds=_embeds_for_post(
-                i,
-                team_number=team.team_number,
-                captions=captions,
-                submissions=submissions,
-                version=version,
-            )
+        embeds, files = _embeds_and_files_for_post(
+            i,
+            team_number=team.team_number,
+            captions=captions,
+            submissions=submissions,
+            version=version,
         )
+        msg = await thread.send(embeds=embeds, files=files)
         try:
             await msg.pin()
         except discord.HTTPException as e:
@@ -1851,6 +1937,88 @@ async def _manage_force_remove(ctx: commands.Context, args: list[str]) -> None:
         return
     await send_feedback(
         ctx, f"✅ Removed {member.mention} from team {team.team_number}.", persist=persist
+    )
+
+
+async def _delete_pinned_dashboard(
+    bot: discord.Client, team: BingoTeam
+) -> tuple[int, int]:
+    """Delete the status message + all four embed posts. Returns (deleted, missing).
+
+    Silently skips messages that are already gone. Doesn't clear the id
+    fields on the team row — the caller is expected to call
+    :func:`_post_pinned_dashboard` right after, which overwrites them
+    with the fresh ids.
+    """
+    thread = await _resolve_thread(bot, team.thread_id)
+    if thread is None:
+        return (0, 5)
+    deleted = 0
+    missing = 0
+    ids = [team.status_msg_id] + [
+        getattr(team, f"embed_msg_{i}_id", None) for i in range(1, 5)
+    ]
+    for msg_id in ids:
+        if not msg_id:
+            missing += 1
+            continue
+        try:
+            msg = await thread.fetch_message(msg_id)
+            await msg.delete()
+            deleted += 1
+        except discord.NotFound:
+            missing += 1
+        except discord.HTTPException as e:
+            logger.warning("delete pinned msg %s failed: %s", msg_id, e)
+    return (deleted, missing)
+
+
+@register_manage(
+    WEEK, "rerenderHard", tier=Tier.STAFF,
+    help=(
+        "Nuke and re-send the pinned dashboard (status + 4 embeds). Use "
+        "if a Discord client is stuck showing a stale placeholder image "
+        "that the normal `&_v=` cache-buster didn't beat."
+    ),
+    usage="<team>",
+)
+async def _manage_rerender_hard(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    if not args:
+        await send_feedback(
+            ctx, "Usage: `~manage_return 81 rerenderHard <team>`", persist=persist
+        )
+        return
+    team = await _resolve_team_by_id_or_number(args[0])
+    if team is None:
+        await send_feedback(ctx, f"No team matches `{args[0]}`.", persist=persist)
+        return
+    if team.state not in ("playing", "picking"):
+        await send_feedback(
+            ctx,
+            f"Team {team.team_number} state is `{team.state}` — nothing pinned to "
+            "rerender.",
+            persist=persist,
+        )
+        return
+    thread = await _resolve_thread(ctx.bot, team.thread_id)
+    if thread is None:
+        await send_feedback(ctx, "Team thread is unreachable.", persist=persist)
+        return
+
+    deleted, missing = await _delete_pinned_dashboard(ctx.bot, team)
+    # _post_pinned_dashboard writes fresh msg ids into team and saves them,
+    # so no manual null-out needed here.
+    await _post_pinned_dashboard(thread, team)
+    await send_feedback(
+        ctx,
+        f"✅ Rerendered team {team.team_number}: deleted {deleted} old message(s) "
+        f"({missing} were already missing), sent + pinned 5 fresh ones.",
+        persist=persist,
+    )
+    logger.info(
+        "r81 rerenderHard team %s (#%d) by %s: deleted=%d missing=%d",
+        team.id, team.team_number, ctx.author.id, deleted, missing,
     )
 
 

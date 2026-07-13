@@ -1188,6 +1188,112 @@ async def _fake_apply_initial_migration(app: str) -> None:
     raise RuntimeError("No initial 0_*_init.py migration found in migrations/models/")
 
 
+def _ensure_r81_schema(returns_path: str) -> None:
+    """Idempotent schema-heal for the r81 tables in ``returns.db``.
+
+    Guarantees ``return_81_teams`` has ``expansion_count`` and
+    ``embed_msg_ids_json`` and that ``return_81_bingo_events`` has neither
+    ``bonus_choice`` nor ``bonus_msg_id`` — the schema shape the code
+    written for the board-expansion feature depends on. Runs on every
+    boot after ``returns_cmd.upgrade`` so that a stalled or
+    silently-rolled-back aerich migration can't leave the schema behind.
+    Fully-current schema is a no-op.
+
+    Not tracked by aerich on purpose — this is deliberately separate from
+    the migration pipeline so it stays authoritative regardless of aerich
+    state. SQLite ≥ 3.35 (Mar 2021) is required for ``DROP COLUMN``.
+    """
+    import logging
+    import sqlite3
+
+    logger = logging.getLogger("dazebot.orm")
+
+    if not os.path.exists(returns_path):
+        return
+
+    conn = sqlite3.connect(returns_path)
+    try:
+        def cols(table: str) -> set[str]:
+            return {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')}
+
+        teams_cols = cols("return_81_teams")
+        events_cols = cols("return_81_bingo_events")
+        if not teams_cols:
+            # Table doesn't exist yet — aerich upgrade will create it
+            # (either now on the first run of migration 2, or the caller
+            # will surface a real error). Nothing to heal.
+            return
+
+        legacy_teams_ids = (
+            "embed_msg_1_id",
+            "embed_msg_2_id",
+            "embed_msg_3_id",
+            "embed_msg_4_id",
+        )
+        legacy_events = ("bonus_choice", "bonus_msg_id")
+        need_add_ids_json = "embed_msg_ids_json" not in teams_cols
+        need_add_exp = "expansion_count" not in teams_cols
+        legacy_teams_present = [c for c in legacy_teams_ids if c in teams_cols]
+        legacy_events_present = [c for c in legacy_events if c in events_cols]
+
+        if not (
+            need_add_ids_json
+            or need_add_exp
+            or legacy_teams_present
+            or legacy_events_present
+        ):
+            return
+
+        logger.info(
+            "r81 schema-heal: add_ids_json=%s add_exp=%s "
+            "drop_teams=%s drop_events=%s",
+            need_add_ids_json, need_add_exp,
+            legacy_teams_present, legacy_events_present,
+        )
+
+        conn.execute("BEGIN")
+        try:
+            if need_add_ids_json:
+                conn.execute(
+                    'ALTER TABLE "return_81_teams" '
+                    'ADD COLUMN "embed_msg_ids_json" TEXT'
+                )
+            if need_add_exp:
+                conn.execute(
+                    'ALTER TABLE "return_81_teams" '
+                    'ADD COLUMN "expansion_count" INT NOT NULL DEFAULT 0'
+                )
+            # Backfill embed_msg_ids_json from the legacy fixed ids IF the
+            # legacy columns are still present. Rows with any-null legacy
+            # id are left NULL so a rerender-hard can re-post cleanly.
+            if len(legacy_teams_present) == 4:
+                json_expr = "json_array(" + ", ".join(
+                    f'"{c}"' for c in legacy_teams_ids
+                ) + ")"
+                not_null_pred = " AND ".join(
+                    f'"{c}" IS NOT NULL' for c in legacy_teams_ids
+                )
+                conn.execute(
+                    f'UPDATE "return_81_teams" '
+                    f'SET "embed_msg_ids_json" = {json_expr} '
+                    f'WHERE "embed_msg_ids_json" IS NULL AND {not_null_pred}'
+                )
+            for legacy in legacy_teams_present:
+                conn.execute(
+                    f'ALTER TABLE "return_81_teams" DROP COLUMN "{legacy}"'
+                )
+            for legacy in legacy_events_present:
+                conn.execute(
+                    f'ALTER TABLE "return_81_bingo_events" DROP COLUMN "{legacy}"'
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
 async def init_db():
     """Initialise Tortoise and apply pending aerich migrations across BOTH
     the dazebot and returns SQLite databases.
@@ -1323,6 +1429,11 @@ async def init_db():
     applied_returns = await returns_cmd.upgrade(fake=False)
     if applied_returns:
         logger.info("Applied returns-app migration(s): %s", applied_returns)
+
+    # Belt-and-suspenders: heal any r81 schema drift that aerich either
+    # skipped, silently rolled back, or recorded as applied without
+    # actually changing the schema. Idempotent — no-op on a current DB.
+    _ensure_r81_schema(returns_path)
 
     # --- One-shot copy: legacy dazebot.db rows -> returns.db ---
     if legacy_present:

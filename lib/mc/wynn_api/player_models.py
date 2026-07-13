@@ -88,7 +88,13 @@ class CharacterProfession(BaseModel):
 
 
 class Character(BaseModel):
-    professions: dict[CharacterProfessionsType, CharacterProfession]
+    # Absent for characters that have never touched a profession — Wynncraft
+    # v3 omits the key entirely rather than returning an empty dict. Default
+    # to {} so the whole player envelope keeps parsing; the sole consumer
+    # (lib/mc/wynn.py) iterates .items() and a no-key character is a no-op.
+    professions: dict[CharacterProfessionsType, CharacterProfession] = Field(
+        default_factory=dict
+    )
 
 
 class WynncraftPlayer(BaseModel):

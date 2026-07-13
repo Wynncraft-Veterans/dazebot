@@ -149,6 +149,18 @@ def board_dims(exp: int) -> tuple[int, int]:
     return rows, cols
 
 
+def _team_exp(team: BingoTeam) -> int:
+    """``team.expansion_count`` with a defensive default.
+
+    If a stale schema slips past both the aerich upgrade AND the startup
+    schema-heal in ``orm._ensure_r81_schema`` (e.g. container hot-reloaded
+    code but never re-ran ``init_db``), Tortoise leaves the field off the
+    hydrated instance and every read crashes. Fall back to 0 so the code
+    stays useful until the next boot fixes the schema for real.
+    """
+    return getattr(team, "expansion_count", 0) or 0
+
+
 def row_label(idx: int) -> str:
     """0→"A", 25→"Z", 26→"AA", 27→"AB", … (spreadsheet-style base-26).
 
@@ -842,7 +854,9 @@ async def _load_submissions(team: BingoTeam) -> dict[str, str]:
 
 
 def _parse_embed_msg_ids(team: BingoTeam) -> list[int]:
-    raw = team.embed_msg_ids_json
+    # getattr fallback so a stale-schema hydration (missing column) reads
+    # as "no posts yet" instead of AttributeError. Matches _team_exp.
+    raw = getattr(team, "embed_msg_ids_json", None)
     if not raw:
         return []
     try:
@@ -874,7 +888,7 @@ async def _rerender_team_dashboard(
         try:
             msg = await thread.fetch_message(team.status_msg_id)
             await msg.edit(
-                content=_status_text(set(submissions.keys()), team.expansion_count)
+                content=_status_text(set(submissions.keys()), _team_exp(team))
             )
         except (discord.NotFound, discord.HTTPException) as e:
             logger.warning("rerender status edit failed: %s", e)
@@ -884,7 +898,7 @@ async def _rerender_team_dashboard(
     # edits within the same second.
     version = time.time_ns()
     msg_ids = _parse_embed_msg_ids(team)
-    layouts = post_layouts(team.expansion_count)
+    layouts = post_layouts(_team_exp(team))
     for i, (msg_id, layout) in enumerate(zip(msg_ids, layouts), start=1):
         if only_post is not None and i != only_post:
             continue
@@ -1290,7 +1304,7 @@ async def _seed_cell_captions(
     or the given ``only_cells`` subset (used to backfill an expansion slab
     without re-touching already-seeded cells).
     """
-    cells = only_cells if only_cells is not None else bingo_cells(team.expansion_count)
+    cells = only_cells if only_cells is not None else bingo_cells(_team_exp(team))
     for cell in cells:
         if await BingoCellState.filter(team=team, cell=cell).exists():
             continue
@@ -1306,7 +1320,7 @@ async def _post_pinned_dashboard(thread: discord.Thread, team: BingoTeam) -> Non
     submissions = await _load_submissions(team)  # empty at this point
 
     status_msg = await thread.send(
-        _status_text(set(submissions.keys()), team.expansion_count)
+        _status_text(set(submissions.keys()), _team_exp(team))
     )
     try:
         await status_msg.pin()
@@ -1316,7 +1330,7 @@ async def _post_pinned_dashboard(thread: discord.Thread, team: BingoTeam) -> Non
 
     version = time.time_ns()
     msg_ids: list[int] = []
-    for i, layout in enumerate(post_layouts(team.expansion_count), start=1):
+    for i, layout in enumerate(post_layouts(_team_exp(team)), start=1):
         embeds, files = _embeds_and_files_for_post(
             i,
             layout=layout,
@@ -1352,7 +1366,7 @@ async def _apply_expansion_if_needed(
         return False
     count = await BingoTeamMember.filter(team=team).count()
     new_exp = max(0, count - 4)
-    if new_exp <= team.expansion_count:
+    if new_exp <= _team_exp(team):
         return False
 
     thread = await _resolve_thread(bot, team.thread_id)
@@ -1364,7 +1378,7 @@ async def _apply_expansion_if_needed(
         return False
 
     # Seed captions for just the new slab's cells.
-    prev_cells = set(bingo_cells(team.expansion_count))
+    prev_cells = set(bingo_cells(_team_exp(team)))
     new_cells = tuple(c for c in bingo_cells(new_exp) if c not in prev_cells)
     await _seed_cell_captions(team, only_cells=new_cells)
 
@@ -1445,7 +1459,7 @@ async def _on_message_submit(bot: discord.Client, message: discord.Message) -> N
             "Only team members can submit here.", mention_author=False
         )
         return
-    if cell not in bingo_cells(team.expansion_count):
+    if cell not in bingo_cells(_team_exp(team)):
         return
     if not message.attachments:
         await message.reply(
@@ -1485,7 +1499,7 @@ async def _on_message_submit(bot: discord.Client, message: discord.Message) -> N
         )
 
     await _rerender_team_dashboard(
-        bot, team, only_post=cell_to_post_index(team.expansion_count)[cell]
+        bot, team, only_post=cell_to_post_index(_team_exp(team))[cell]
     )
 
     try:
@@ -1503,7 +1517,7 @@ async def _on_message_submit(bot: discord.Client, message: discord.Message) -> N
         except discord.HTTPException:
             pass
 
-    new_lines = _detect_new_bingos(filled_before, filled_after, team.expansion_count)
+    new_lines = _detect_new_bingos(filled_before, filled_after, _team_exp(team))
     for line in new_lines:
         await _announce_bingo(bot, message.channel, team, line)
 
@@ -1672,7 +1686,7 @@ async def _announce_bingo(
 
 async def _reroll_empty_captions(team: BingoTeam) -> None:
     filled = set(await BingoSubmission.filter(team=team).values_list("cell", flat=True))
-    for cell in bingo_cells(team.expansion_count):
+    for cell in bingo_cells(_team_exp(team)):
         if cell in filled:
             continue
         caption = await _generate_cell_caption(team)
@@ -1965,12 +1979,13 @@ async def _manage_list(ctx: commands.Context, args: list[str]) -> None:
         members = await BingoTeamMember.filter(team=t).count()
         subs = await BingoSubmission.filter(team=t).count()
         bingos = await BingoBingoEvent.filter(team=t).count()
-        total_cells = len(bingo_cells(t.expansion_count))
+        t_exp = _team_exp(t)
+        total_cells = len(bingo_cells(t_exp))
         thread = f"<#{t.thread_id}>" if t.thread_id else "(no thread)"
         lines.append(
             f"- **Team {t.team_number}** — state=`{t.state}` "
             f"members={members} cells={subs}/{total_cells} "
-            f"exp={t.expansion_count} bingos={bingos} {thread} "
+            f"exp={t_exp} bingos={bingos} {thread} "
             f"id=`{t.id}`"
         )
     await send_feedback(ctx, "\n".join(lines), persist=persist)
@@ -1994,10 +2009,11 @@ async def _manage_show(ctx: commands.Context, args: list[str]) -> None:
     subs = await BingoSubmission.filter(team=team)
     filled = {s.cell for s in subs}
     bingos = await BingoBingoEvent.filter(team=team)
-    rows, cols = board_dims(team.expansion_count)
+    exp = _team_exp(team)
+    rows, cols = board_dims(exp)
     lines = [
         f"**Team {team.team_number}** (state=`{team.state}`, id=`{team.id}`)",
-        f"Board: `{rows}×{cols}` (expansion {team.expansion_count})",
+        f"Board: `{rows}×{cols}` (expansion {exp})",
         f"Thread: <#{team.thread_id}>" if team.thread_id else "Thread: (none)",
         "Members:",
     ]
@@ -2085,13 +2101,14 @@ async def _manage_regen(ctx: commands.Context, args: list[str]) -> None:
         await send_feedback(ctx, f"No team matches `{args[0]}`.", persist=persist)
         return
     cell = args[1].upper()
-    valid = bingo_cells(team.expansion_count)
+    exp = _team_exp(team)
+    valid = bingo_cells(exp)
     if cell not in valid:
-        rows, cols = board_dims(team.expansion_count)
+        rows, cols = board_dims(exp)
         await send_feedback(
             ctx,
             f"`{cell}` isn't a valid cell (board is {rows}×{cols} at "
-            f"expansion {team.expansion_count}).",
+            f"expansion {exp}).",
             persist=persist,
         )
         return
@@ -2114,7 +2131,7 @@ async def _manage_regen(ctx: commands.Context, args: list[str]) -> None:
         cell_row.caption = new_caption
         await cell_row.save(update_fields=["caption"])
     await _rerender_team_dashboard(
-        ctx.bot, team, only_post=cell_to_post_index(team.expansion_count)[cell]
+        ctx.bot, team, only_post=cell_to_post_index(exp)[cell]
     )
     await send_feedback(
         ctx,
@@ -2151,7 +2168,7 @@ async def _manage_clear(ctx: commands.Context, args: list[str]) -> None:
     if caption:
         await _award_subject_bonus(team, caption, -POINTS_PER_SUBJECT_BONUS)
     await _rerender_team_dashboard(
-        ctx.bot, team, only_post=cell_to_post_index(team.expansion_count)[cell]
+        ctx.bot, team, only_post=cell_to_post_index(_team_exp(team))[cell]
     )
     await send_feedback(
         ctx, f"✅ Cleared `{cell}` for team {team.team_number}.", persist=persist

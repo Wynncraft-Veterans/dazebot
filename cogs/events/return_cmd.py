@@ -30,6 +30,9 @@ from cogs.events.returns.week_2 import (
     register_listeners as _register_week_2_listeners,
     sync_thread_role as _sync_week_2_thread_role,
 )
+from cogs.events.returns.week_81 import (
+    register_listeners as _register_week_81_listeners,
+)
 
 logger = logging.getLogger("dazebot.cogs.events.return_cmd")
 
@@ -44,6 +47,7 @@ class Returns(commands.Cog):
     async def cog_load(self) -> None:
         _register_week_0_listeners(self.bot)
         _register_week_2_listeners(self.bot)
+        _register_week_81_listeners(self.bot)
         # Threads need the gateway-cached parent channel; wait for ready.
         self.bot.loop.create_task(self._run_startup_backfill())
         self.returns_tick.start()

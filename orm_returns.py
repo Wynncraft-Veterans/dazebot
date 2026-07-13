@@ -190,3 +190,160 @@ class Return3Dashboard(Model):
 
     class Meta:
         table = "return_3_dashboards"
+
+
+# ---------------------------------------------------------------------------
+# Return 81 — team photo bingo
+# ---------------------------------------------------------------------------
+#
+# Three players form a team via ``/return 81`` (caller + two invitees). Once
+# both invitees accept, a private thread is created under the r81 parent
+# channel and the team picks a fourth wildcard teammate from a shortlist of
+# ten drawn from the in-game guild. The team then works through a 4x4 bingo
+# card (A1..D4) by posting photos with ``~return 81 submit <cell>``; each
+# accepted submission scores the whole team via ``WeeklyEvent(week=81)``.
+# Bingo lines (rows/cols/diagonals) unlock optional "extra card" / "extra
+# teammate" bonuses. See ``cogs/events/returns/week_81.py`` for the flow.
+
+
+class BingoTeam(Model):
+    """One r81 team. Grows through phases: pending (invites out) → picking
+    (wildcard shortlist posted) → playing (bingo card live) → disbanded.
+
+    ``team_number`` is the monotonic integer used in the private thread's
+    display name (``r81-Team-<n>``). ``thread_id`` and the five ``*_msg_id``
+    columns are populated during ``_post_pinned_dashboard`` and let the
+    submission listener edit the right embed in place without walking
+    Discord history.
+    """
+
+    id = fields.UUIDField(pk=True)
+    week = fields.IntField(index=True)
+    team_number = fields.IntField(unique=True)
+    creator_disc_uuid = fields.CharField(max_length=255, index=True)
+    state = fields.CharField(max_length=16)  # "pending" | "picking" | "playing" | "disbanded"
+    thread_id = fields.BigIntField(null=True)
+    status_msg_id = fields.BigIntField(null=True)
+    embed_msg_1_id = fields.BigIntField(null=True)
+    embed_msg_2_id = fields.BigIntField(null=True)
+    embed_msg_3_id = fields.BigIntField(null=True)
+    embed_msg_4_id = fields.BigIntField(null=True)
+    picker_msg_id = fields.BigIntField(null=True, index=True)
+    # Ordered 10-element JSON list of disc_uuids; slot i is the ith button
+    # on the picker post. Populated when the team enters "picking".
+    picker_candidates_json = fields.TextField(null=True)
+    # Id of the shared invite post in INVITE_THREAD_ID that both invitees
+    # click Accept/Decline on. Persistent view dispatch resolves the team
+    # from this + the clicker's id.
+    pending_invite_msg_id = fields.BigIntField(null=True, index=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    invites: fields.ReverseRelation["BingoInvite"]
+    members: fields.ReverseRelation["BingoTeamMember"]
+    cells: fields.ReverseRelation["BingoCellState"]
+    submissions: fields.ReverseRelation["BingoSubmission"]
+    bingos: fields.ReverseRelation["BingoBingoEvent"]
+
+    class Meta:
+        table = "return_81_teams"
+
+
+class BingoInvite(Model):
+    """One outstanding (or resolved) invite to join a specific team. Both
+    invitees start ``pending``; the team advances out of ``pending`` only
+    when *both* rows for it are ``accepted``.
+    """
+
+    id = fields.UUIDField(pk=True)
+    team = fields.ForeignKeyField(
+        "returns.BingoTeam", related_name="invites", on_delete=fields.CASCADE
+    )
+    invitee_disc_uuid = fields.CharField(max_length=255, index=True)
+    state = fields.CharField(max_length=16)  # "pending" | "accepted" | "declined"
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "return_81_invites"
+        unique_together = (("team", "invitee_disc_uuid"),)
+
+
+class BingoTeamMember(Model):
+    """One confirmed member of a team. ``role`` records how they joined:
+    ``creator`` (invoked ``/return 81``), ``invitee`` (accepted invite),
+    ``wildcard`` (picked from the random shortlist), ``forced`` (added by
+    staff via ``~manage_return 81 forceAdd``). More ``wildcard`` rows can
+    appear later if the team redeems ``extra_member`` bonuses.
+    """
+
+    id = fields.UUIDField(pk=True)
+    team = fields.ForeignKeyField(
+        "returns.BingoTeam", related_name="members", on_delete=fields.CASCADE
+    )
+    disc_uuid = fields.CharField(max_length=255, index=True)
+    role = fields.CharField(max_length=16)  # "creator" | "invitee" | "wildcard" | "forced"
+    joined_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "return_81_team_members"
+        unique_together = (("team", "disc_uuid"),)
+
+
+class BingoCellState(Model):
+    """Per-cell placeholder caption, seeded once when the team enters
+    ``playing``. Mutating this row via ``~manage_return 81 regen`` re-rolls
+    the caption without touching submissions or scores.
+    """
+
+    id = fields.UUIDField(pk=True)
+    team = fields.ForeignKeyField(
+        "returns.BingoTeam", related_name="cells", on_delete=fields.CASCADE
+    )
+    cell = fields.CharField(max_length=2)  # "A1".."D4"
+    caption = fields.TextField()
+
+    class Meta:
+        table = "return_81_cell_states"
+        unique_together = (("team", "cell"),)
+
+
+class BingoSubmission(Model):
+    """One accepted photo submission for a given team+cell. Overwrites are
+    refused at the listener; staff must clear the row first with
+    ``~manage_return 81 clear`` (or ``regen``, which combines the clear
+    with a caption reroll).
+    """
+
+    id = fields.UUIDField(pk=True)
+    team = fields.ForeignKeyField(
+        "returns.BingoTeam", related_name="submissions", on_delete=fields.CASCADE
+    )
+    cell = fields.CharField(max_length=2)  # "A1".."D4"
+    submitter_disc_uuid = fields.CharField(max_length=255)
+    image_url = fields.TextField()
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "return_81_submissions"
+        unique_together = (("team", "cell"),)
+
+
+class BingoBingoEvent(Model):
+    """One completed bingo line for a team. ``line_key`` is the canonical
+    pipe-joined cell list (e.g. ``"A1|A2|A3|A4"``) so the same line can't
+    fire twice. ``bonus_choice`` is set the first time the team clicks
+    either follow-up button and the ``BingoBonusView`` becomes idempotent
+    against further clicks.
+    """
+
+    id = fields.UUIDField(pk=True)
+    team = fields.ForeignKeyField(
+        "returns.BingoTeam", related_name="bingos", on_delete=fields.CASCADE
+    )
+    line_key = fields.CharField(max_length=32)
+    bonus_choice = fields.CharField(max_length=16, null=True)  # "extra_card" | "extra_member"
+    bonus_msg_id = fields.BigIntField(null=True, index=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "return_81_bingo_events"
+        unique_together = (("team", "line_key"),)

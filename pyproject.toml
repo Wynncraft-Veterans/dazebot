@@ -13,6 +13,7 @@ dependencies = [
     "fastapi>=0.135.3",
     "pydantic>=2.12.2",
     "python-dotenv>=1.1.1",
+    "pyyaml>=6.0",
     "requests>=2.32.5",
     "tortoise-orm>=0.25.1",
     "uvicorn>=0.42.0",

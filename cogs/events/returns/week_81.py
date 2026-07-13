@@ -48,6 +48,7 @@ import os
 import random
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Optional
 
@@ -59,6 +60,7 @@ from cogs.events.returns import (
     Tier,
     register,
     register_manage,
+    register_tick,
 )
 from cogs.events.returns._common import (
     is_persist_context,
@@ -117,6 +119,11 @@ POINTS_PER_CELL = 1
 
 # Number of candidates presented in the wildcard picker.
 PICKER_SIZE = 10
+
+# Smaller shortlist size for the post-bingo "extra teammate" bonus. Same
+# picker view (BingoRandomPickView has 10 buttons; surplus ones get
+# disabled at render), just fewer options to choose from.
+EXTRA_MEMBER_PICKER_SIZE = 6
 
 # 4x4 grid cells, row-major.
 BINGO_CELLS: tuple[str, ...] = tuple(
@@ -333,23 +340,24 @@ async def _current_team_for(disc_uuid: str) -> Optional[BingoTeam]:
 
 async def _wynn_guild_candidates(
     client: discord.Client, exclude_disc_uuids: set[str]
-) -> list[discord.Member]:
-    """Draw up to :data:`PICKER_SIZE` random guild members eligible for the
-    r81 wildcard slot.
+) -> list[tuple[discord.Member, str]]:
+    """Draw up to :data:`PICKER_SIZE` (Discord Member, MC username) pairs
+    eligible for the r81 wildcard slot.
 
     Pool: Wynncraft in-game guild ``Returners`` MC accounts that are linked
     to a Discord account whose guild member holds one of :data:`TEAM_ROLE_IDS`.
-    Excludes any user already on any (non-disbanded) r81 team.
+    Excludes any user already on any (non-disbanded) r81 team. Returning
+    the MC username alongside the member lets the picker post show both
+    (Discord chip + in-game name) without a second DB round trip.
     """
     guild = client.get_guild(CurrConfig.GUILD)
     if guild is None:
         return []
 
-    mc_ids = list(
-        await MinecraftAccount.filter(guild=WYNN_GUILD_NAME).values_list("id", flat=True)
-    )
-    if not mc_ids:
+    mc_rows = await MinecraftAccount.filter(guild=WYNN_GUILD_NAME).all()
+    if not mc_rows:
         return []
+    mc_username_by_id = {mc.id: mc.mc_username for mc in mc_rows}
 
     excluded_from_teams = set(
         await BingoTeamMember.filter().values_list("disc_uuid", flat=True)
@@ -360,9 +368,11 @@ async def _wynn_guild_candidates(
     # reverse relation on ``MinecraftAccount`` is a queryset, not a single
     # object, and OneToOne reverse traversal here needs a separate query
     # anyway.
-    discs = await DiscordAccount.filter(minecraft_account_id__in=mc_ids)
+    discs = await DiscordAccount.filter(
+        minecraft_account_id__in=list(mc_username_by_id.keys())
+    )
 
-    candidates: list[discord.Member] = []
+    candidates: list[tuple[discord.Member, str]] = []
     seen: set[int] = set()
     for d in discs:
         if d.disc_uuid in excluded:
@@ -376,8 +386,11 @@ async def _wynn_guild_candidates(
         member = guild.get_member(disc_id)
         if member is None or not _has_team_role(member):
             continue
+        mc_name = mc_username_by_id.get(d.minecraft_account_id)
+        if not mc_name:
+            continue
         seen.add(disc_id)
-        candidates.append(member)
+        candidates.append((member, mc_name))
 
     random.shuffle(candidates)
     return candidates[:PICKER_SIZE]
@@ -982,13 +995,14 @@ async def _advance_to_picking(client: discord.Client, team: BingoTeam) -> None:
     picker_msg = await thread.send(
         content=_picker_intro(candidates),
         view=_render_picker_view(candidates),
+        allowed_mentions=discord.AllowedMentions.none(),
     )
 
     team.state = "picking"
     team.thread_id = thread.id
     team.picker_msg_id = picker_msg.id
     team.picker_candidates_json = json.dumps(
-        [str(m.id) for m in candidates]
+        [str(member.id) for member, _mc in candidates]
     )
     await team.save(update_fields=[
         "state", "thread_id", "picker_msg_id", "picker_candidates_json"
@@ -999,14 +1013,23 @@ async def _advance_to_picking(client: discord.Client, team: BingoTeam) -> None:
     )
 
 
-def _picker_intro(candidates: list[discord.Member]) -> str:
+def _picker_intro(candidates: list[tuple[discord.Member, str]]) -> str:
+    """List the 10 candidates as ``<@discord_id> (mc_username)``.
+
+    The ``<@id>`` syntax renders as a nice mention chip in the client
+    (name + avatar) but does NOT ping or auto-add the user to the thread,
+    provided the send site passes ``AllowedMentions.none()`` — which
+    suppresses both notification delivery AND private-thread auto-adds.
+    That's what let ten random guild members get dragged into someone
+    else's team thread in the initial version of this flow.
+    """
     lines = ["🎯 **Pick your wildcard teammate.** First click wins."]
-    for i, m in enumerate(candidates, start=1):
-        lines.append(f"{i}. {m.mention}")
+    for i, (member, mc_username) in enumerate(candidates, start=1):
+        lines.append(f"{i}. <@{member.id}> ({mc_username})")
     return "\n".join(lines)
 
 
-def _render_picker_view(candidates: list[discord.Member]) -> discord.ui.View:
+def _render_picker_view(candidates: list[tuple[discord.Member, str]]) -> discord.ui.View:
     """Build the per-team picker view, overriding button labels to show the
     candidate name. The persistent-view class handles dispatch; this view
     exists to render friendly button labels at message-send time.
@@ -1014,7 +1037,7 @@ def _render_picker_view(candidates: list[discord.Member]) -> discord.ui.View:
     view = BingoRandomPickView()
     for i, item in enumerate(view.children):
         if isinstance(item, _PickButton) and i < len(candidates):
-            item.label = candidates[i].display_name[:80]
+            item.label = candidates[i][0].display_name[:80]
     # Disable any surplus buttons.
     for i, item in enumerate(view.children):
         if isinstance(item, _PickButton) and i >= len(candidates):
@@ -1042,18 +1065,23 @@ async def _handle_picker_click(
             "This picker post is no longer active.", ephemeral=True
         )
         return
-    if team.state != "picking":
+    # Both wildcard picks (team.state=="picking") and extra_member bonus
+    # picks (state=="playing") come through this handler. Disband is the
+    # only state we outright refuse.
+    if team.state not in ("picking", "playing"):
         await interaction.response.send_message(
-            "This team already has its wildcard.", ephemeral=True
+            "This team isn't accepting picks right now.", ephemeral=True
         )
         return
+    is_wildcard_pick = team.state == "picking"
+
     # Only current team members may pick.
     is_member = await BingoTeamMember.filter(
         team=team, disc_uuid=str(interaction.user.id)
     ).exists()
     if not is_member:
         await interaction.response.send_message(
-            "Only the team can pick the wildcard.", ephemeral=True
+            "Only the team can make this pick.", ephemeral=True
         )
         return
     if not team.picker_candidates_json:
@@ -1096,26 +1124,38 @@ async def _handle_picker_click(
         except (discord.HTTPException, ValueError) as e:
             logger.warning("r81 add wildcard %s to thread: %s", picked_disc_uuid, e)
 
-    # Seed cell captions and post the dashboard.
-    await _seed_cell_captions(team)
-    if thread is not None:
-        await _post_pinned_dashboard(thread, team)
+    if is_wildcard_pick:
+        # Seed cell captions and post the dashboard — the "playing"
+        # transition is a wildcard-pick-only side effect.
+        await _seed_cell_captions(team)
+        if thread is not None:
+            await _post_pinned_dashboard(thread, team)
+        team.state = "playing"
+        await team.save(update_fields=["state"])
 
-    team.state = "playing"
-    await team.save(update_fields=["state"])
-
-    # Update the picker message to reflect the completed pick.
+    # Delete the picker post outright — the candidate list has served
+    # its purpose and shouldn't linger. Then post a fresh, minimal
+    # "joined as X" note; the picked user is now a legit thread member
+    # so their @mention is welcome.
     try:
         if interaction.message is not None:
-            await interaction.message.edit(
-                content=(
-                    interaction.message.content
-                    + f"\n\n_🎯 <@{picked_disc_uuid}> joined as the wildcard._"
-                ),
-                view=None,
-            )
+            await interaction.message.delete()
     except discord.HTTPException:
         pass
+    if thread is not None:
+        role_label = "wildcard" if is_wildcard_pick else "extra teammate"
+        try:
+            await thread.send(
+                f"🎯 <@{picked_disc_uuid}> joined as the {role_label}.",
+                allowed_mentions=discord.AllowedMentions(
+                    users=True, roles=False, everyone=False
+                ),
+            )
+        except discord.HTTPException as e:
+            logger.warning("r81 join notice send failed: %s", e)
+    team.picker_msg_id = None
+    team.picker_candidates_json = None
+    await team.save(update_fields=["picker_msg_id", "picker_candidates_json"])
     logger.info(
         "r81 team %s wildcard resolved to %s (slot %s)",
         team.id, picked_disc_uuid, slot,
@@ -1228,6 +1268,13 @@ async def _on_message_submit(bot: discord.Client, message: discord.Message) -> N
 
     await _award_score(team, POINTS_PER_CELL)
 
+    caption = await _caption_for_cell(team, cell)
+    subject_matches: list[str] = []
+    if caption:
+        subject_matches = await _award_subject_bonus(
+            team, caption, POINTS_PER_SUBJECT_BONUS
+        )
+
     await _rerender_team_dashboard(
         bot, team, only_post=CELL_TO_POST_INDEX[cell]
     )
@@ -1236,6 +1283,16 @@ async def _on_message_submit(bot: discord.Client, message: discord.Message) -> N
         await message.add_reaction("✅")
     except discord.HTTPException:
         pass
+
+    if subject_matches:
+        try:
+            await message.reply(
+                f"🎯 Subject bonus: +{POINTS_PER_SUBJECT_BONUS} to "
+                + ", ".join(f"`{n}`" for n in subject_matches),
+                mention_author=False,
+            )
+        except discord.HTTPException:
+            pass
 
     new_lines = _detect_new_bingos(filled_before, filled_after)
     for line in new_lines:
@@ -1253,6 +1310,83 @@ async def _award_score(team: BingoTeam, per_member_points: int) -> None:
         if not created:
             row.score += per_member_points
             await row.save(update_fields=["score"])
+
+
+# Bonus points awarded per non-empty MC username matched in a submitted
+# cell's caption — the "extra points to the players in the photos"
+# incentive. Applied on top of the flat POINTS_PER_CELL going to team
+# members. Cleared/regenerated cells reverse the bonus by passing a
+# negative value.
+POINTS_PER_SUBJECT_BONUS = 1
+
+
+async def _award_subject_bonus(
+    team: BingoTeam, caption: str, per_subject_points: int
+) -> list[str]:
+    """Award ``per_subject_points`` to each Returner whose MC username
+    appears (as a whole word, case-insensitive) in ``caption``.
+
+    Universe of candidates = current ``guild="Returners"`` roster + this
+    team's own MC usernames, so we only match against real player names
+    and never mistake a common noun in a template ("Fighter", "Brawl") for
+    a person. Longer names are matched first so a hypothetical shorter
+    substring name can't steal the match.
+
+    Returns the list of matched MC usernames — useful for logging + the
+    on-submission Discord confirmation. Returns ``[]`` when
+    ``per_subject_points == 0``.
+    """
+    if per_subject_points == 0:
+        return []
+
+    roster = set(
+        await MinecraftAccount.filter(guild=WYNN_GUILD_NAME).values_list(
+            "mc_username", flat=True
+        )
+    )
+    team_names = set(await _team_player_names(team))
+    # ``"a teammate"`` is the fallback from _team_player_names for unlinked
+    # members — filter it out so we don't try to match a literal phrase.
+    candidates = {n for n in (roster | team_names) if n and n != "a teammate"}
+    if not candidates:
+        return []
+
+    matched: list[str] = []
+    for name in sorted(candidates, key=len, reverse=True):
+        pattern = re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
+        if pattern.search(caption):
+            matched.append(name)
+
+    if not matched:
+        return []
+
+    event, _ = await WeeklyEvent.get_or_create(week=team.week)
+    for name in matched:
+        mc = await MinecraftAccount.filter(mc_username__iexact=name).first()
+        if mc is None:
+            continue
+        disc = await DiscordAccount.filter(minecraft_account_id=mc.id).first()
+        if disc is None:
+            continue
+        row, created = await Score.get_or_create(
+            event=event,
+            discord_account=disc,
+            defaults={"score": per_subject_points},
+        )
+        if not created:
+            row.score += per_subject_points
+            await row.save(update_fields=["score"])
+
+    logger.info(
+        "r81 team %s subject bonus: matched=%s per_subject=%+d",
+        team.id, matched, per_subject_points,
+    )
+    return matched
+
+
+async def _caption_for_cell(team: BingoTeam, cell: str) -> Optional[str]:
+    row = await BingoCellState.filter(team=team, cell=cell).first()
+    return row.caption if row is not None else None
 
 
 async def _announce_bingo(
@@ -1324,24 +1458,41 @@ async def _handle_bonus_click(
         candidates = await _wildcard_candidates_excluding_team(
             interaction.client, event.team
         )
+        # Limit to EXTRA_MEMBER_PICKER_SIZE — smaller shortlist than the
+        # initial wildcard pick because by now the team already has
+        # everyone they invited plus a wildcard, and huge menus get noisy.
+        candidates = candidates[:EXTRA_MEMBER_PICKER_SIZE]
+        thread = await _resolve_thread(interaction.client, event.team.thread_id)
         if not candidates:
+            followup = "No eligible extra teammates are available right now."
+        elif thread is None:
+            followup = "Team thread is unreachable — can't post the picker."
+        elif event.team.picker_msg_id is not None:
+            # A prior picker is still live (either from wildcard or an
+            # earlier extra_member click). Refuse to stack pickers — one
+            # at a time keeps click dispatch unambiguous.
             followup = (
-                "No eligible extra teammates are available right now."
+                "There's already an active picker in this thread. Resolve "
+                "it first (or ask staff to `~manage_return 81 rerollPool` "
+                "if it's stuck)."
             )
         else:
-            chosen = random.choice(candidates)
-            await BingoTeamMember.create(
-                team=event.team,
-                disc_uuid=str(chosen.id),
-                role="wildcard",
+            picker_msg = await thread.send(
+                content=_picker_intro(candidates),
+                view=_render_picker_view(candidates),
+                allowed_mentions=discord.AllowedMentions.none(),
             )
-            thread = await _resolve_thread(interaction.client, event.team.thread_id)
-            if thread is not None:
-                try:
-                    await thread.add_user(discord.Object(id=chosen.id))
-                except discord.HTTPException as e:
-                    logger.warning("r81 extra_member add_user failed: %s", e)
-            followup = f"✅ Extra teammate: {chosen.mention} joined."
+            event.team.picker_msg_id = picker_msg.id
+            event.team.picker_candidates_json = json.dumps(
+                [str(member.id) for member, _mc in candidates]
+            )
+            await event.team.save(
+                update_fields=["picker_msg_id", "picker_candidates_json"]
+            )
+            followup = (
+                f"✅ Extra-teammate picker posted with {len(candidates)} candidate(s). "
+                "Click a button to add them."
+            )
 
     await interaction.response.send_message(followup, ephemeral=False)
     try:
@@ -1367,7 +1518,7 @@ async def _reroll_empty_captions(team: BingoTeam) -> None:
 
 async def _wildcard_candidates_excluding_team(
     client: discord.Client, team: BingoTeam
-) -> list[discord.Member]:
+) -> list[tuple[discord.Member, str]]:
     existing = set(
         await BingoTeamMember.filter(team=team).values_list("disc_uuid", flat=True)
     )
@@ -1712,9 +1863,15 @@ async def _manage_regen(ctx: commands.Context, args: list[str]) -> None:
         return
     submission = await BingoSubmission.filter(team=team, cell=cell).first()
     if submission is not None:
+        # Snapshot the caption BEFORE the reroll so the un-award targets
+        # the same names the original submission credited. If no cell_row
+        # exists somehow, subject bonus is a no-op.
+        old_caption = await _caption_for_cell(team, cell)
         await submission.delete()
         # Subtract the points we awarded for this cell to every team member.
         await _award_score(team, -POINTS_PER_CELL)
+        if old_caption:
+            await _award_subject_bonus(team, old_caption, -POINTS_PER_SUBJECT_BONUS)
     cell_row = await BingoCellState.filter(team=team, cell=cell).first()
     new_caption = await _generate_cell_caption(team)
     if cell_row is None:
@@ -1754,8 +1911,11 @@ async def _manage_clear(ctx: commands.Context, args: list[str]) -> None:
     if submission is None:
         await send_feedback(ctx, f"No submission at `{cell}`.", persist=persist)
         return
+    caption = await _caption_for_cell(team, cell)
     await submission.delete()
     await _award_score(team, -POINTS_PER_CELL)
+    if caption:
+        await _award_subject_bonus(team, caption, -POINTS_PER_SUBJECT_BONUS)
     await _rerender_team_dashboard(
         ctx.bot, team, only_post=CELL_TO_POST_INDEX[cell]
     )
@@ -1834,15 +1994,18 @@ async def _manage_reroll_pool(ctx: commands.Context, args: list[str]) -> None:
     if team.picker_msg_id:
         try:
             old = await thread.fetch_message(team.picker_msg_id)
-            await old.edit(content=old.content + "\n_(replaced)_", view=None)
+            await old.delete()
         except discord.HTTPException:
             pass
     picker_msg = await thread.send(
         content=_picker_intro(candidates),
         view=_render_picker_view(candidates),
+        allowed_mentions=discord.AllowedMentions.none(),
     )
     team.picker_msg_id = picker_msg.id
-    team.picker_candidates_json = json.dumps([str(m.id) for m in candidates])
+    team.picker_candidates_json = json.dumps(
+        [str(member.id) for member, _mc in candidates]
+    )
     await team.save(update_fields=["picker_msg_id", "picker_candidates_json"])
     await send_feedback(
         ctx,
@@ -1937,6 +2100,109 @@ async def _manage_force_remove(ctx: commands.Context, args: list[str]) -> None:
         return
     await send_feedback(
         ctx, f"✅ Removed {member.mention} from team {team.team_number}.", persist=persist
+    )
+
+
+# --- Thread member sweep -----------------------------------------------------
+#
+# Anything that adds a user to a private thread (a stray @mention, a legacy
+# bug from earlier in the picker flow, a manual `+add` by staff) can leave
+# non-team members floating around. This sweep is the reconciler: the DB
+# is the source of truth (BingoTeamMember), the Discord thread is the
+# projection, and anyone in the projection but not the source gets kicked.
+
+_SWEEP_INTERVAL = timedelta(minutes=10)
+_last_sweep_at = datetime.min.replace(tzinfo=timezone.utc)
+
+
+async def _sweep_team_threads(bot: discord.Client) -> tuple[int, int, int]:
+    """Walk every non-disbanded team's thread and remove users who aren't
+    in ``BingoTeamMember``. Returns ``(checked_threads, removed_users,
+    unreachable_threads)``.
+
+    The bot itself is never removed. ``NotFound`` on remove is treated as
+    a no-op (user beat us to leaving). Runs sequentially across teams
+    because parallelism isn't worth it for a periodic reconciler.
+    """
+    teams = await BingoTeam.exclude(state="disbanded")
+    bot_id = bot.user.id if bot.user is not None else None
+    checked = removed = unreachable = 0
+    for team in teams:
+        if not team.thread_id:
+            continue
+        thread = await _resolve_thread(bot, team.thread_id)
+        if thread is None:
+            unreachable += 1
+            continue
+        checked += 1
+        expected = set(
+            await BingoTeamMember.filter(team=team).values_list("disc_uuid", flat=True)
+        )
+        try:
+            members = await thread.fetch_members()
+        except discord.HTTPException as e:
+            logger.warning(
+                "sweep: fetch_members thread=%s (team %s) failed: %s",
+                thread.id, team.team_number, e,
+            )
+            continue
+        for tm in members:
+            if bot_id is not None and tm.id == bot_id:
+                continue
+            if str(tm.id) in expected:
+                continue
+            try:
+                await thread.remove_user(discord.Object(id=tm.id))
+                removed += 1
+                logger.info(
+                    "sweep: removed %s from team %s thread %s",
+                    tm.id, team.team_number, thread.id,
+                )
+            except discord.NotFound:
+                pass
+            except discord.HTTPException as e:
+                logger.warning(
+                    "sweep: remove_user(%s) team=%s failed: %s",
+                    tm.id, team.team_number, e,
+                )
+    return checked, removed, unreachable
+
+
+@register_tick(WEEK)
+async def _sweep_tick(bot: discord.Client) -> None:
+    """Shared 60s tick self-gate — actually sweeps once per
+    :data:`_SWEEP_INTERVAL`. Idempotent and swallows its own exceptions
+    so a bad state can't stop future ticks.
+    """
+    global _last_sweep_at
+    now = datetime.now(timezone.utc)
+    if now - _last_sweep_at < _SWEEP_INTERVAL:
+        return
+    _last_sweep_at = now
+    try:
+        checked, removed, unreachable = await _sweep_team_threads(bot)
+        if removed or unreachable:
+            logger.info(
+                "r81 auto-sweep: checked=%d removed=%d unreachable=%d",
+                checked, removed, unreachable,
+            )
+    except Exception:
+        logger.exception("r81 auto-sweep raised")
+
+
+@register_manage(
+    WEEK, "sweep", tier=Tier.STAFF,
+    help="Force a thread-member sweep now (removes anyone in a team thread who isn't on that team).",
+    usage="",
+)
+async def _manage_sweep(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    checked, removed, unreachable = await _sweep_team_threads(ctx.bot)
+    await send_feedback(
+        ctx,
+        f"✅ Swept {checked} thread(s): removed {removed} unauthorised user(s), "
+        f"{unreachable} thread(s) unreachable.",
+        persist=persist,
     )
 
 

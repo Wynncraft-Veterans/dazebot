@@ -2537,7 +2537,7 @@ async def _track_admin_presence(message: discord.Message) -> None:
         return
     if not isinstance(message.author, discord.Member):
         return
-    if not tier_allows(message.author, Tier.STRATEGIST):
+    if not tier_allows(message.author, Tier.STAFF):
         return
     team = await BingoTeam.filter(thread_id=message.channel.id).first()
     if team is None or team.state == "disbanded":

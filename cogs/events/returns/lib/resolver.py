@@ -96,6 +96,21 @@ def _pick_apartment_member(ctx: dict) -> str:
     return random.choice(pool)
 
 
+def _pop_character(ctx: dict) -> str:
+    """Pop the next name from the per-resolve shuffled ``characters.yaml`` pool.
+
+    Popped (not ``random.choice``d) so a template like ``why %character%
+    should meet %character%`` gets two distinct NPCs — otherwise the same
+    name repeats ~1 in 197 times, which reads as a template bug.
+    """
+    pool = ctx.get("characters_pool")
+    if pool is None:
+        raise RuntimeError("resolver: characters_pool not pre-fetched — internal bug")
+    if not pool:
+        raise ValueError("resolver: characters_pool exhausted")
+    return pool.pop(0)
+
+
 def _pop_returner(ctx: dict) -> str:
     """Pop the next MC username from the shuffled Returners pool.
 
@@ -119,6 +134,7 @@ _HANDLERS: dict[str, Callable[[str | None, dict], str]] = {
     "adjective": lambda sub, ctx: random.choice(_load("adjectives.yaml")),
     "boss": lambda sub, ctx: random.choice(_load("bosses.yaml")),
     "cave": lambda sub, ctx: random.choice(_load("caves.yaml")),
+    "character": lambda sub, ctx: _pop_character(ctx),
     "colour": lambda sub, ctx: random.choice(_load("colours.yaml")).lower(),
     "colour_or_food": lambda sub, ctx: _colour_or_food(),
     "cult": lambda sub, ctx: random.choice(_load("cults.yaml")),
@@ -197,6 +213,10 @@ def _may_need_returners(template: str) -> bool:
     return "%random_in_guild%" in template
 
 
+def _may_need_characters(template: str) -> bool:
+    return "%character%" in template
+
+
 async def resolve(
     template: str | None = None,
     *,
@@ -223,6 +243,10 @@ async def resolve(
         ctx["returners_pool"] = await _fetch_returners_pool(
             exclude=set(players)
         )
+    if _may_need_characters(template):
+        chars = list(_load("characters.yaml"))
+        random.shuffle(chars)
+        ctx["characters_pool"] = chars
 
     text = template
     for _ in range(max_depth):

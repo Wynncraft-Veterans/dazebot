@@ -286,6 +286,14 @@ async def _resolve_invitee(
             )
         return member, None
 
+    # Users often type `@name` as literal text — they meant to pick from
+    # Discord's mention popup but hit enter/space first, so the `@` never
+    # became part of a real `<@id>` mention. Strip it before name matching
+    # so `@faulischlumpf` resolves the same as `faulischlumpf`.
+    had_at_prefix = val.startswith("@")
+    if had_at_prefix:
+        val = val[1:].strip()
+
     lower = val.lower()
     for cand in guild.members:
         if (
@@ -295,9 +303,16 @@ async def _resolve_invitee(
         ):
             return cand, None
 
+    at_hint = (
+        " Note: a literal `@` prefix only counts as a mention if you"
+        " pick the user from Discord's popup — otherwise it's just text."
+        if had_at_prefix
+        else ""
+    )
     return None, (
-        f"`{val}` doesn't match anyone on this server. Try a Discord "
-        "@mention or a full username."
+        f"`{raw.strip()}` doesn't match anyone on this server."
+        " Try picking them from Discord's @mention popup, pasting their"
+        f" user ID, or typing their exact username.{at_hint}"
     )
 
 

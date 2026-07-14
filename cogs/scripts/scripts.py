@@ -230,6 +230,7 @@ class Scripts(commands.Cog):
         if ctx.invoked_subcommand is None:
             await ctx.reply(
                 "Available scripts: `~script edit_welcome <channel> <message_id>`, "
+                "`~script edit_link_promo <channel>`, "
                 "`~script rename_cult`, `~script install_intercult`, "
                 "`~script install_recruitment`, `~script install_recruitment_deercult`, "
                 "`~script extract_anni_timestamps`."
@@ -272,6 +273,58 @@ class Scripts(commands.Cog):
             "# Link your Wynn!\n"
             "## This will unlock some features and channels, especially "
             "if you are an in-game vets guild member!"
+        )
+        try:
+            await msg.edit(content=new_content, embed=None, view=FirstInstallView())
+        except discord.HTTPException as e:
+            await ctx.reply(f"❌ Edit failed: {e}", ephemeral=True)
+            return
+
+        await ctx.reply(f"✅ Edited {msg.jump_url}.", ephemeral=True)
+
+    @script_group.command(
+        name="edit_link_promo",
+        description=(
+            "(Operator) Rewrite the vets-link promo post to the "
+            "member/non-member Q&A copy, keeping the link button."
+        ),
+    )
+    @is_operator()
+    async def script_edit_link_promo(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel,
+    ):
+        """Update the pinned vets-link promo post to its new copy.
+
+        Hard-codes the target message id (the promo is a single known
+        post); the operator supplies the channel to avoid a bot-wide
+        message scan.
+        """
+        from lib.discord_utils.first_install_view import FirstInstallView
+
+        PROMO_MESSAGE_ID = 1500611826621091970
+
+        await ctx.defer(ephemeral=True)
+        try:
+            msg = await channel.fetch_message(PROMO_MESSAGE_ID)
+        except (discord.NotFound, discord.Forbidden) as e:
+            await ctx.reply(f"❌ Couldn't fetch that message: {e}", ephemeral=True)
+            return
+
+        if msg.author.id != self.bot.user.id:
+            await ctx.reply(
+                "❌ That message wasn't posted by me, so I can't edit it.",
+                ephemeral=True,
+            )
+            return
+
+        new_content = (
+            "# Are you an in-game VETS member?\n"
+            "Use this to unlock guild-specific channels!\n"
+            "\n"
+            "# You're not?\n"
+            "This thing will still give you a fancy year-based name colour!"
         )
         try:
             await msg.edit(content=new_content, embed=None, view=FirstInstallView())

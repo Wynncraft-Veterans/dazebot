@@ -99,6 +99,43 @@ async def manage_tier_allows(ctx: commands.Context, sub: ManageSubcommand) -> bo
     return True
 
 
+MESSAGE_LIMIT = 2000
+"""Discord's per-message content cap. Exceeding it raises 50035."""
+
+
+def _split_for_discord(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
+    """Split ``text`` into <=``limit`` chunks on line boundaries.
+
+    A single line longer than ``limit`` is hard-sliced rather than dropped —
+    correctness beats prettiness for staff dumps.
+    """
+    if len(text) <= limit:
+        return [text]
+    out: list[str] = []
+    cur = ""
+    for line in text.split("\n"):
+        if len(line) > limit:
+            if cur:
+                out.append(cur)
+                cur = ""
+            for i in range(0, len(line), limit):
+                piece = line[i : i + limit]
+                if len(piece) == limit:
+                    out.append(piece)
+                else:
+                    cur = piece
+            continue
+        add = line if not cur else "\n" + line
+        if cur and len(cur) + len(add) > limit:
+            out.append(cur)
+            cur = line
+        else:
+            cur += add
+    if cur:
+        out.append(cur)
+    return out
+
+
 async def send_feedback(
     ctx: commands.Context,
     text: str,
@@ -112,16 +149,24 @@ async def send_feedback(
       command.
     * ``persist=False`` (anywhere else): DM the invoker. If DMs are closed,
       fall back to a non-revealing nudge in the channel.
+
+    Content longer than :data:`MESSAGE_LIMIT` is split on line boundaries
+    and sent as consecutive messages (the first still ``reply``-anchored
+    to the invoker's command, the rest as plain follow-ups).
     """
+    chunks = _split_for_discord(text)
     if persist:
         try:
-            await ctx.reply(text, mention_author=False)
+            await ctx.reply(chunks[0], mention_author=False)
+            for chunk in chunks[1:]:
+                await ctx.channel.send(chunk)
         except discord.HTTPException:
             logger.exception("send_feedback: in-channel reply failed")
         return
 
     try:
-        await ctx.author.send(text)
+        for chunk in chunks:
+            await ctx.author.send(chunk)
         return
     except discord.Forbidden:
         pass

@@ -41,9 +41,12 @@ from cogs.events.returns import (
     register_manage,
 )
 from cogs.events.returns._common import (
+    MESSAGE_LIMIT,
     PERSIST_CHANNEL_ID,
+    _split_for_discord,
     is_persist_context,
     manage_tier_allows,
+    send_feedback,
     send_help,
     tier_allows,
 )
@@ -464,3 +467,73 @@ async def test_send_help_when_caller_has_no_access(
     assert "anyone_can" not in body
     assert "admin_only" not in body
     assert "op_only" not in body
+
+
+# ---------------------------------------------------------------------------
+# _split_for_discord + send_feedback chunking (regression: 50035 on >2000 char
+# staff dumps like ~manage_return 81 list / links / help)
+# ---------------------------------------------------------------------------
+
+
+def test_split_short_text_returns_single_chunk():
+    assert _split_for_discord("hello") == ["hello"]
+
+
+def test_split_prefers_line_boundaries():
+    line = "x" * 500
+    text = "\n".join([line] * 10)  # 10 lines * 500 chars + 9 newlines = 5009
+    chunks = _split_for_discord(text)
+    assert all(len(c) <= MESSAGE_LIMIT for c in chunks)
+    # Chunk boundaries are line boundaries — rejoining with "\n" round-trips.
+    assert "\n".join(chunks) == text
+    for c in chunks[1:]:
+        # No chunk starts mid-line (would look like 501+ x's before a newline).
+        assert not c.startswith("x" * 501)
+
+
+def test_split_hard_slices_a_single_oversized_line():
+    text = "a" * (MESSAGE_LIMIT * 2 + 50)
+    chunks = _split_for_discord(text)
+    assert all(len(c) <= MESSAGE_LIMIT for c in chunks)
+    assert "".join(chunks) == text
+
+
+def test_split_preserves_short_tail_after_hard_slice():
+    text = "a" * MESSAGE_LIMIT + "\n" + "tail"
+    chunks = _split_for_discord(text)
+    assert chunks[-1].endswith("tail")
+
+
+async def test_send_feedback_persist_fans_out_over_2000_chars(mock_member):
+    """>2000-char dump replies with the first chunk, then follows up on the channel."""
+    text = "\n".join(f"line-{i}" for i in range(500))  # well over 2000
+    assert len(text) > MESSAGE_LIMIT
+    ctx = MagicMock()
+    ctx.author = mock_member()
+    ctx.reply = AsyncMock()
+    ctx.channel = MagicMock()
+    ctx.channel.send = AsyncMock()
+
+    await send_feedback(ctx, text, persist=True)
+
+    ctx.reply.assert_awaited_once()
+    assert ctx.channel.send.await_count >= 1
+    first = ctx.reply.await_args.args[0]
+    follow_ups = [call.args[0] for call in ctx.channel.send.await_args_list]
+    assert all(len(c) <= MESSAGE_LIMIT for c in [first, *follow_ups])
+    # Reassembly (chunks are joined on line boundaries, so "\n".join round-trips).
+    assert "\n".join([first, *follow_ups]) == text
+
+
+async def test_send_feedback_dm_fans_out_over_2000_chars(mock_member):
+    text = "\n".join(f"line-{i}" for i in range(500))
+    ctx = MagicMock()
+    ctx.author = mock_member()
+    ctx.author.send = AsyncMock()
+
+    await send_feedback(ctx, text, persist=False)
+
+    assert ctx.author.send.await_count >= 2
+    sent = [call.args[0] for call in ctx.author.send.await_args_list]
+    assert all(len(c) <= MESSAGE_LIMIT for c in sent)
+    assert "\n".join(sent) == text

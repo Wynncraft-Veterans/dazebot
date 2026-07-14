@@ -12,7 +12,9 @@ adding or retiring a one-off doesn't touch any real feature code.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from typing import Optional
 
 import discord
 from discord.ext import commands
@@ -21,6 +23,193 @@ from bot import Bot
 from lib.auth import is_operator
 
 logger = logging.getLogger("dazebot.cogs.scripts.scripts")
+
+
+# Module-level handle so a second ~script invocation can cancel the prior
+# watcher instead of racing it — otherwise both would successfully spawn
+# a "team 15" and we'd end up with two duplicate pool teams.
+_r81_team14_watcher: Optional[asyncio.Task] = None
+
+
+async def _r81_spawn_next_pool_team(
+    bot: Bot,
+    declined_ids: list[str],
+    invoker_id: int,
+) -> None:
+    """Post a fresh pool invite for the declined-invitees of a filled team.
+
+    Used by :func:`_r81_watch_and_spawn_next` when team 14 (or later)
+    fills — the auto-declined losers get bundled into a new pool team.
+    """
+    from cogs.events.returns.week_81 import (
+        INVITE_THREAD_ID,
+        POOL_TEAM_SIZE,
+        WEEK,
+        BingoPoolInviteConfirmView,
+        _POOL_SENTINEL_PREFIX,
+        _current_team_for,
+        _next_team_number,
+        _resolve_thread,
+    )
+    from config import CurrConfig
+    from orm_returns import BingoInvite, BingoTeam
+
+    guild = bot.get_guild(CurrConfig.GUILD)
+    if guild is None:
+        logger.error(
+            "r81 recovery: can't reach guild %s to resolve declined-"
+            "invitees for next-team spawn",
+            CurrConfig.GUILD,
+        )
+        return
+
+    members: list[discord.Member] = []
+    for did in declined_ids:
+        try:
+            uid = int(did)
+        except ValueError:
+            logger.warning("r81 recovery: non-numeric invitee id %r", did)
+            continue
+        m = guild.get_member(uid)
+        if m is None:
+            try:
+                m = await guild.fetch_member(uid)
+            except (discord.NotFound, discord.HTTPException):
+                logger.warning(
+                    "r81 recovery: can't fetch member %s for next-team spawn",
+                    uid,
+                )
+                continue
+        other = await _current_team_for(str(m.id))
+        if other is not None and other.state != "disbanded":
+            logger.warning(
+                "r81 recovery: %s is already on team %s (state=%s), "
+                "skipping from next-team spawn",
+                m.id, other.team_number, other.state,
+            )
+            continue
+        members.append(m)
+
+    if not members:
+        logger.error(
+            "r81 recovery: no eligible members for next-team spawn; aborting"
+        )
+        return
+
+    invite_thread = await _resolve_thread(bot, INVITE_THREAD_ID)
+    if invite_thread is None:
+        logger.error(
+            "r81 recovery: can't reach invite thread %s for next-team spawn",
+            INVITE_THREAD_ID,
+        )
+        return
+
+    team_number = await _next_team_number()
+    new_team = await BingoTeam.create(
+        week=WEEK,
+        team_number=team_number,
+        creator_disc_uuid=f"{_POOL_SENTINEL_PREFIX}{invoker_id}",
+        state="pending",
+    )
+    for m in members:
+        await BingoInvite.create(
+            team=new_team,
+            invitee_disc_uuid=str(m.id),
+            state="pending",
+        )
+
+    mentions_line = " ".join(m.mention for m in members)
+    try:
+        invite_msg = await invite_thread.send(
+            content=(
+                f"🎯 **r81 pool invite** — first {POOL_TEAM_SIZE} of you "
+                f"to click **Accept** form Team {team_number}.\n"
+                f"Invited: {mentions_line}"
+            ),
+            view=BingoPoolInviteConfirmView(),
+            allowed_mentions=discord.AllowedMentions(
+                users=list(members), roles=False, everyone=False
+            ),
+        )
+    except discord.HTTPException:
+        logger.exception(
+            "r81 recovery: failed to post next-team pool invite"
+        )
+        new_team.state = "disbanded"
+        await new_team.save(update_fields=["state"])
+        return
+
+    new_team.pending_invite_msg_id = invite_msg.id
+    await new_team.save(update_fields=["pending_invite_msg_id"])
+    logger.info(
+        "r81 recovery: team %d pool invite posted (%d invitees, "
+        "team.id=%s, msg=%s)",
+        team_number, len(members), new_team.id, invite_msg.id,
+    )
+
+
+async def _r81_watch_and_spawn_next(
+    bot: Bot, team_pk, invoker_id: int
+) -> None:
+    """Poll a pending BingoTeam until it advances, then spawn a follow-up
+    pool team from its auto-declined losers.
+
+    Ticks every 10 s, capped at 2 h. Cancellation-safe: raises through
+    the ``asyncio.CancelledError`` when a subsequent ``~script`` cancels
+    us in favour of a fresh watcher.
+    """
+    from orm_returns import BingoInvite, BingoTeam
+
+    for _ in range(720):  # 720 * 10 s = 2 h
+        await asyncio.sleep(10)
+        t = await BingoTeam.get_or_none(id=team_pk)
+        if t is None:
+            logger.warning(
+                "r81 recovery: watched team row vanished (id=%s); "
+                "stopping watcher",
+                team_pk,
+            )
+            return
+        if t.state == "pending":
+            continue
+        if t.state == "disbanded":
+            logger.warning(
+                "r81 recovery: watched team %s was disbanded, not filled; "
+                "not spawning follow-up",
+                t.team_number,
+            )
+            return
+        declined_ids: list[str] = list(
+            await BingoInvite.filter(team=t, state="declined")
+            .values_list("invitee_disc_uuid", flat=True)
+        )
+        if not declined_ids:
+            logger.info(
+                "r81 recovery: team %s filled with no losers — no "
+                "follow-up needed",
+                t.team_number,
+            )
+            return
+        await _r81_spawn_next_pool_team(bot, declined_ids, invoker_id)
+        return
+    logger.warning(
+        "r81 recovery: team %s fill watcher timed out after 2 h",
+        team_pk,
+    )
+
+
+def _start_r81_team14_watcher(bot: Bot, team_pk, invoker_id: int) -> None:
+    """Spawn (or replace) the singleton team-14 watcher task."""
+    global _r81_team14_watcher
+    if _r81_team14_watcher is not None and not _r81_team14_watcher.done():
+        _r81_team14_watcher.cancel()
+        logger.info(
+            "r81 recovery: cancelled prior team-14 watcher before starting "
+            "a new one"
+        )
+    _r81_team14_watcher = bot.loop.create_task(
+        _r81_watch_and_spawn_next(bot, team_pk, invoker_id)
+    )
 
 
 class Scripts(commands.Cog):
@@ -424,18 +613,7 @@ class Scripts(commands.Cog):
            invite for team 15 with the 3 losers so they can form the
            second team.
         """
-        import asyncio
-
-        from cogs.events.returns.week_81 import (
-            WEEK,
-            INVITE_THREAD_ID,
-            POOL_TEAM_SIZE,
-            BingoPoolInviteConfirmView,
-            _POOL_SENTINEL_PREFIX,
-            _current_team_for,
-            _next_team_number,
-            _resolve_thread,
-        )
+        from cogs.events.returns.week_81 import WEEK
         from orm_returns import BingoInvite, BingoTeam
 
         PSYCHO_ID = 333977111515889674
@@ -529,154 +707,202 @@ class Scripts(commands.Cog):
             added_new, rewound, NEW_INVITEES,
         )
 
-        # Step 4: background watcher. Polls team 14 every 10s; on the
-        # first tick where state != "pending" we form team 15 from the
-        # invites that got auto-declined by _handle_pool_invite_click.
-        # Bounded at 2h so a stuck team doesn't leak a task forever.
-        team14_pk = team14.id
-        invoker_id = ctx.author.id
+        _start_r81_team14_watcher(self.bot, team14.id, ctx.author.id)
 
-        async def _watcher():
-            for _ in range(720):  # 720 * 10s = 2h
-                await asyncio.sleep(10)
-                t = await BingoTeam.get_or_none(id=team14_pk)
-                if t is None:
-                    logger.warning(
-                        "r81 recovery: team 14 row vanished; stopping watcher"
-                    )
-                    return
-                if t.state == "pending":
-                    continue
-                if t.state == "disbanded":
-                    logger.warning(
-                        "r81 recovery: team 14 was disbanded, not filled; "
-                        "not spawning team 15"
-                    )
-                    return
-                # Team 14 filled (state is picking/playing). Losers are
-                # the auto-declined invites from
-                # _handle_pool_invite_click's cleanup loop.
-                declined_ids: list[str] = (
-                    await BingoInvite.filter(team=t, state="declined")
-                    .values_list("invitee_disc_uuid", flat=True)
-                )
-                if not declined_ids:
-                    logger.info(
-                        "r81 recovery: team 14 filled with no losers "
-                        "(unexpected — no team 15 needed)"
-                    )
-                    return
-                await _spawn_team_15(declined_ids)
-                return
-            logger.warning(
-                "r81 recovery: team 14 fill watcher timed out after 2h "
-                "without team 14 advancing"
+    @script_group.command(
+        name="r81_refresh_team_14_pool_invite",
+        description=(
+            "(Operator) One-off: delete team 14's stale pool-invite "
+            "message and post a fresh one that names every current "
+            "pending invitee, then restart the fill-watcher."
+        ),
+    )
+    @is_operator()
+    async def script_r81_refresh_team_14_pool_invite(
+        self, ctx: commands.Context
+    ):
+        """Replace team 14's pool-invite post.
+
+        After ``r81_recover_team_10_into_pool_14`` silently added
+        Psycho/Jelles/Aviko as BingoInvite rows on team 14, the original
+        pool post still reads "Invited: gatze / Elyux / Box" — so the
+        newly-added invitees have no visible cue to click Accept. This
+        script deletes the old post, generates a fresh one from the
+        live DB (mentioning every current pending invitee with a ping,
+        naming already-accepted members without pinging them), rewires
+        ``team.pending_invite_msg_id`` to the new post so
+        ``_handle_pool_invite_click`` still resolves, and restarts the
+        fill-watcher (cancelling any prior one).
+        """
+        from cogs.events.returns.week_81 import (
+            INVITE_THREAD_ID,
+            POOL_TEAM_SIZE,
+            WEEK,
+            BingoPoolInviteConfirmView,
+            _POOL_SENTINEL_PREFIX,
+            _resolve_thread,
+        )
+        from orm_returns import BingoInvite, BingoTeam
+
+        try:
+            await ctx.defer(ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+        team14 = await BingoTeam.filter(week=WEEK, team_number=14).first()
+        if team14 is None:
+            await ctx.reply("❌ Team 14 not found.", ephemeral=True)
+            return
+        if team14.state != "pending":
+            await ctx.reply(
+                f"❌ Team 14 is in state `{team14.state}`, not `pending`. "
+                "Refresh only makes sense on a still-open pool.",
+                ephemeral=True,
             )
+            return
 
-        async def _spawn_team_15(declined_ids: list[str]) -> None:
-            from config import CurrConfig
-
-            guild = self.bot.get_guild(CurrConfig.GUILD)
-            if guild is None:
-                logger.error(
-                    "r81 recovery: can't reach guild %s to resolve "
-                    "declined-invitees for team 15",
-                    CurrConfig.GUILD,
-                )
-                return
-
-            members: list[discord.Member] = []
-            for did in declined_ids:
-                try:
-                    uid = int(did)
-                except ValueError:
-                    logger.warning(
-                        "r81 recovery: non-numeric invitee id %r", did
-                    )
-                    continue
-                m = guild.get_member(uid)
-                if m is None:
-                    try:
-                        m = await guild.fetch_member(uid)
-                    except (discord.NotFound, discord.HTTPException):
-                        logger.warning(
-                            "r81 recovery: can't fetch member %s for "
-                            "team 15", uid,
-                        )
-                        continue
-                other = await _current_team_for(str(m.id))
-                if other is not None and other.state != "disbanded":
-                    logger.warning(
-                        "r81 recovery: %s is already on team %s "
-                        "(state=%s), skipping from team 15",
-                        m.id, other.team_number, other.state,
-                    )
-                    continue
-                members.append(m)
-
-            if not members:
-                logger.error(
-                    "r81 recovery: no eligible members for team 15; "
-                    "aborting spawn"
-                )
-                return
-
-            invite_thread = await _resolve_thread(
-                self.bot, INVITE_THREAD_ID
+        invite_thread = await _resolve_thread(self.bot, INVITE_THREAD_ID)
+        if invite_thread is None:
+            await ctx.reply(
+                f"❌ Can't reach invite thread ({INVITE_THREAD_ID}).",
+                ephemeral=True,
             )
-            if invite_thread is None:
-                logger.error(
-                    "r81 recovery: can't reach invite thread %s for "
-                    "team 15 spawn",
-                    INVITE_THREAD_ID,
-                )
-                return
+            return
 
-            team_number = await _next_team_number()
-            team15 = await BingoTeam.create(
-                week=WEEK,
-                team_number=team_number,
-                creator_disc_uuid=f"{_POOL_SENTINEL_PREFIX}{invoker_id}",
-                state="pending",
-            )
-            for m in members:
-                await BingoInvite.create(
-                    team=team15,
-                    invitee_disc_uuid=str(m.id),
-                    state="pending",
-                )
-
-            mentions_line = " ".join(m.mention for m in members)
+        # Delete the stale post. Best-effort: if it's already gone or the
+        # bot lacks perms, log and continue — the new post is what matters.
+        if team14.pending_invite_msg_id:
             try:
-                invite_msg = await invite_thread.send(
-                    content=(
-                        f"🎯 **r81 pool invite** — first "
-                        f"{POOL_TEAM_SIZE} of you to click **Accept** "
-                        f"form Team {team_number}.\n"
-                        f"Invited: {mentions_line}"
-                    ),
-                    view=BingoPoolInviteConfirmView(),
-                    allowed_mentions=discord.AllowedMentions(
-                        users=list(members), roles=False, everyone=False
-                    ),
+                old_msg = await invite_thread.fetch_message(
+                    team14.pending_invite_msg_id
+                )
+                await old_msg.delete()
+            except (discord.NotFound, discord.Forbidden):
+                logger.info(
+                    "r81 refresh: prior team 14 message %s already gone/"
+                    "inaccessible; continuing",
+                    team14.pending_invite_msg_id,
                 )
             except discord.HTTPException:
                 logger.exception(
-                    "r81 recovery: failed to post team 15 pool invite"
+                    "r81 refresh: unexpected error deleting old team 14 "
+                    "message %s; continuing",
+                    team14.pending_invite_msg_id,
                 )
-                team15.state = "disbanded"
-                await team15.save(update_fields=["state"])
-                return
 
-            team15.pending_invite_msg_id = invite_msg.id
-            await team15.save(update_fields=["pending_invite_msg_id"])
-            logger.info(
-                "r81 recovery: team 15 pool invite posted (%d invitees, "
-                "team.id=%s, msg=%s)",
-                len(members), team15.id, invite_msg.id,
+        # Rebuild the roster from the DB. Creator is always "accepted"
+        # (his BingoInvite row was consumed at promotion); accepted invites
+        # were the extra clickers before us; pending invites are who we
+        # still need.
+        from config import CurrConfig
+
+        guild_id = ctx.guild.id if ctx.guild is not None else CurrConfig.GUILD
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            await ctx.reply(
+                f"❌ Couldn't reach guild {guild_id}.", ephemeral=True
             )
+            return
 
-        self.bot.loop.create_task(_watcher())
+        def _resolve(disc_uuid: str) -> Optional[discord.Member]:
+            try:
+                return guild.get_member(int(disc_uuid))
+            except (ValueError, TypeError):
+                return None
+
+        accepted_members: list[discord.Member] = []
+        # Creator, if it's a real user (skip the "pool:" sentinel — should
+        # never appear on a mid-flight team but guard anyway).
+        if not team14.creator_disc_uuid.startswith(_POOL_SENTINEL_PREFIX):
+            creator = _resolve(team14.creator_disc_uuid)
+            if creator is not None:
+                accepted_members.append(creator)
+
+        accepted_invites = await BingoInvite.filter(
+            team=team14, state="accepted"
+        )
+        for inv in accepted_invites:
+            m = _resolve(inv.invitee_disc_uuid)
+            if m is not None:
+                accepted_members.append(m)
+
+        pending_invites = await BingoInvite.filter(
+            team=team14, state="pending"
+        )
+        pending_members: list[discord.Member] = []
+        for inv in pending_invites:
+            m = _resolve(inv.invitee_disc_uuid)
+            if m is not None:
+                pending_members.append(m)
+
+        if not pending_members:
+            await ctx.reply(
+                "❌ Team 14 has no pending invitees — nothing left to prompt. "
+                "Not posting a new message.",
+                ephemeral=True,
+            )
+            return
+
+        seats_left = POOL_TEAM_SIZE - len(accepted_members)
+        seats_left = max(seats_left, 0)
+
+        accepted_line = (
+            ", ".join(m.mention for m in accepted_members)
+            if accepted_members
+            else "(nobody yet)"
+        )
+        pending_line = " ".join(m.mention for m in pending_members)
+
+        seats_phrase = (
+            "1 more of you needs"
+            if seats_left == 1
+            else f"{seats_left} more of you need"
+        )
+        content = (
+            f"🎯 **r81 pool invite (refreshed)** — {seats_phrase} to click "
+            f"**Accept** to fill Team {team14.team_number}.\n"
+            f"Already accepted: {accepted_line}.\n"
+            f"Still needed (any {seats_left} of): {pending_line}"
+        )
+
+        # Ping only the still-pending invitees. Already-accepted members
+        # shouldn't get re-pinged just because we regenerated the post.
+        try:
+            new_msg = await invite_thread.send(
+                content=content,
+                view=BingoPoolInviteConfirmView(),
+                allowed_mentions=discord.AllowedMentions(
+                    users=list(pending_members), roles=False, everyone=False
+                ),
+            )
+        except discord.HTTPException as e:
+            await ctx.reply(
+                f"❌ Failed to post refreshed invite: {e}. Leaving DB "
+                "unchanged so the original post (if still there) still "
+                "dispatches.",
+                ephemeral=True,
+            )
+            return
+
+        prior_msg_id = team14.pending_invite_msg_id
+        team14.pending_invite_msg_id = new_msg.id
+        await team14.save(update_fields=["pending_invite_msg_id"])
+
+        await ctx.reply(
+            f"✅ Team 14 refreshed. New post: {new_msg.jump_url} "
+            f"(accepted={len(accepted_members)}, pending="
+            f"{len(pending_members)}, seats left={seats_left}). "
+            "Watcher (re)started.",
+            ephemeral=True,
+        )
+        logger.info(
+            "r81 refresh: team 14 pending_invite_msg_id %s -> %s; "
+            "accepted=%d pending=%d",
+            prior_msg_id, new_msg.id,
+            len(accepted_members), len(pending_members),
+        )
+
+        _start_r81_team14_watcher(self.bot, team14.id, ctx.author.id)
 
 
 async def setup(bot: Bot):

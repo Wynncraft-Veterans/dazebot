@@ -74,6 +74,7 @@ from cogs.events.returns._common import (
 from cogs.events.returns.lib import resolver as _resolver
 from config import CurrConfig
 from lib.auth import _resolve_member
+from lib.mc.wynn_api.guild import get_guild
 from orm import DiscordAccount, MinecraftAccount, Score, WeeklyEvent
 from orm_returns import (
     BingoBingoEvent,
@@ -2066,6 +2067,98 @@ async def _manage_list(ctx: commands.Context, args: list[str]) -> None:
             f"id=`{t.id}`"
         )
     await send_feedback(ctx, "\n".join(lines), persist=persist)
+
+
+@register_manage(
+    WEEK, "available", tier=Tier.STAFF,
+    help=(
+        f"List `{WYNN_GUILD_NAME}` guild members not on any active r81 team, "
+        "with the online subset called out. Uses the live Wynncraft guild "
+        "roster for eligibility and online status."
+    ),
+    usage="",
+)
+async def _manage_available(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    try:
+        guild = await get_guild(WYNN_GUILD_NAME)
+    except Exception:
+        logger.exception("r81 available: guild fetch failed")
+        await send_feedback(
+            ctx,
+            f"Failed to fetch Wynncraft guild `{WYNN_GUILD_NAME}` — try again.",
+            persist=persist,
+        )
+        return
+
+    # "Involved" = on any team whose state hasn't been disbanded. Matches the
+    # exclusion set _wildcard_candidates_excluding_team applies for the picker.
+    on_team = set(
+        await BingoTeamMember.filter(team__state__not="disbanded").values_list(
+            "disc_uuid", flat=True
+        )
+    )
+
+    roster = list(guild.members.all_members())
+    guild_uuids = [m.uuid for m in roster]
+    mc_rows = await MinecraftAccount.filter(uuid__in=guild_uuids)
+    mc_id_by_uuid = {mc.uuid: mc.id for mc in mc_rows}
+    discs = await DiscordAccount.filter(
+        minecraft_account_id__in=list(mc_id_by_uuid.values())
+    )
+    disc_uuid_by_mc_id = {d.minecraft_account_id: d.disc_uuid for d in discs}
+
+    online_lines: list[str] = []
+    offline_lines: list[str] = []
+    for m in roster:
+        mc_id = mc_id_by_uuid.get(m.uuid)
+        disc_uuid = disc_uuid_by_mc_id.get(mc_id) if mc_id is not None else None
+        if disc_uuid is not None and disc_uuid in on_team:
+            continue
+        tag = f" <@{disc_uuid}>" if disc_uuid else " *(unlinked)*"
+        line = f"- `{m.username}`{tag}"
+        # Wynncraft privacy: `online` can be None (hidden). Bucket as offline
+        # — we can't claim online without a positive signal.
+        if m.online:
+            world = f" · {m.server}" if m.server else ""
+            online_lines.append(line + world)
+        else:
+            offline_lines.append(line)
+
+    total_available = len(online_lines) + len(offline_lines)
+    header = (
+        f"**Return 81 — `{WYNN_GUILD_NAME}` members not on any active team**\n"
+        f"{total_available}/{guild.members.total} available · "
+        f"{len(online_lines)} online now"
+    )
+
+    if total_available == 0:
+        await send_feedback(
+            ctx, header + "\n_Everyone's on a team already._", persist=persist
+        )
+        return
+
+    sections: list[str] = [header]
+    if online_lines:
+        sections.append(f"\n**🟢 Online ({len(online_lines)}):**")
+        sections.extend(online_lines)
+    if offline_lines:
+        sections.append(f"\n**⚫ Offline ({len(offline_lines)}):**")
+        sections.extend(offline_lines)
+
+    buf: list[str] = []
+    used = 0
+    for chunk in sections:
+        add = len(chunk) + 1
+        if buf and used + add > 1900:
+            await send_feedback(ctx, "\n".join(buf), persist=persist)
+            buf = [chunk]
+            used = len(chunk)
+        else:
+            buf.append(chunk)
+            used += add
+    if buf:
+        await send_feedback(ctx, "\n".join(buf), persist=persist)
 
 
 @register_manage(

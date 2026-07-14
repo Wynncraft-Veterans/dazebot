@@ -94,10 +94,12 @@ class Bot(commands.Bot):
         try:
             from cogs.events.returns.week_81 import (
                 BingoInviteConfirmView,
+                BingoPoolInviteConfirmView,
                 BingoRandomPickView,
             )
 
             self.add_view(BingoInviteConfirmView())
+            self.add_view(BingoPoolInviteConfirmView())
             self.add_view(BingoRandomPickView())
         except Exception as e:
             logger.error(f"Failed to register week_81 views: {e}")

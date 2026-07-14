@@ -957,6 +957,28 @@ class BingoInviteConfirmView(discord.ui.View):
         await _handle_invite_click(interaction, "declined")
 
 
+class BingoPoolInviteConfirmView(discord.ui.View):
+    """Persistent Accept button for a staff-created pool invite.
+
+    Unlike :class:`BingoInviteConfirmView` (which is a two-person confirm
+    with decline-kills-team semantics), this view is open to N invitees and
+    the first ``POOL_TEAM_SIZE`` to click Accept form the team. There is
+    no Decline: losing acceptors just miss out, and remaining pending
+    invitees are auto-declined by the handler when the team fills.
+    """
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Accept",
+        style=discord.ButtonStyle.success,
+        custom_id="r81:pool:accept",
+    )
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _handle_pool_invite_click(interaction)
+
+
 class BingoRandomPickView(discord.ui.View):
     """Persistent view for the wildcard picker post. Ten buttons; each
     button's custom_id encodes only its slot index. The actual candidate
@@ -1067,6 +1089,116 @@ async def _handle_invite_click(
         await interaction.followup.send(
             "Both invitees accepted, but something went wrong creating the "
             "team thread. Ping wen.",
+            ephemeral=True,
+        )
+
+
+POOL_TEAM_SIZE = 3
+# Marker written into ``BingoTeam.creator_disc_uuid`` between pool-invite
+# creation and the first Accept click, so no real Discord ID is stored as
+# creator until a real acceptor takes the seat. Prefix is never a valid
+# snowflake, so :func:`_current_team_for`'s equality filter never matches
+# it — the staff invoker isn't accidentally counted as being on the team.
+_POOL_SENTINEL_PREFIX = "pool:"
+
+
+async def _handle_pool_invite_click(interaction: discord.Interaction) -> None:
+    """Handle an Accept click on a :class:`BingoPoolInviteConfirmView` post.
+
+    First acceptor is promoted to team creator (their :class:`BingoInvite`
+    row is deleted so ``_advance_to_picking``'s ``[creator] + [invites]``
+    iteration doesn't double-count them). Once ``POOL_TEAM_SIZE`` have
+    accepted, the remaining pending invites are auto-declined (freeing
+    those users from :func:`_current_team_for`'s pending-invite trap) and
+    we hand off to :func:`_advance_to_picking` unchanged.
+    """
+    msg_id = interaction.message.id if interaction.message else None
+    if msg_id is None:
+        await interaction.response.send_message(
+            "Couldn't identify this pool invite post.", ephemeral=True
+        )
+        return
+    team = await BingoTeam.filter(pending_invite_msg_id=msg_id).first()
+    if team is None or team.state != "pending":
+        await interaction.response.send_message(
+            "This pool invite is no longer active.", ephemeral=True
+        )
+        return
+
+    invite = await BingoInvite.filter(
+        team=team, invitee_disc_uuid=str(interaction.user.id)
+    ).first()
+    if invite is None:
+        await interaction.response.send_message(
+            "This pool invite isn't for you.", ephemeral=True
+        )
+        return
+    if invite.state != "pending":
+        await interaction.response.send_message(
+            f"You've already {invite.state} this invite.", ephemeral=True
+        )
+        return
+
+    # Also refuse if the clicker has since joined another team via a
+    # different flow — check before we mutate any rows.
+    other = await _current_team_for(str(interaction.user.id))
+    if other is not None and other.id != team.id:
+        await interaction.response.send_message(
+            "You're already on another active r81 team.", ephemeral=True
+        )
+        return
+
+    invite.state = "accepted"
+    await invite.save(update_fields=["state"])
+
+    if team.creator_disc_uuid.startswith(_POOL_SENTINEL_PREFIX):
+        team.creator_disc_uuid = str(interaction.user.id)
+        await team.save(update_fields=["creator_disc_uuid"])
+        await invite.delete()
+
+    accepted_count = await BingoInvite.filter(team=team, state="accepted").count()
+    # +1 for the promoted creator, whose invite row was deleted above.
+    total_on_team = accepted_count + 1
+
+    await interaction.response.send_message(
+        f"✅ You're on the team ({total_on_team}/{POOL_TEAM_SIZE}).",
+        ephemeral=True,
+    )
+
+    try:
+        if interaction.message is not None:
+            filled_line = (
+                f"\n\n_✅ <@{interaction.user.id}> accepted "
+                f"({total_on_team}/{POOL_TEAM_SIZE})._"
+            )
+            await interaction.message.edit(
+                content=interaction.message.content + filled_line,
+                # Drop the view once full so no late clicker gets a
+                # confusing "not for you" reply after the team is set.
+                view=(
+                    None
+                    if total_on_team >= POOL_TEAM_SIZE
+                    else BingoPoolInviteConfirmView()
+                ),
+            )
+    except discord.HTTPException:
+        pass
+
+    if total_on_team < POOL_TEAM_SIZE:
+        return
+
+    losers = await BingoInvite.filter(team=team, state="pending")
+    for inv in losers:
+        inv.state = "declined"
+        await inv.save(update_fields=["state"])
+
+    try:
+        await _advance_to_picking(interaction.client, team)
+    except Exception:
+        logger.exception("r81 pool team %s: advance_to_picking failed", team.id)
+        await interaction.followup.send(
+            "Three people accepted, but I couldn't set up the team thread. "
+            "Ping wen.",
             ephemeral=True,
         )
 
@@ -3168,4 +3300,137 @@ async def _manage_disband(ctx: commands.Context, args: list[str]) -> None:
     await team.save(update_fields=["state"])
     await send_feedback(
         ctx, f"✅ Team {team.team_number} disbanded.", persist=persist
+    )
+
+
+@register_manage(
+    WEEK, "poolInvite", tier=Tier.STAFF,
+    help=(
+        f"Post an open invite mentioning N players in the shared invite "
+        f"thread; first {POOL_TEAM_SIZE} to click Accept form a team. "
+        "Sender is excluded from the roster."
+    ),
+    usage="<mentions...>",
+)
+async def _manage_pool_invite(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+
+    if INVITE_THREAD_ID == 0:
+        await send_feedback(
+            ctx, "Invite thread isn't configured. Ping wen.", persist=persist
+        )
+        return
+
+    if not args:
+        await send_feedback(
+            ctx,
+            f"Usage: `~manage_return {WEEK} poolInvite @a @b @c ...` "
+            f"(at least {POOL_TEAM_SIZE} mentions).",
+            persist=persist,
+        )
+        return
+
+    guild_id = ctx.guild.id if ctx.guild is not None else CurrConfig.GUILD
+
+    members: list[discord.Member] = []
+    seen: set[int] = set()
+    for raw in args:
+        m, err = await _resolve_invitee(ctx.bot, raw, guild_id)
+        if err:
+            await send_feedback(ctx, f"`{raw}`: {err}", persist=persist)
+            return
+        assert m is not None
+        if m.id == ctx.author.id:
+            await send_feedback(
+                ctx,
+                "You can't invite yourself into a pool team you're "
+                "staff-creating.",
+                persist=persist,
+            )
+            return
+        if m.id in seen:
+            continue
+        seen.add(m.id)
+        members.append(m)
+
+    if len(members) < POOL_TEAM_SIZE:
+        await send_feedback(
+            ctx,
+            f"Need at least {POOL_TEAM_SIZE} distinct invitees; "
+            f"got {len(members)}.",
+            persist=persist,
+        )
+        return
+
+    for m in members:
+        if not _has_team_role(m):
+            await send_feedback(
+                ctx,
+                f"{m.mention} isn't eligible (needs Member / Hiatus / "
+                "Honourary).",
+                persist=persist,
+            )
+            return
+        if await _current_team_for(str(m.id)) is not None:
+            await send_feedback(
+                ctx,
+                f"{m.mention} is already on an active r81 team.",
+                persist=persist,
+            )
+            return
+
+    invite_thread = await _resolve_thread(ctx.bot, INVITE_THREAD_ID)
+    if invite_thread is None:
+        await send_feedback(
+            ctx,
+            f"I can't reach the invite thread ({INVITE_THREAD_ID}).",
+            persist=persist,
+        )
+        return
+
+    team_number = await _next_team_number()
+    team = await BingoTeam.create(
+        week=WEEK,
+        team_number=team_number,
+        creator_disc_uuid=f"{_POOL_SENTINEL_PREFIX}{ctx.author.id}",
+        state="pending",
+    )
+    for m in members:
+        await BingoInvite.create(
+            team=team, invitee_disc_uuid=str(m.id), state="pending"
+        )
+
+    mentions_line = " ".join(m.mention for m in members)
+    try:
+        invite_msg = await invite_thread.send(
+            content=(
+                f"🎯 **r81 pool invite** — first {POOL_TEAM_SIZE} of you "
+                f"to click **Accept** form Team {team_number}.\n"
+                f"Invited: {mentions_line}"
+            ),
+            view=BingoPoolInviteConfirmView(),
+            allowed_mentions=discord.AllowedMentions(
+                users=list(members), roles=False, everyone=False
+            ),
+        )
+    except discord.HTTPException:
+        logger.exception("r81 failed to post pool invite for team %s", team.id)
+        team.state = "disbanded"
+        await team.save(update_fields=["state"])
+        await send_feedback(
+            ctx, "Couldn't post the invite; team cancelled.", persist=persist
+        )
+        return
+
+    team.pending_invite_msg_id = invite_msg.id
+    await team.save(update_fields=["pending_invite_msg_id"])
+
+    await send_feedback(
+        ctx,
+        f"✅ Pool invite for Team {team_number} posted: {invite_msg.jump_url}",
+        persist=persist,
+    )
+    logger.info(
+        "r81 pool team %s (#%d) posted by staff=%s with %d invitees",
+        team.id, team_number, ctx.author.id, len(members),
     )

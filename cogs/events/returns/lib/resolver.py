@@ -21,7 +21,7 @@ from typing import Any, Callable
 import yaml
 
 _RES_DIR = Path(__file__).parent.parent / "resources"
-_TOKEN_RE = re.compile(r"%([a-z_]+)(?::([a-z_]+))?%")
+_TOKEN_RE = re.compile(r"%([a-z_]+)(?:\|\|([a-z_]+))?(?::([a-z_]+))?%")
 
 _BARE_MERCHANT_KEYS = frozenset({"blacksmith", "item_identifier", "powder_master"})
 
@@ -157,6 +157,7 @@ _HANDLERS: dict[str, Callable[[str | None, dict], str]] = {
     "merchant": lambda sub, ctx: _merchant(sub),
     "pack_adjective": lambda sub, ctx: _pack_adjective(),
     "profspot": lambda sub, ctx: _profspot(sub),
+    "other_guild": lambda sub, ctx: random.choice(_load("other_guilds.yaml")),
     "territory": lambda sub, ctx: random.choice(_load("territories.yaml")),
     "world_event": lambda sub, ctx: random.choice(_load("world_events.yaml")),
     "worthless_item": lambda sub, ctx: random.choice(_load("worthless.yaml")),
@@ -209,20 +210,29 @@ def _finalise(text: str) -> str:
     return text
 
 
+def _template_tokens(template: str) -> set[str]:
+    # Both the primary and the ||-alternate slot count as referenced,
+    # so `%territory||character%` triggers pre-fetch for both.
+    tokens: set[str] = set()
+    for m in _TOKEN_RE.finditer(template):
+        tokens.add(m.group(1))
+        if m.group(2):
+            tokens.add(m.group(2))
+    return tokens
+
+
 def _may_need_apartments(template: str) -> bool:
     # %apartment_member% may appear directly, or inside a %guild_island%
     # expansion (guild_island_places.yaml is the only known source).
-    return "%apartment_member%" in template or "%guild_island%" in template
+    return bool(_template_tokens(template) & {"apartment_member", "guild_island"})
 
 
 def _may_need_returners(template: str) -> bool:
-    # No other resource file currently expands to %random_in_guild%, so
-    # a direct substring check is sufficient.
-    return "%random_in_guild%" in template
+    return "random_in_guild" in _template_tokens(template)
 
 
 def _may_need_characters(template: str) -> bool:
-    return "%character%" in template
+    return "character" in _template_tokens(template)
 
 
 async def resolve(
@@ -256,9 +266,15 @@ async def resolve(
         random.shuffle(chars)
         ctx["characters_pool"] = chars
 
+    def _sub(m: re.Match) -> str:
+        name, alt, sub = m.group(1), m.group(2), m.group(3)
+        if alt is not None:
+            return _dispatch(name if random.random() < 0.5 else alt, None, ctx)
+        return _dispatch(name, sub, ctx)
+
     text = template
     for _ in range(max_depth):
-        new = _TOKEN_RE.sub(lambda m: _dispatch(m.group(1), m.group(2), ctx), text)
+        new = _TOKEN_RE.sub(_sub, text)
         if new == text:
             break
         text = new

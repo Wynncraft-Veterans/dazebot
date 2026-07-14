@@ -390,6 +390,294 @@ class Scripts(commands.Cog):
             else:
                 await ctx.send(files=batch)
 
+    @script_group.command(
+        name="r81_recover_team_10_into_pool_14",
+        description=(
+            "(Operator) One-off: silently disband r81 team 10, funnel "
+            "Psycho/Jelles/Aviko into team 14's still-pending pool, then "
+            "spawn a team 15 pool invite from the three who don't make it."
+        ),
+    )
+    @is_operator()
+    async def script_r81_recover_team_10_into_pool_14(
+        self, ctx: commands.Context
+    ):
+        """Rebuild after two overlapping r81 team formations.
+
+        Baseline (see conversation on 2026-07-14): team 10 is a 3-person
+        team (Psycho, Jelles, Aviko) formed via the original /return 81
+        two-invite flow; team 14 is a still-pending pool invite where
+        only Box has clicked Accept out of {Box, Ely, Gatze}. The goal is
+        to consolidate the 6 unattached players (Box + Ely + Gatze +
+        Psycho + Jelles + Aviko) into two 3-person teams by:
+
+        1. Disbanding team 10 in the DB only — no thread removal, no
+           archive, no chat notification.
+        2. Adding Psycho/Jelles/Aviko as pending BingoInvite rows on
+           team 14. They can now click Accept on the existing invite
+           post.
+        3. Confirming Box's acceptance is still recorded (he's already
+           team 14's creator per the pool-invite promotion flow — this is
+           a sanity check, no DB touch needed).
+        4. Watching team 14 in the background until it advances out of
+           ``pending`` (i.e. 3 people accepted), then posting a new pool
+           invite for team 15 with the 3 losers so they can form the
+           second team.
+        """
+        import asyncio
+
+        from cogs.events.returns.week_81 import (
+            WEEK,
+            INVITE_THREAD_ID,
+            POOL_TEAM_SIZE,
+            BingoPoolInviteConfirmView,
+            _POOL_SENTINEL_PREFIX,
+            _current_team_for,
+            _next_team_number,
+            _resolve_thread,
+        )
+        from orm_returns import BingoInvite, BingoTeam
+
+        PSYCHO_ID = 333977111515889674
+        JELLES_ID = 269151037946986500
+        AVIKO_ID = 560930769049092119
+        BOX_ID = 262800022758752257
+        NEW_INVITEES = (PSYCHO_ID, JELLES_ID, AVIKO_ID)
+
+        # Interaction path (slash) needs a defer; prefix path is fine
+        # replying directly. Keep response ephemeral — the whole point
+        # of the script is that this is a silent recovery.
+        try:
+            await ctx.defer(ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+        team10 = await BingoTeam.filter(week=WEEK, team_number=10).first()
+        if team10 is None:
+            await ctx.reply("❌ Team 10 not found.", ephemeral=True)
+            return
+        team14 = await BingoTeam.filter(week=WEEK, team_number=14).first()
+        if team14 is None:
+            await ctx.reply("❌ Team 14 not found.", ephemeral=True)
+            return
+        if team14.state != "pending":
+            await ctx.reply(
+                f"❌ Team 14 is in state `{team14.state}`, not `pending`. "
+                "Nothing to do; aborting so the script isn't destructive.",
+                ephemeral=True,
+            )
+            return
+        if team14.creator_disc_uuid != str(BOX_ID):
+            # If Box isn't the creator, either he never clicked Accept
+            # (his sentinel is still there) or someone else beat him to
+            # it. In neither case do we want to silently overwrite.
+            await ctx.reply(
+                f"❌ Team 14 creator is `{team14.creator_disc_uuid}`, "
+                f"expected Box (`{BOX_ID}`). Aborting; confirm state "
+                "before re-running.",
+                ephemeral=True,
+            )
+            return
+
+        # Step 1: silent DB-only disband of team 10.
+        if team10.state != "disbanded":
+            team10.state = "disbanded"
+            await team10.save(update_fields=["state"])
+        # Deliberately do NOT touch team10.thread — no remove_user, no
+        # archive. The thread stays visible; only the DB knows it's dead.
+        # `_current_team_for` filters on state != "disbanded", so
+        # Psycho/Jelles/Aviko are now free to join team 14.
+
+        # Step 2: add invites to team 14 (idempotent — the BingoInvite
+        # unique_together on (team, invitee_disc_uuid) would otherwise
+        # raise). If a row already exists in a non-pending state, revert
+        # it to "pending" so the invitee can click Accept.
+        added_new = 0
+        rewound = 0
+        for uid in NEW_INVITEES:
+            existing = await BingoInvite.filter(
+                team=team14, invitee_disc_uuid=str(uid)
+            ).first()
+            if existing is None:
+                await BingoInvite.create(
+                    team=team14,
+                    invitee_disc_uuid=str(uid),
+                    state="pending",
+                )
+                added_new += 1
+            elif existing.state != "pending":
+                existing.state = "pending"
+                await existing.save(update_fields=["state"])
+                rewound += 1
+
+        # Step 3 is inherently a no-op — Box is already the creator per
+        # the check above, and the pool-invite promotion flow deletes
+        # the creator's BingoInvite row (so his acceptance is stored in
+        # team.creator_disc_uuid, not in a BingoInvite row that needs
+        # touching here).
+
+        await ctx.reply(
+            f"✅ Team 10 disbanded (silent). Team 14 invitees: "
+            f"{added_new} new, {rewound} rewound to pending. "
+            f"Box remains creator ({BOX_ID}). Watching team 14 for "
+            f"fill; when it advances I'll post the team 15 pool invite.",
+            ephemeral=True,
+        )
+        logger.info(
+            "r81 recovery: team 10 disbanded; team 14 got %d new + %d "
+            "rewound invites for %s",
+            added_new, rewound, NEW_INVITEES,
+        )
+
+        # Step 4: background watcher. Polls team 14 every 10s; on the
+        # first tick where state != "pending" we form team 15 from the
+        # invites that got auto-declined by _handle_pool_invite_click.
+        # Bounded at 2h so a stuck team doesn't leak a task forever.
+        team14_pk = team14.id
+        invoker_id = ctx.author.id
+
+        async def _watcher():
+            for _ in range(720):  # 720 * 10s = 2h
+                await asyncio.sleep(10)
+                t = await BingoTeam.get_or_none(id=team14_pk)
+                if t is None:
+                    logger.warning(
+                        "r81 recovery: team 14 row vanished; stopping watcher"
+                    )
+                    return
+                if t.state == "pending":
+                    continue
+                if t.state == "disbanded":
+                    logger.warning(
+                        "r81 recovery: team 14 was disbanded, not filled; "
+                        "not spawning team 15"
+                    )
+                    return
+                # Team 14 filled (state is picking/playing). Losers are
+                # the auto-declined invites from
+                # _handle_pool_invite_click's cleanup loop.
+                declined_ids: list[str] = (
+                    await BingoInvite.filter(team=t, state="declined")
+                    .values_list("invitee_disc_uuid", flat=True)
+                )
+                if not declined_ids:
+                    logger.info(
+                        "r81 recovery: team 14 filled with no losers "
+                        "(unexpected — no team 15 needed)"
+                    )
+                    return
+                await _spawn_team_15(declined_ids)
+                return
+            logger.warning(
+                "r81 recovery: team 14 fill watcher timed out after 2h "
+                "without team 14 advancing"
+            )
+
+        async def _spawn_team_15(declined_ids: list[str]) -> None:
+            from config import CurrConfig
+
+            guild = self.bot.get_guild(CurrConfig.GUILD)
+            if guild is None:
+                logger.error(
+                    "r81 recovery: can't reach guild %s to resolve "
+                    "declined-invitees for team 15",
+                    CurrConfig.GUILD,
+                )
+                return
+
+            members: list[discord.Member] = []
+            for did in declined_ids:
+                try:
+                    uid = int(did)
+                except ValueError:
+                    logger.warning(
+                        "r81 recovery: non-numeric invitee id %r", did
+                    )
+                    continue
+                m = guild.get_member(uid)
+                if m is None:
+                    try:
+                        m = await guild.fetch_member(uid)
+                    except (discord.NotFound, discord.HTTPException):
+                        logger.warning(
+                            "r81 recovery: can't fetch member %s for "
+                            "team 15", uid,
+                        )
+                        continue
+                other = await _current_team_for(str(m.id))
+                if other is not None and other.state != "disbanded":
+                    logger.warning(
+                        "r81 recovery: %s is already on team %s "
+                        "(state=%s), skipping from team 15",
+                        m.id, other.team_number, other.state,
+                    )
+                    continue
+                members.append(m)
+
+            if not members:
+                logger.error(
+                    "r81 recovery: no eligible members for team 15; "
+                    "aborting spawn"
+                )
+                return
+
+            invite_thread = await _resolve_thread(
+                self.bot, INVITE_THREAD_ID
+            )
+            if invite_thread is None:
+                logger.error(
+                    "r81 recovery: can't reach invite thread %s for "
+                    "team 15 spawn",
+                    INVITE_THREAD_ID,
+                )
+                return
+
+            team_number = await _next_team_number()
+            team15 = await BingoTeam.create(
+                week=WEEK,
+                team_number=team_number,
+                creator_disc_uuid=f"{_POOL_SENTINEL_PREFIX}{invoker_id}",
+                state="pending",
+            )
+            for m in members:
+                await BingoInvite.create(
+                    team=team15,
+                    invitee_disc_uuid=str(m.id),
+                    state="pending",
+                )
+
+            mentions_line = " ".join(m.mention for m in members)
+            try:
+                invite_msg = await invite_thread.send(
+                    content=(
+                        f"🎯 **r81 pool invite** — first "
+                        f"{POOL_TEAM_SIZE} of you to click **Accept** "
+                        f"form Team {team_number}.\n"
+                        f"Invited: {mentions_line}"
+                    ),
+                    view=BingoPoolInviteConfirmView(),
+                    allowed_mentions=discord.AllowedMentions(
+                        users=list(members), roles=False, everyone=False
+                    ),
+                )
+            except discord.HTTPException:
+                logger.exception(
+                    "r81 recovery: failed to post team 15 pool invite"
+                )
+                team15.state = "disbanded"
+                await team15.save(update_fields=["state"])
+                return
+
+            team15.pending_invite_msg_id = invite_msg.id
+            await team15.save(update_fields=["pending_invite_msg_id"])
+            logger.info(
+                "r81 recovery: team 15 pool invite posted (%d invitees, "
+                "team.id=%s, msg=%s)",
+                len(members), team15.id, invite_msg.id,
+            )
+
+        self.bot.loop.create_task(_watcher())
+
 
 async def setup(bot: Bot):
     await bot.add_cog(Scripts(bot))

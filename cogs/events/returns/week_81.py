@@ -1218,8 +1218,15 @@ async def _advance_to_picking(client: discord.Client, team: BingoTeam) -> None:
         invitable=False,
     )
 
+    # Only accepted invitees join the team. In the original two-invitee
+    # flow every invite is accepted by construction here (the handler
+    # only calls us when zero remain non-accepted), so this filter is a
+    # no-op there. In the pool-invite flow it matters: declined losers
+    # (auto-declined once the team fills) must NOT be added to the
+    # thread or persisted as team members, or _current_team_for would
+    # report them as "on team N" and block them from later pool teams.
     all_ids: list[int] = [int(team.creator_disc_uuid)]
-    invites = await BingoInvite.filter(team=team)
+    invites = await BingoInvite.filter(team=team, state="accepted")
     for inv in invites:
         try:
             all_ids.append(int(inv.invitee_disc_uuid))
@@ -1232,8 +1239,8 @@ async def _advance_to_picking(client: discord.Client, team: BingoTeam) -> None:
         except discord.HTTPException as e:
             logger.warning("r81 add_user(%s) on thread %s: %s", uid, thread.id, e)
 
-    # Persist creator + invitees as team members immediately (wildcard comes
-    # next). Their ``role`` distinguishes how they joined.
+    # Persist creator + accepted invitees as team members immediately
+    # (wildcard comes next). Their ``role`` distinguishes how they joined.
     await BingoTeamMember.get_or_create(
         team=team, disc_uuid=team.creator_disc_uuid, defaults={"role": "creator"}
     )

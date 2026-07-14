@@ -904,6 +904,121 @@ class Scripts(commands.Cog):
 
         _start_r81_team14_watcher(self.bot, team14.id, ctx.author.id)
 
+    @script_group.command(
+        name="r81_repair_team_14_and_spawn_15",
+        description=(
+            "(Operator) One-off: purge the three declined pool-invitees "
+            "who were wrongly added to team 14 by the pre-fix "
+            "_advance_to_picking, then spawn team 15 for them."
+        ),
+    )
+    @is_operator()
+    async def script_r81_repair_team_14_and_spawn_15(
+        self, ctx: commands.Context
+    ):
+        """Recover from the ``_advance_to_picking`` iterate-all-invites bug.
+
+        The pre-fix ``_advance_to_picking`` at week_81.py fetched
+        ``BingoInvite.filter(team=team)`` — every invite regardless of
+        state — and added each invitee to the team's private thread AND
+        wrote a ``BingoTeamMember`` row for them. That was harmless in
+        the original two-invitee flow (which only reaches advance when
+        all invites are accepted) but wrong for pool teams, where the
+        declined losers ended up as ghost members. ``_current_team_for``
+        then reported those losers as "already on team 14 (picking)",
+        so the team-15 watcher aborted with no eligible members.
+
+        This script identifies the team-14 members whose ``BingoInvite``
+        row is ``state="declined"`` (they were auto-declined before
+        advance and shouldn't be members), removes them from team 14's
+        thread, deletes their ``BingoTeamMember`` rows, and hands them
+        off to :func:`_r81_spawn_next_pool_team` to form team 15.
+        """
+        from cogs.events.returns.week_81 import (
+            WEEK,
+            _resolve_thread,
+        )
+        from orm_returns import BingoInvite, BingoTeam, BingoTeamMember
+
+        try:
+            await ctx.defer(ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+        team14 = await BingoTeam.filter(week=WEEK, team_number=14).first()
+        if team14 is None:
+            await ctx.reply("❌ Team 14 not found.", ephemeral=True)
+            return
+        if team14.state not in ("picking", "playing"):
+            await ctx.reply(
+                f"❌ Team 14 is in state `{team14.state}` — expected "
+                "`picking` or `playing`. Nothing to repair.",
+                ephemeral=True,
+            )
+            return
+
+        # Ghost members: BingoTeamMember rows on team 14 whose matching
+        # BingoInvite row is declined. (Real accepted members have their
+        # BingoInvite row still marked "accepted", or in the creator's
+        # case the invite row was deleted at promotion time.)
+        declined_uuids: list[str] = list(
+            await BingoInvite.filter(team=team14, state="declined")
+            .values_list("invitee_disc_uuid", flat=True)
+        )
+        if not declined_uuids:
+            await ctx.reply(
+                "❌ No declined invites on team 14 — nothing to purge. "
+                "Aborting.",
+                ephemeral=True,
+            )
+            return
+
+        thread = await _resolve_thread(self.bot, team14.thread_id)
+        removed_from_thread = 0
+        removed_from_db = 0
+        for uuid in declined_uuids:
+            # DB row cleanup.
+            deleted = await BingoTeamMember.filter(
+                team=team14, disc_uuid=uuid
+            ).delete()
+            if deleted:
+                removed_from_db += 1
+            # Thread membership cleanup (best-effort).
+            if thread is not None:
+                try:
+                    await thread.remove_user(discord.Object(id=int(uuid)))
+                    removed_from_thread += 1
+                except ValueError:
+                    logger.warning(
+                        "r81 repair: non-numeric disc_uuid %r", uuid
+                    )
+                except (discord.NotFound, discord.HTTPException) as e:
+                    logger.warning(
+                        "r81 repair: remove_user(%s) on thread %s: %s",
+                        uuid, team14.thread_id, e,
+                    )
+
+        # Now spawn team 15 with the same three via the shared helper.
+        # It re-checks _current_team_for per member and re-does eligibility;
+        # with the ghost BingoTeamMember rows gone, they'll pass.
+        await _r81_spawn_next_pool_team(
+            self.bot, declined_uuids, ctx.author.id
+        )
+
+        await ctx.reply(
+            f"✅ Team 14 repair: removed {removed_from_db} "
+            f"BingoTeamMember row(s), {removed_from_thread} thread "
+            f"member(s). Attempted team 15 spawn for "
+            f"{len(declined_uuids)} invitee(s); check the invite "
+            "thread and the bot logs for the outcome.",
+            ephemeral=True,
+        )
+        logger.info(
+            "r81 repair: team 14 purged %d ghosts (%s); team 15 spawn "
+            "attempted",
+            len(declined_uuids), declined_uuids,
+        )
+
 
 async def setup(bot: Bot):
     await bot.add_cog(Scripts(bot))

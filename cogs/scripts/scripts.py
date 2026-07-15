@@ -233,7 +233,8 @@ class Scripts(commands.Cog):
                 "`~script edit_link_promo <channel>`, "
                 "`~script rename_cult`, `~script install_intercult`, "
                 "`~script install_recruitment`, `~script install_recruitment_deercult`, "
-                "`~script extract_anni_timestamps`."
+                "`~script extract_anni_timestamps`, "
+                "`~script r81_recover_stuck_picker <team_number> [<line>]`."
             )
 
     @script_group.command(
@@ -1070,6 +1071,217 @@ class Scripts(commands.Cog):
             "r81 repair: team 14 purged %d ghosts (%s); team 15 spawn "
             "attempted",
             len(declined_uuids), declined_uuids,
+        )
+
+
+    @script_group.command(
+        name="r81_recover_stuck_picker",
+        description=(
+            "(Operator) One-off: clear a team's stuck picker_msg_id and, "
+            "if a bingo line is given, post a fresh extra-teammate picker "
+            "for it (bypasses _announce_bingo's idempotency guard)."
+        ),
+    )
+    @is_operator()
+    async def script_r81_recover_stuck_picker(
+        self,
+        ctx: commands.Context,
+        team_number: int,
+        line: Optional[str] = None,
+    ):
+        """Recover from a mid-flight ``_handle_picker_click`` crash.
+
+        Symptom: an earlier picker click added the teammate to the thread
+        and created the ``BingoTeamMember`` row, but the bot died before
+        the final ``team.picker_msg_id = None`` save at
+        ``_handle_picker_click:1443-1445``. Subsequent bingos on that team
+        then trip the ``picker_msg_id is not None`` guard in
+        ``_announce_bingo:1872`` and post "picker already active" instead
+        of a fresh extra-teammate picker. Because ``_announce_bingo`` has
+        already written the ``BingoBingoEvent`` row for the skipped
+        bingo (line 1864, before the guard), it is now idempotent-locked
+        and can't be re-invoked — recovery has to inline the picker-post
+        block itself.
+
+        Args:
+            team_number: The r81 team whose picker state is stuck.
+            line: Optional cells like ``A6-B6-C6-D6`` (also accepts commas
+                or spaces). If supplied, a recovery picker is posted for
+                that line; if omitted, only the stale DB state is cleared.
+        """
+        import json
+
+        from cogs.events.returns.week_81 import (
+            EXTRA_MEMBER_PICKER_SIZE,
+            POINTS_PER_BINGO_LINE,
+            WEEK,
+            _line_key,
+            _picker_intro,
+            _render_picker_view,
+            _resolve_thread,
+            _team_exp,
+            _wildcard_candidates_excluding_team,
+            bingo_cells,
+        )
+        from orm_returns import BingoBingoEvent, BingoTeam
+
+        try:
+            await ctx.defer(ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+        team = await BingoTeam.filter(
+            week=WEEK, team_number=team_number
+        ).first()
+        if team is None:
+            await ctx.reply(
+                f"❌ Team {team_number} (week {WEEK}) not found.",
+                ephemeral=True,
+            )
+            return
+        if team.state != "playing":
+            await ctx.reply(
+                f"❌ Team {team_number} is in state `{team.state}`, "
+                "not `playing`. A stuck-picker recovery only applies to "
+                "live teams; use the wildcard-specific reroll path if the "
+                "team is still `picking`.",
+                ephemeral=True,
+            )
+            return
+
+        thread = await _resolve_thread(self.bot, team.thread_id)
+
+        prior_picker_msg_id = team.picker_msg_id
+        deleted_stale = False
+        if prior_picker_msg_id is not None and thread is not None:
+            try:
+                stale = await thread.fetch_message(prior_picker_msg_id)
+                await stale.delete()
+                deleted_stale = True
+            except (discord.NotFound, discord.Forbidden):
+                pass
+            except discord.HTTPException:
+                logger.exception(
+                    "r81 recover: unexpected error deleting stale picker "
+                    "message %s in thread %s; continuing",
+                    prior_picker_msg_id, team.thread_id,
+                )
+
+        cleared_db = False
+        if team.picker_msg_id is not None or team.picker_candidates_json is not None:
+            team.picker_msg_id = None
+            team.picker_candidates_json = None
+            await team.save(
+                update_fields=["picker_msg_id", "picker_candidates_json"]
+            )
+            cleared_db = True
+
+        if line is None:
+            await ctx.reply(
+                f"✅ Team {team_number} picker state cleared "
+                f"(deleted_stale_msg={deleted_stale}, cleared_db={cleared_db}, "
+                f"prior_msg_id={prior_picker_msg_id}). "
+                "No line given, so no recovery picker posted.",
+                ephemeral=True,
+            )
+            logger.info(
+                "r81 recover: team %s picker cleared "
+                "(prior_msg_id=%s, deleted_stale=%s, cleared_db=%s); "
+                "no recovery picker requested",
+                team_number, prior_picker_msg_id, deleted_stale, cleared_db,
+            )
+            return
+
+        cells = tuple(
+            c.strip().upper()
+            for c in line.replace(",", "-").replace(" ", "-").split("-")
+            if c.strip()
+        )
+        valid = set(bingo_cells(_team_exp(team)))
+        bad = [c for c in cells if c not in valid]
+        if bad:
+            await ctx.reply(
+                f"❌ Line `{line}` contains invalid cells for the current "
+                f"board: {bad}. Valid cells: {sorted(valid)}.",
+                ephemeral=True,
+            )
+            return
+
+        line_key = _line_key(cells)
+        recorded = await BingoBingoEvent.filter(
+            team=team, line_key=line_key
+        ).first()
+        if recorded is None:
+            existing_keys = list(
+                await BingoBingoEvent.filter(team=team)
+                .values_list("line_key", flat=True)
+            )
+            await ctx.reply(
+                f"❌ No `BingoBingoEvent` row on team {team_number} for "
+                f"`{line_key}`. Recorded lines: {existing_keys}. "
+                "Refusing to mint a picker for a bingo that was never "
+                "recorded.",
+                ephemeral=True,
+            )
+            return
+
+        if thread is None:
+            await ctx.reply(
+                f"❌ Team {team_number}'s thread ({team.thread_id}) is not "
+                "resolvable — can't post a recovery picker.",
+                ephemeral=True,
+            )
+            return
+
+        header = (
+            f"🎉 **Bingo!** Line: `{' → '.join(cells)}` "
+            f"— `+{POINTS_PER_BINGO_LINE}` to each teammate. "
+            "(recovery re-post)"
+        )
+
+        candidates = await _wildcard_candidates_excluding_team(self.bot, team)
+        candidates = candidates[:EXTRA_MEMBER_PICKER_SIZE]
+        if not candidates:
+            await thread.send(
+                f"{header}\n"
+                "No eligible extra teammates are available right now — "
+                "team keeps the points but doesn't gain a member for this "
+                "bingo."
+            )
+            await ctx.reply(
+                f"✅ Team {team_number} picker state cleared "
+                f"(deleted_stale_msg={deleted_stale}, cleared_db={cleared_db}). "
+                "Recovery header posted but no candidates were available, "
+                "so no picker view was attached.",
+                ephemeral=True,
+            )
+            return
+
+        picker_msg = await thread.send(
+            content=f"{header}\n\n" + _picker_intro(candidates),
+            view=_render_picker_view(candidates),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        team.picker_msg_id = picker_msg.id
+        team.picker_candidates_json = json.dumps(
+            [str(member.id) for member, _mc in candidates]
+        )
+        await team.save(
+            update_fields=["picker_msg_id", "picker_candidates_json"]
+        )
+
+        await ctx.reply(
+            f"✅ Team {team_number} recovered: "
+            f"deleted_stale_msg={deleted_stale}, cleared_db={cleared_db}, "
+            f"new picker msg={picker_msg.id} ({len(candidates)} candidates) "
+            f"for line `{line_key}`.",
+            ephemeral=True,
+        )
+        logger.info(
+            "r81 recover: team %s picker re-posted for line %s "
+            "(prior_msg_id=%s, new_msg_id=%s, candidates=%d)",
+            team_number, line_key, prior_picker_msg_id, picker_msg.id,
+            len(candidates),
         )
 
 

@@ -1667,6 +1667,17 @@ async def _on_message_submit(bot: discord.Client, message: discord.Message) -> N
             "Only team members can submit here.", mention_author=False
         )
         return
+    if team.picker_msg_id is not None:
+        picker_url = (
+            f"https://discord.com/channels/{message.guild.id}"
+            f"/{message.channel.id}/{team.picker_msg_id}"
+        )
+        await message.reply(
+            f"A picker is still outstanding for this team — resolve it before "
+            f"submitting again: {picker_url}",
+            mention_author=False,
+        )
+        return
     valid_cells = bingo_cells(_team_exp(team))
     if cell not in valid_cells:
         rows, cols = board_dims(_team_exp(team))

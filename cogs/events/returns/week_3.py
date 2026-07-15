@@ -1184,6 +1184,38 @@ async def _notify_subscribers(bot: discord.Client, active_cult: str) -> None:
                 logger.warning("return_3 notify: fallback post failed: %s", e)
 
 
+async def _notify_capture(
+    bot: discord.Client, *, victim: str, attacker: str, dst: int
+) -> None:
+    """Post a capture notice to the losing cult's thread with a link back
+    to their pinned dashboard. Best-effort — logs and returns on any
+    Discord failure so a red HTTP call can't stall turn advancement.
+    """
+    dash = await Return3Dashboard.filter(cult=victim).first()
+    if dash is None:
+        logger.warning("return_3 capture-notice: no dashboard for %s", victim)
+        return
+
+    thread = await _resolve_thread(bot, dash.thread_id)
+    if thread is None:
+        logger.warning("return_3 capture-notice: thread %s missing", dash.thread_id)
+        return
+
+    jump_url = (
+        f"https://discord.com/channels/{thread.guild.id}"
+        f"/{dash.thread_id}/{dash.message_id}"
+    )
+    body = (
+        f"{CULT_EMOJI[attacker]} `{attacker}` won the battle and "
+        f"took your territory at {tile_label(dst)}!\n"
+        f"-# [Link to event post]({jump_url})"
+    )
+    try:
+        await thread.send(body, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as e:
+        logger.warning("return_3 capture-notice send in %s failed: %s", victim, e)
+
+
 async def _advance_one_turn(bot: discord.Client, state: Return3GameState) -> None:
     """Resolve the just-expired turn and roll over."""
     tiles = await _load_tiles()
@@ -1194,8 +1226,19 @@ async def _advance_one_turn(bot: discord.Client, state: Return3GameState) -> Non
         return
 
     kind, src, dst = await _resolve_turn_vote(state, tiles_by_id, active)
+    prior_owner: Optional[str] = None
+    if kind == "attack" and dst is not None:
+        prior_owner = tiles_by_id[dst].controlling_cult
     log_line = _apply_action(tiles_by_id, kind, src, dst, active)
     logger.info("return_3 turn %s: %s", state.current_turn_number, log_line)
+    if (
+        kind == "attack"
+        and dst is not None
+        and prior_owner is not None
+        and prior_owner != active
+        and tiles_by_id[dst].controlling_cult == active
+    ):
+        await _notify_capture(bot, victim=prior_owner, attacker=active, dst=dst)
     # Persist any mutated tiles. Update_fields keeps the writes tight.
     for t in tiles:
         if t.id in tiles_by_id and tiles_by_id[t.id] is t:

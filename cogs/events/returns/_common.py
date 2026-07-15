@@ -18,9 +18,11 @@ catch-all as the Returns count climbs past 73.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
+import aiohttp
 import discord
 from discord.ext import commands
 
@@ -136,6 +138,21 @@ def _split_for_discord(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
     return out
 
 
+async def _send_or_retry_on_net_error(coro_factory) -> None:
+    """Await a Discord send, retrying once on aiohttp network errors.
+
+    ``coro_factory`` is a zero-arg callable returning a fresh coroutine
+    (a coroutine can only be awaited once). Discord API exceptions
+    (``discord.HTTPException`` / ``discord.Forbidden``) are not caught
+    here — the caller decides how to handle them.
+    """
+    try:
+        await coro_factory()
+    except aiohttp.ClientError:
+        await asyncio.sleep(0.5)
+        await coro_factory()
+
+
 async def send_feedback(
     ctx: commands.Context,
     text: str,
@@ -157,31 +174,39 @@ async def send_feedback(
     chunks = _split_for_discord(text)
     if persist:
         try:
-            await ctx.reply(chunks[0], mention_author=False)
+            await _send_or_retry_on_net_error(
+                lambda: ctx.reply(chunks[0], mention_author=False)
+            )
             for chunk in chunks[1:]:
-                await ctx.channel.send(chunk)
-        except discord.HTTPException:
+                await _send_or_retry_on_net_error(
+                    lambda c=chunk: ctx.channel.send(c)
+                )
+        except (discord.HTTPException, aiohttp.ClientError):
             logger.exception("send_feedback: in-channel reply failed")
         return
 
     try:
         for chunk in chunks:
-            await ctx.author.send(chunk)
+            await _send_or_retry_on_net_error(
+                lambda c=chunk: ctx.author.send(c)
+            )
         return
     except discord.Forbidden:
         pass
-    except discord.HTTPException:
+    except (discord.HTTPException, aiohttp.ClientError):
         logger.exception("send_feedback: DM failed")
         return
 
     try:
-        await ctx.reply(
-            "I couldn't DM you. Open your DMs to receive results from "
-            "`~manage_return`.",
-            mention_author=False,
-            delete_after=15,
+        await _send_or_retry_on_net_error(
+            lambda: ctx.reply(
+                "I couldn't DM you. Open your DMs to receive results from "
+                "`~manage_return`.",
+                mention_author=False,
+                delete_after=15,
+            )
         )
-    except discord.HTTPException:
+    except (discord.HTTPException, aiohttp.ClientError):
         pass
 
 

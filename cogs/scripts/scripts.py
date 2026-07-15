@@ -234,7 +234,8 @@ class Scripts(commands.Cog):
                 "`~script rename_cult`, `~script install_intercult`, "
                 "`~script install_recruitment`, `~script install_recruitment_deercult`, "
                 "`~script extract_anni_timestamps`, "
-                "`~script r81_recover_stuck_picker <team_number> [<line>]`."
+                "`~script r81_recover_stuck_picker <team_number> [<line>]`, "
+                "`~script r81_revoke_or_targets [commit=True]`."
             )
 
     @script_group.command(
@@ -1283,6 +1284,206 @@ class Scripts(commands.Cog):
             team_number, line_key, prior_picker_msg_id, picker_msg.id,
             len(candidates),
         )
+
+    @script_group.command(
+        name="r81_revoke_or_targets",
+        description=(
+            "(Operator) Revoke r81 subject bonuses that were wrongly "
+            "awarded to 'X, Y, Z, or W' unwitting-target list names. "
+            "Dry-run by default; pass commit=True to mutate scores."
+        ),
+    )
+    @is_operator()
+    async def script_r81_revoke_or_targets(
+        self,
+        ctx: commands.Context,
+        commit: Optional[bool] = False,
+    ):
+        """Undo pre-fix subject-bonus over-awards on r81 or-list prompts.
+
+        Before the fix in _award_subject_bonus, any %random_in_guild%
+        name resolved into a "X, Y, Z, or W" list caption (main.yaml
+        41-43) received +1 subject bonus even though those names are
+        unwitting subjects of the prompt, not participants. This walks
+        every BingoSubmission for week 81, reads its current caption
+        from BingoCellState (invariant: submission-present ⇒ caption
+        is what was awarded against, because regen/clear both delete
+        the submission before touching the caption/scores), identifies
+        the or-list-only names that were wrongly credited, and
+        subtracts POINTS_PER_SUBJECT_BONUS from each.
+
+        Idempotency: Score is a running total with no per-submission
+        ledger, so re-running with ``commit=True`` would double-subtract.
+        The operator gate + dry-run default + explicit ``commit=True``
+        opt-in are the safety net.
+        """
+        import re
+
+        from cogs.events.returns.week_81 import (
+            POINTS_PER_SUBJECT_BONUS,
+            WEEK,
+            WYNN_GUILD_NAME,
+            _caption_for_cell,
+            _or_list_spans,
+            _team_player_names,
+        )
+        from orm import DiscordAccount, MinecraftAccount, Score, WeeklyEvent
+        from orm_returns import BingoSubmission, BingoTeam
+
+        try:
+            await ctx.defer(ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+        event = await WeeklyEvent.filter(week=WEEK).first()
+        if event is None:
+            await ctx.reply(
+                f"❌ No WeeklyEvent row for week {WEEK}.", ephemeral=True
+            )
+            return
+
+        roster = set(
+            await MinecraftAccount.filter(
+                guild=WYNN_GUILD_NAME
+            ).values_list("mc_username", flat=True)
+        )
+
+        revocations: dict[str, int] = {}
+        affected: list[tuple[int, str, list[str]]] = []
+
+        submissions = await BingoSubmission.filter(
+            team__week=WEEK
+        ).prefetch_related("team")
+        for sub in submissions:
+            team: BingoTeam = sub.team
+            caption = await _caption_for_cell(team, sub.cell)
+            if not caption:
+                continue
+            spans = _or_list_spans(caption)
+            if not spans:
+                continue
+            team_names = set(await _team_player_names(team))
+            candidates = {
+                n for n in (roster | team_names) if n and n != "a teammate"
+            }
+            if not candidates:
+                continue
+
+            def _only_inside(name: str) -> bool:
+                any_match = False
+                for m in re.finditer(
+                    rf"\b{re.escape(name)}\b", caption, re.IGNORECASE
+                ):
+                    any_match = True
+                    if not any(s <= m.start() < e for s, e in spans):
+                        return False
+                return any_match
+
+            to_revoke = sorted(n for n in candidates if _only_inside(n))
+            if not to_revoke:
+                continue
+            affected.append((team.team_number, sub.cell, to_revoke))
+            for name in to_revoke:
+                revocations[name] = (
+                    revocations.get(name, 0) + POINTS_PER_SUBJECT_BONUS
+                )
+
+        if not affected:
+            await ctx.reply(
+                "✅ No affected r81 submissions — nothing to revoke.",
+                ephemeral=True,
+            )
+            return
+
+        header = (
+            f"{'⚠️ COMMITTING' if commit else '🔍 DRY-RUN'}: "
+            f"{len(affected)} submission(s) with or-list bonuses; "
+            f"{len(revocations)} unique target(s) to revoke."
+        )
+        lines = [header, ""]
+        for team_num, cell, names in sorted(affected):
+            lines.append(
+                f"team {team_num} `{cell}`: -{POINTS_PER_SUBJECT_BONUS} to "
+                + ", ".join(f"`{n}`" for n in names)
+            )
+        lines.append("")
+        lines.append("Per-recipient totals:")
+        for name, pts in sorted(revocations.items()):
+            lines.append(f"  `{name}`: -{pts}")
+
+        if not commit:
+            lines.append("")
+            lines.append("Re-run with `commit=True` to apply.")
+            await _reply_maybe_chunked(ctx, "\n".join(lines))
+            return
+
+        applied = 0
+        skipped: list[str] = []
+        for name, pts in revocations.items():
+            mc = await MinecraftAccount.filter(
+                mc_username__iexact=name
+            ).first()
+            if mc is None:
+                skipped.append(f"{name} (no MinecraftAccount)")
+                continue
+            disc = await DiscordAccount.filter(
+                minecraft_account_id=mc.id
+            ).first()
+            if disc is None:
+                skipped.append(f"{name} (no linked DiscordAccount)")
+                continue
+            row = await Score.filter(
+                event=event, discord_account=disc
+            ).first()
+            if row is None:
+                skipped.append(f"{name} (no Score row)")
+                continue
+            row.score -= pts
+            await row.save(update_fields=["score"])
+            applied += 1
+
+        lines.append("")
+        lines.append(
+            f"Applied: {applied} recipient(s); skipped: {len(skipped)}"
+        )
+        if skipped:
+            lines.extend(f"  - {s}" for s in skipped)
+        await _reply_maybe_chunked(ctx, "\n".join(lines))
+        logger.info(
+            "r81 revoke or-list: commit=%s applied=%d skipped=%d "
+            "affected_subs=%d unique_recipients=%d",
+            commit, applied, len(skipped), len(affected), len(revocations),
+        )
+
+
+async def _reply_maybe_chunked(ctx: commands.Context, body: str) -> None:
+    """Reply ephemerally, splitting on newlines if body > ~1900 chars.
+
+    Discord's message limit is 2000; chunk conservatively so we don't
+    have to worry about trailing formatting. First chunk uses reply,
+    subsequent chunks use send.
+    """
+    LIMIT = 1900
+    if len(body) <= LIMIT:
+        await ctx.reply(body, ephemeral=True)
+        return
+    chunks: list[str] = []
+    cur: list[str] = []
+    size = 0
+    for line in body.split("\n"):
+        add = len(line) + 1
+        if size + add > LIMIT and cur:
+            chunks.append("\n".join(cur))
+            cur = [line]
+            size = add
+        else:
+            cur.append(line)
+            size += add
+    if cur:
+        chunks.append("\n".join(cur))
+    await ctx.reply(chunks[0], ephemeral=True)
+    for c in chunks[1:]:
+        await ctx.send(c, ephemeral=True)
 
 
 async def setup(bot: Bot):

@@ -1769,6 +1769,29 @@ POINTS_PER_SUBJECT_BONUS = 1
 POINTS_PER_BINGO_LINE = 5
 
 
+# Detect "X, Y, ..., or W" list constructs in a resolved caption. Three
+# r81 templates (main.yaml lines 41-43) use this shape to describe
+# unwitting subjects — the submitter takes a photo *of* / confuses /
+# lures four random guild members without them realising. Those subjects
+# shouldn't get the bonus even though their resolved MC usernames appear
+# in the caption. Names whose whole-word occurrences all fall inside an
+# or-list span are excluded from bonus by _award_subject_bonus and
+# reversed by ~script r81_revoke_or_targets.
+#
+# The {2,} requires ≥3 comma-separated names before ", or W", so plain
+# "A or B" and "A, B, or C" (e.g. prompt 37's "%id%, %id%, or %id%")
+# don't trip this — matches the four-name shape of the three problem
+# templates and keeps the door open for future 2-or-3-item lists that
+# aren't unwitting-subject calls.
+_OR_LIST_RE = re.compile(
+    r"[A-Za-z0-9_]+(?:, [A-Za-z0-9_]+){2,}, or [A-Za-z0-9_]+"
+)
+
+
+def _or_list_spans(caption: str) -> list[tuple[int, int]]:
+    return [(m.start(), m.end()) for m in _OR_LIST_RE.finditer(caption)]
+
+
 async def _award_subject_bonus(
     team: BingoTeam, caption: str, per_subject_points: int
 ) -> list[str]:
@@ -1805,6 +1828,31 @@ async def _award_subject_bonus(
         pattern = re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
         if pattern.search(caption):
             matched.append(name)
+
+    spans = _or_list_spans(caption)
+    if spans:
+        # Drop names whose every whole-word occurrence falls inside an
+        # or-list construct. The "only-inside" test (not "inside anywhere")
+        # is defensive: if a name coincidentally also appears outside the
+        # list they legitimately earned the bonus via that occurrence.
+        # Under the current three problem templates this collision is
+        # impossible — %random_in_guild% excludes team members and
+        # %player% is outside the list — but the check doesn't rely on it.
+        def _only_inside_spans(name: str) -> bool:
+            for m in re.finditer(
+                rf"\b{re.escape(name)}\b", caption, re.IGNORECASE
+            ):
+                if not any(s <= m.start() < e for s, e in spans):
+                    return False
+            return True
+
+        skipped = [n for n in matched if _only_inside_spans(n)]
+        if skipped:
+            matched = [n for n in matched if n not in skipped]
+            logger.info(
+                "r81 team %s subject bonus: skipping or-list-only names %s",
+                team.id, skipped,
+            )
 
     if not matched:
         return []

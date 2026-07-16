@@ -101,7 +101,11 @@ class Guild(BaseModel):
     created: str
     members: Members
     online: int
-    banner: Banner
+    # Wynncraft v3 has been observed returning `banner: null` even for guilds
+    # that demonstrably have a banner in-game (upstream defect, 2026-07). Keep
+    # this optional so a single bad row can't tank the whole `~force check`
+    # sweep in cogs/activity/activity.py.
+    banner: Optional[Banner] = None
     seasonRanks: Dict[str, SeasonRank] = Field(default_factory=dict)
 
 

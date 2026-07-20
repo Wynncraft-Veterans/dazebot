@@ -454,6 +454,18 @@ async def _current_team_for(disc_uuid: str) -> Optional[BingoTeam]:
     return None
 
 
+async def _is_event_closed() -> bool:
+    """Return True once ``~manage_return 81 close`` has been run.
+
+    The close subcommand transitions every non-disbanded team to the
+    ``closed`` state, so the presence of any ``closed`` row is the marker
+    that r81 is no longer accepting new activity. No separate flag row
+    needed — we already write the marker into the data as part of the
+    lockdown pass.
+    """
+    return await BingoTeam.filter(state="closed").exists()
+
+
 # ---------------------------------------------------------------------------
 # Random pool
 # ---------------------------------------------------------------------------
@@ -2211,6 +2223,13 @@ async def handle(ctx: commands.Context) -> None:
         if _SUBMIT_RE.match(ctx.message.content or ""):
             return
 
+    if await _is_event_closed():
+        await ctx.reply(
+            "Return 81 has been closed — no new teams can start.",
+            mention_author=False,
+        )
+        return
+
     guild_id = ctx.guild.id if ctx.guild is not None else CurrConfig.GUILD
     view = _InviteStartView(guild_id=guild_id)
     intro = (
@@ -2998,8 +3017,13 @@ async def _sweep_team_threads(bot: discord.Client) -> tuple[int, int, int]:
     ``NotFound`` on remove is treated as a no-op (user beat us to leaving).
     Runs sequentially across teams — parallelism isn't worth it for a
     periodic reconciler.
+
+    ``closed`` teams are excluded alongside ``disbanded`` — their threads
+    are archived+locked by ``~manage_return 81 close`` and reconciliation
+    is both pointless and would just burn API calls hitting archived
+    threads.
     """
-    teams = await BingoTeam.exclude(state="disbanded")
+    teams = await BingoTeam.exclude(state__in=("disbanded", "closed"))
     bot_id = bot.user.id if bot.user is not None else None
     guild = bot.get_guild(CurrConfig.GUILD)
     checked = removed = unreachable = 0
@@ -3499,4 +3523,104 @@ async def _manage_pool_invite(ctx: commands.Context, args: list[str]) -> None:
     logger.info(
         "r81 pool team %s (#%d) posted by staff=%s with %d invitees",
         team.id, team_number, ctx.author.id, len(members),
+    )
+
+
+@register_manage(
+    WEEK, "close", tier=Tier.ADMIN,
+    help=(
+        "Close out Return 81: archive+lock every non-disbanded team thread, "
+        "mark those teams `closed` so the submit listener stops accepting "
+        "new photos, and block new `/return 81` invocations. Idempotent — "
+        "re-running just picks up any team the previous pass missed."
+    ),
+    usage="",
+)
+async def _manage_close(ctx: commands.Context, args: list[str]) -> None:
+    """Close-out pass.
+
+    Iterates every team not already ``disbanded`` or ``closed`` and:
+
+    * Archives + locks its private thread (if reachable). Members stay in
+      the thread so the final board is still visible — this differs from
+      ``disband``, which yanks the roster out.
+    * Sets ``team.state = "closed"``, which:
+      - Fails the ``state == "playing"`` gate in :func:`_on_message_submit`
+        (submissions rejected).
+      - Fails the ``state == "pending"`` gate on outstanding invite/pool-
+        invite Accept buttons (they naturally report "no longer active").
+      - Trips :func:`_is_event_closed`, which the ``/return 81`` entry
+        gate reads to refuse new team creations.
+
+    The shared invite thread and any leftover invite/picker messages are
+    left in place — they're gated on team state and go dead on their own.
+    """
+    persist = is_persist_context(ctx)
+    teams = await BingoTeam.exclude(state__in=("disbanded", "closed"))
+    if not teams:
+        already = await BingoTeam.filter(state="closed").count()
+        if already:
+            await send_feedback(
+                ctx,
+                f"Return 81 is already closed ({already} team(s) marked "
+                "`closed`). Nothing to do.",
+                persist=persist,
+            )
+        else:
+            await send_feedback(
+                ctx,
+                "No non-disbanded r81 teams to close.",
+                persist=persist,
+            )
+        return
+
+    locked = 0
+    unreachable = 0
+    for team in teams:
+        thread = (
+            await _resolve_thread(ctx.bot, team.thread_id)
+            if team.thread_id else None
+        )
+        if thread is not None:
+            try:
+                # Send the closure notice BEFORE archiving so members can
+                # see it — a locked+archived thread can't be posted to.
+                try:
+                    await thread.send(
+                        "🔒 **Return 81 is closed.** No further submissions "
+                        "will be accepted; this thread is now locked."
+                    )
+                except discord.HTTPException as e:
+                    logger.warning(
+                        "close: team %s thread %s send failed: %s",
+                        team.team_number, thread.id, e,
+                    )
+                await thread.edit(archived=True, locked=True)
+                locked += 1
+            except discord.HTTPException as e:
+                logger.warning(
+                    "close: team %s thread %s edit failed: %s",
+                    team.team_number, thread.id, e,
+                )
+                unreachable += 1
+        elif team.thread_id:
+            # DB row said there was a thread but we can't reach it — likely
+            # deleted. Still mark the team closed.
+            unreachable += 1
+        team.state = "closed"
+        await team.save(update_fields=["state"])
+
+    logger.info(
+        "r81 closed by %s: %d team(s) closed, %d thread(s) locked, "
+        "%d unreachable.",
+        ctx.author.id, len(teams), locked, unreachable,
+    )
+    tail = f" ({unreachable} unreachable)." if unreachable else "."
+    await send_feedback(
+        ctx,
+        f"✅ Return 81 closed. Marked {len(teams)} team(s) as `closed`; "
+        f"locked {locked} thread(s){tail} New `/return 81` invocations "
+        "will be refused; the submit listener will reject any post to a "
+        "closed team.",
+        persist=persist,
     )

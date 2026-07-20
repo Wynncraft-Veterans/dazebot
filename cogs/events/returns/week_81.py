@@ -2426,7 +2426,10 @@ async def _manage_show(ctx: commands.Context, args: list[str]) -> None:
     usage="",
 )
 async def _manage_links(ctx: commands.Context, args: list[str]) -> None:
-    persist = is_persist_context(ctx)
+    # Always dump into the invocation channel — the caller wants every
+    # image inline where they ran the command, not funneled to DMs or the
+    # admin log channel.
+    persist = True
 
     def _cell_sort_key(cell: str) -> tuple[int, int]:
         i = 0

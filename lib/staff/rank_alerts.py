@@ -4,7 +4,7 @@ Triggered by ``POST /api/internal/rank-alert`` from temporary-server when a
 vetsmod client observes an in-game guild rank change. Two classifications
 arrive here:
 
-- ``ban`` — Captain/Strategist/Chief/Owner demoted someone to Recruit.
+- ``ban`` — Strategist/Chief/Owner demoted someone to Recruit.
   Posted with a role @ping.
 - ``kick`` — Recruit set back to Recruit (failed-onboarding signal).
   Posted without a ping.

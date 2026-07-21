@@ -7,15 +7,11 @@ Tiers, from least to most privileged:
                 Honourary, Hiatus, or Member).
     GUILD       Has Waitlisted, Honourary, Hiatus, or Member.
     STAFF       Has the configured STAFF_ROLE.
-    STRATEGIST  Has the configured ROLE_STRATEGIST. Reusable middle gate
-                for high-trust-but-not-admin commands (e.g.
-                ~apartment force/evict).
     ADMIN       Has the Discord "Administrator" permission.
     OPERATOR    Listed in CurrConfig.ADMINS (bot owners / devs).
 
 Higher tiers always satisfy lower ones (an OPERATOR can run a STAFF command,
-an ADMIN can run a GUILD command, a STRATEGIST can run a STAFF command, and
-so on).
+an ADMIN can run a GUILD command, and so on).
 
 Special, non-hierarchical:
 
@@ -53,9 +49,8 @@ class Tier(IntEnum):
     REGISTERED = 1
     GUILD = 2
     STAFF = 3
-    STRATEGIST = 4
-    ADMIN = 5
-    OPERATOR = 6
+    ADMIN = 4
+    OPERATOR = 5
 
 
 # ---------------------------------------------------------------------------
@@ -75,12 +70,6 @@ def _has_staff_role(user: discord.abc.User) -> bool:
     if not isinstance(user, discord.Member):
         return False
     return any(r.id == CurrConfig.STAFF_ROLE for r in user.roles)
-
-
-def _has_strategist_role(user: discord.abc.User) -> bool:
-    if not isinstance(user, discord.Member):
-        return False
-    return any(r.id == CurrConfig.ROLE_STRATEGIST for r in user.roles)
 
 
 _GUILD_ROLE_IDS = frozenset(
@@ -158,22 +147,8 @@ def is_admin():
     return commands.check(predicate)
 
 
-def is_strategist():
-    """STRATEGIST or higher: ROLE_STRATEGIST, ADMIN, or OPERATOR."""
-
-    async def predicate(ctx: commands.Context):
-        if _is_operator(ctx.author):
-            return True
-        member = _resolve_member(ctx.author, ctx.bot)
-        if member is None:
-            return False
-        return _has_admin_perm(member) or _has_strategist_role(member)
-
-    return commands.check(predicate)
-
-
 def is_staff():
-    """STAFF or higher: STAFF_ROLE, STRATEGIST, ADMIN, or OPERATOR."""
+    """STAFF or higher: STAFF_ROLE, ADMIN, or OPERATOR."""
 
     async def predicate(ctx: commands.Context):
         if _is_operator(ctx.author):
@@ -181,17 +156,13 @@ def is_staff():
         member = _resolve_member(ctx.author, ctx.bot)
         if member is None:
             return False
-        return (
-            _has_admin_perm(member)
-            or _has_strategist_role(member)
-            or _has_staff_role(member)
-        )
+        return _has_admin_perm(member) or _has_staff_role(member)
 
     return commands.check(predicate)
 
 
 def is_guild():
-    """GUILD or higher: Waitlisted/Honourary/Hiatus/Member, STAFF, STRATEGIST, ADMIN, or OPERATOR."""
+    """GUILD or higher: Waitlisted/Honourary/Hiatus/Member, STAFF, ADMIN, or OPERATOR."""
 
     async def predicate(ctx: commands.Context):
         if _is_operator(ctx.author):
@@ -201,7 +172,6 @@ def is_guild():
             return False
         return (
             _has_admin_perm(member)
-            or _has_strategist_role(member)
             or _has_staff_role(member)
             or _has_guild_role(member)
         )
@@ -210,7 +180,7 @@ def is_guild():
 
 
 def is_registered():
-    """REGISTERED or higher: any membership-state role, STAFF, STRATEGIST, ADMIN, or OPERATOR."""
+    """REGISTERED or higher: any membership-state role, STAFF, ADMIN, or OPERATOR."""
 
     async def predicate(ctx: commands.Context):
         if _is_operator(ctx.author):
@@ -220,7 +190,6 @@ def is_registered():
             return False
         return (
             _has_admin_perm(member)
-            or _has_strategist_role(member)
             or _has_staff_role(member)
             or _has_registered_role(member)
         )
@@ -244,8 +213,6 @@ async def current_tier(ctx: commands.Context) -> Tier:
         return Tier.PUBLIC
     if _has_admin_perm(member):
         return Tier.ADMIN
-    if _has_strategist_role(member):
-        return Tier.STRATEGIST
     if _has_staff_role(member):
         return Tier.STAFF
     if _has_guild_role(member):

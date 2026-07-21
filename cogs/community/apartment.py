@@ -16,7 +16,7 @@ import discord
 from discord.ext import commands
 
 from bot import Bot
-from lib.auth import is_admin, is_registered, is_staff, is_strategist
+from lib.auth import is_admin, is_registered, is_staff
 from lib.discord_utils.converters import CaseInsensitiveMember
 from lib.mc.resolve import resolve_mc_account_loose
 from orm import Apartment, DiscordAccount
@@ -80,8 +80,8 @@ class ApartmentCog(commands.Cog):
             await ctx.reply(
                 "Use `~apartment info <username/number>` (registered), "
                 "`~apartment assign <username>` (staff), "
-                "`~apartment force <username> <number>` (strategist), "
-                "`~apartment evict <username/number>` (strategist), "
+                "`~apartment force <username> <number>` (staff), "
+                "`~apartment evict <username/number>` (staff), "
                 "`~apartment create <number>` (admin), "
                 "or `~apartment status` (staff)."
             )
@@ -145,9 +145,9 @@ class ApartmentCog(commands.Cog):
 
     @apartment_group.command(
         name="force",
-        description="(Strategist) Force-assign a user to a specific room (displaces current occupant).",
+        description="(Staff) Force-assign a user to a specific room (displaces current occupant).",
     )
-    @is_strategist()
+    @is_staff()
     async def apartment_force(self, ctx: commands.Context, username: str, number: str):
         owner = await _resolve_owner_name(ctx, username)
 
@@ -194,9 +194,9 @@ class ApartmentCog(commands.Cog):
 
     @apartment_group.command(
         name="evict",
-        description="(Strategist) Vacate an apartment by room number or owner.",
+        description="(Staff) Vacate an apartment by room number or owner.",
     )
-    @is_strategist()
+    @is_staff()
     async def apartment_evict(self, ctx: commands.Context, *, arg: str):
         by_number = await Apartment.filter(number__iexact=arg).first()
         if by_number is not None:

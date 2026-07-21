@@ -9,7 +9,7 @@ Three action kinds, with escalating point values:
     adds them to the dazebot blocklist, posts an EJECT NOTICE in the
     rank-alert channel, and tells the issuing client what in-game
     command to dispatch (``/gu kick`` for chiefs, ``/gu rank ... recruit``
-    for captains/strategists -- the workaround for the Wynncraft
+    for strategists -- the workaround for the Wynncraft
     "only chiefs can kick" limitation).
 
 Threshold rule on commit: if cumulative points were ``< 3`` before this
@@ -251,9 +251,9 @@ async def record_action(
     eject, post the EJECT NOTICE on eject.
 
     ``actor_rank`` is the issuing staff member's in-game guild rank
-    (``chief``/``strategist``/``captain``/...). It only affects the
-    ``suggested_dispatch`` field for ejects -- chiefs get ``"kick"``,
-    everyone else gets ``"demote"``.
+    (``owner``/``chief``/``strategist``). It only affects the
+    ``suggested_dispatch`` field for ejects -- chiefs/owners get ``"kick"``,
+    strategists get ``"demote"``.
     """
     if kind not in POINTS_BY_KIND:
         raise ValueError(f"unknown kind {kind!r}")
@@ -429,7 +429,7 @@ def _suggest_dispatch(actor_rank: Optional[str]) -> Optional[str]:
     """Map an in-game guild rank to the ``/gu ...`` command class that
     actor's vetsmod client should dispatch on a successful eject.
 
-    Per spec: only chiefs can ``/gu kick``; captains and strategists work
+    Per spec: only chiefs (and owners) can ``/gu kick``; strategists work
     around this by demoting to ``recruit`` (the placeholder rank that
     signals "needs to be kicked" to chiefs).
     """
@@ -438,7 +438,7 @@ def _suggest_dispatch(actor_rank: Optional[str]) -> Optional[str]:
     r = actor_rank.strip().lower()
     if r in ("chief", "owner"):
         return "kick"
-    if r in ("strategist", "captain"):
+    if r == "strategist":
         return "demote"
     return None
 
@@ -543,7 +543,7 @@ async def _post_eject_notice(
     The urgent "hop on and kick this person" alert -- the BAN NOTICE
     pinged in the rank-alert channel -- is fired separately by
     :func:`lib.rank_alerts.post_rank_alert` *only* for the
-    captain/strategist case, when vetsmod observes the resulting
+    strategist case, when vetsmod observes the resulting
     ``/gu rank ... recruit`` rank change. Chief ejects don't generate
     a BAN NOTICE because the chief already kicks immediately; this
     log entry is the only record on the Discord side.

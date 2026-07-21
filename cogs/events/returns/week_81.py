@@ -2968,7 +2968,7 @@ async def _manage_swap(ctx: commands.Context, args: list[str]) -> None:
 _SWEEP_INTERVAL = timedelta(minutes=10)
 _last_sweep_at = datetime.min.replace(tzinfo=timezone.utc)
 
-# Admin/strategist/operator users who have spoken in a specific team's
+# Admin/staff/operator users who have spoken in a specific team's
 # thread. Once they've posted a message they're treated as "here by their
 # own accord" and get exempted from sweeps — the reasoning is that an
 # admin dragged in by an @-mention is silent by default (they never

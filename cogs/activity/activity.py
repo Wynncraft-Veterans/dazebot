@@ -260,39 +260,17 @@ class Activity(commands.Cog):
         """
         if not uuids:
             return
-        from lib.role_state import Trigger, apply_transition  # local import: cog may load before lib
-
-        guild = self.bot.get_guild(self.bot.config.GUILD)
-        if guild is None:
-            return
-        # Gather discord links for these MC accounts.
-        discs = await DiscordAccount.filter(
-            minecraft_account__uuid__in=list(uuids)
-        ).select_related("minecraft_account")
-        # And alts.
-        from orm import MinecraftAlt
-
-        alt_links = await MinecraftAlt.filter(
-            minecraft_account__uuid__in=list(uuids)
-        ).select_related("discord_account", "minecraft_account")
-        all_disc_uuids: set[str] = {d.disc_uuid for d in discs}
-        all_disc_uuids.update(a.discord_account.disc_uuid for a in alt_links)
+        # local import: cog may load before lib
+        from lib.role_state import Trigger, fire_trigger_for_mc_uuids
 
         trig_map = {
             "joined": Trigger.JOINED_VETS,
             "became_guildless": Trigger.BECAME_GUILDLESS,
             "joined_other_guild": Trigger.JOINED_OTHER_GUILD,
         }
-        trig = trig_map[_trigger]
-
-        for disc_uuid in all_disc_uuids:
-            member = guild.get_member(int(disc_uuid))
-            if member is None:
-                continue
-            try:
-                await apply_transition(member, trig, reason=f"automation:{_trigger}")
-            except discord.HTTPException as e:
-                logger.warning(f"automation: failed transition {_trigger} for {member}: {e}")
+        await fire_trigger_for_mc_uuids(
+            self.bot, uuids, trig_map[_trigger], reason=f"automation:{_trigger}"
+        )
 
     # Cadence matches the /v3/guild upstream cache TTL (120s) — polling
     # any faster just hits the shared cache, any slower leaves freshness

@@ -406,3 +406,64 @@ async def hiatus_member_uuids(bot) -> set[str]:
     }
     out.update(a.minecraft_account.uuid for a in alts)
     return out
+
+
+async def linked_disc_uuids_for_mc(uuids: Iterable[str]) -> set[str]:
+    """Inverse of ``hiatus_member_uuids``: every Discord user id (as a
+    string) linked to any of ``uuids``, across both the primary
+    ``DiscordAccount.minecraft_account`` link and the ``MinecraftAlt``
+    table. An alt counts — a guild change observed on someone's alt is
+    still a guild change for that person.
+    """
+    from orm import DiscordAccount, MinecraftAlt  # local: orm may import lib
+
+    uuid_list = list(uuids)
+    if not uuid_list:
+        return set()
+    discs = await DiscordAccount.filter(minecraft_account__uuid__in=uuid_list)
+    alts = await MinecraftAlt.filter(
+        minecraft_account__uuid__in=uuid_list
+    ).select_related("discord_account")
+    out: set[str] = {d.disc_uuid for d in discs}
+    out.update(a.discord_account.disc_uuid for a in alts)
+    return out
+
+
+async def fire_trigger_for_mc_uuids(
+    bot,
+    uuids: Iterable[str],
+    trigger: Trigger,
+    *,
+    reason: str | None = None,
+) -> None:
+    """Apply ``trigger`` to every Discord member linked to ``uuids``.
+
+    The membership automation observes guild membership per *Minecraft*
+    account but acts on *Discord* roles, so every caller needs the same
+    uuid -> link -> member -> ``apply_transition`` walk. Shared by the
+    activity cog's guild-scan transitions and the stale-HIATUS self-heal
+    in ``lib/mc/hiatus_alerts.py``.
+
+    Members not present in the configured guild are skipped; per-member
+    Discord failures are logged and do not abort the rest of the batch.
+    ``compute_transition`` no-ops on states the trigger doesn't apply to,
+    so over-broad uuid sets are safe.
+    """
+    disc_uuids = await linked_disc_uuids_for_mc(uuids)
+    if not disc_uuids:
+        return
+    guild = bot.get_guild(bot.config.GUILD)
+    if guild is None:
+        return
+    for disc_uuid in disc_uuids:
+        member = guild.get_member(int(disc_uuid))
+        if member is None:
+            continue
+        try:
+            await apply_transition(
+                member, trigger, reason=reason or f"automation:{trigger.value}"
+            )
+        except discord.HTTPException as e:
+            logger.warning(
+                f"fire_trigger_for_mc_uuids: {trigger.value} failed for {member}: {e}"
+            )

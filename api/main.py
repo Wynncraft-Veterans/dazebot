@@ -27,7 +27,7 @@ from fastapi import Body, FastAPI, Header, HTTPException
 
 from lib.discord_utils.first_install_view import post_fallback_completion
 from lib.mc import mojang as mc
-from lib.mc.linking import dm_or_log, try_consume_code
+from lib.mc.linking import contains_code_shape, dm_or_log, try_consume_code
 from lib.mc.resolve import refresh_mc_guild
 from lib.mc.wynn_api.errors import WynnApiError
 from lib.role_state import RoleState, ensure_linked_baseline, state_of
@@ -79,6 +79,12 @@ def create_app(bot: Bot) -> FastAPI:
         code (the common case). Returns
         ``{"status": "linked"|"refused"}`` with the human-readable reason
         when there was a pending code for this username.
+
+        ``chat_message``, when present, is sent back to the player in-game
+        by picolimbo. Picolimbo acks every forwarded line with "Code sent."
+        regardless of outcome, so without this a mistyped or expired code
+        is indistinguishable from a successful link. Ordinary chat still
+        gets no message — only lines that were plausibly a code attempt.
         """
         try:
             username = await mc.get_mc_username(uuid)
@@ -88,6 +94,18 @@ def create_app(bot: Bot) -> FastAPI:
 
         outcome = await try_consume_code(bot, uuid, username, msg)
         if outcome is None:
+            if contains_code_shape(msg):
+                # Code-shaped but matched no pending row, or matched more
+                # than one. Either way the player meant to link and
+                # nothing happened, which they deserve to be told.
+                return {
+                    "status": "ignored",
+                    "reason": "no_matching_code",
+                    "chat_message": (
+                        "That link code isn't recognised - it may have expired. "
+                        "Run /link_code in Discord for a fresh one."
+                    ),
+                }
             return {"status": "ignored"}
 
         # DM the user the result so they get feedback even if they're not in
@@ -112,6 +130,11 @@ def create_app(bot: Bot) -> FastAPI:
         return {
             "status": "linked" if outcome.success else "refused",
             "reason": outcome.reason,
+            "chat_message": (
+                f"Link complete - {outcome.reason}"
+                if outcome.success
+                else f"Link failed - {outcome.reason}"
+            ),
         }
 
     @app.post("/api/auth/introspect")

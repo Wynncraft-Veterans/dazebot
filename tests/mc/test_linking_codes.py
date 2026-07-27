@@ -106,3 +106,29 @@ def test_regex_returns_empty_on_chatty_message_without_code():
 def test_regex_returns_empty_on_short_message():
     # Five chars from the alphabet is one short of CODE_LENGTH.
     assert _CODE_SHAPED_RE.findall("ABCDE") == []
+
+
+# --------------------------------------------------------------------------
+# In-game acknowledgement
+# --------------------------------------------------------------------------
+
+
+def test_contains_code_shape_spots_a_code_attempt():
+    """Picolimbo acks every line with "Code sent.", so a wrong code reads
+    as success unless we can tell it apart from ordinary chat."""
+    from lib.mc.linking import contains_code_shape
+
+    assert contains_code_shape("ABC234")
+    assert contains_code_shape("my code is abc234 thanks")
+
+
+def test_contains_code_shape_ignores_ordinary_chat():
+    from lib.mc.linking import contains_code_shape
+
+    assert not contains_code_shape("hello everyone")
+    assert not contains_code_shape("")
+    # Excluded characters (0/O/1/I/L) can't appear in an issued code.
+    assert not contains_code_shape("HELLO1")
+    # Wrong length either side of six.
+    assert not contains_code_shape("ABC23")
+    assert not contains_code_shape("ABC2345")

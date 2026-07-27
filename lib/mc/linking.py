@@ -57,6 +57,16 @@ _CODE_LENGTH = 6
 _CODE_SHAPED_RE = re.compile(rf"(?<![A-Z0-9])[{_CODE_ALPHABET}]{{{_CODE_LENGTH}}}(?![A-Z0-9])")
 
 
+def contains_code_shape(message: str) -> bool:
+    """Whether ``message`` carries something shaped like a link code.
+
+    Lets the API tell "you typed a code we couldn't use" apart from
+    ordinary chat. Picolimbo acks every forwarded line with "Code sent.",
+    so without this a wrong or expired code reads as success.
+    """
+    return bool(_CODE_SHAPED_RE.search(message.upper()))
+
+
 def _generate_code() -> str:
     return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LENGTH))
 

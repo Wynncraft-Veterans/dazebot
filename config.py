@@ -71,6 +71,13 @@ class Config:
     JANITOR_ALERT_CHANNEL = 1313786561145606216
     JANITOR_ALERT_DELTA = timedelta(hours=6)  # throttle window for "still detecting" summaries
     JANITOR_ALERT_MAX_SAMPLES = 15
+    # Reconciler (H) is the only janitor pass that spends Wynncraft API budget.
+    # Cap on /v3/player calls per tick; the HIATUS cohort is walked in a
+    # rotating slice, so a cohort of C is fully covered every ceil(C/max)
+    # ticks (~2 days for ~135 accounts at the 6h interval). Requests go out at
+    # background priority, so they yield to every other caller on the shared
+    # token. Raise for faster convergence, lower if the bucket gets tight.
+    JANITOR_HIATUS_SWEEP_MAX = 15
 
     # _check_guild API-down write-guard: a Wynncraft guild response is treated
     # as untrustworthy (membership inference suppressed) when it returns zero

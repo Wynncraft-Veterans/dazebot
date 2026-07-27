@@ -53,11 +53,15 @@ from bot import Bot
 from config import Config, CurrConfig
 from lib.auth import is_staff
 from lib.mc.linking import _enforce_linked_baseline_for
+from lib.mc.wynn_api.guild import get_guild
+from lib.mc.wynn_api.player import get_player_stats
 from lib.role_state import (
     RoleState,
     Trigger,
     apply_transition,
+    fire_trigger_for_mc_uuids,
     force_to_registered_only,
+    hiatus_member_uuids,
     resolve_guild_member,
     state_of,
 )
@@ -74,6 +78,7 @@ _LABELS = {
     "baseline": "(A) No-state self-heal (Flame)",
     "waitlist": "(D) WAITLISTED ↔ DB sync",
     "linkcodes": "(B) Stale / kept LinkCodes",
+    "hiatus_guild": "(H) HIATUS holders who are in a guild",
 }
 
 
@@ -425,11 +430,135 @@ async def reconcile_kept_linkcodes(bot: Bot, *, enforce: bool) -> ReconcilerResu
     return r
 
 
+# Rotating cursor into the "HIATUS holders not on the Returners roster" list
+# for reconciler (H). Module-level because reconcilers are plain functions;
+# single-process bot, so a plain int is enough. Resetting to 0 on restart just
+# re-checks from the top of the list, which is harmless.
+_HIATUS_SWEEP_CURSOR = 0
+
+
+async def reconcile_hiatus_guild(bot: Bot, *, enforce: bool) -> ReconcilerResult:
+    """(H) A HIATUS-role holder must be guildless — *in a guild → never
+    Hiatus*. Fires the transition they're actually owed when they aren't.
+
+    Closes the hole documented in ``../../.claude/role_state.md``: nothing in
+    the periodic path scans a guild that no Returners member is in, so a
+    guildless ex-member who joins some third guild is never observed and keeps
+    HIATUS indefinitely. ``lib/mc/hiatus_alerts.py`` catches this at alert
+    time, but only on a day the player happens to log in; this sweep closes it
+    for everyone else.
+
+    **Rate budget** (dazebot shares one WAPI token, so this is the whole
+    design constraint):
+
+    * One GUILD-bucket request per tick — the Returners roster, fetched
+      **once** for the entire cohort. Deliberately not ``refresh_mc_guild``
+      per player: that helper re-fetches the roster on every call, which would
+      turn an N-player sweep into 2N requests instead of 1+N.
+    * At most ``JANITOR_HIATUS_SWEEP_MAX`` PLAYER-bucket requests per tick,
+      issued at **background** priority so they only drain when no normal- or
+      priority-tier call is pending. The cohort is walked in a rotating slice,
+      so a cohort of C is fully covered every ``ceil(C / max)`` ticks — at the
+      6h default that is a couple of days for a ~135-account cohort, which is
+      ample for a role correction.
+
+    Anyone on the roster is resolved for free (set intersection, no extra
+    request), which also covers the "stale HIATUS while actually back in
+    Returners" case — 6 of the 16 bad alerts measured on 2026-07-27.
+    """
+    global _HIATUS_SWEEP_CURSOR
+
+    r = ReconcilerResult(name="hiatus_guild")
+    hiatus_uuids = await hiatus_member_uuids(bot)  # Discord cache only — free
+    if not hiatus_uuids:
+        return r
+    r.scanned = len(hiatus_uuids)
+
+    try:
+        roster = await get_guild("Returners")
+    except Exception:  # noqa: BLE001 — third-party API; skip the tick entirely
+        r.errors += 1
+        logger.warning("janitor (H): Returners roster fetch failed; skipping sweep")
+        return r
+    returners = {m.uuid for m in roster.members.all_members()}
+
+    # --- free pass: on the roster, so provably not on hiatus ---
+    back_in = sorted(hiatus_uuids & returners)
+    if back_in:
+        r.flagged += len(back_in)
+        r.samples.append(
+            f"{len(back_in)} HIATUS holder(s) are on the Returners roster → MEMBER"
+            + ("" if enforce else " (would fix)")
+        )
+        if enforce:
+            try:
+                await fire_trigger_for_mc_uuids(
+                    bot, back_in, Trigger.JOINED_VETS, reason="janitor:hiatus-in-returners"
+                )
+                r.repaired += len(back_in)
+            except Exception:  # noqa: BLE001
+                r.errors += 1
+                logger.exception("janitor (H): JOINED_VETS fanout failed")
+
+    # --- metered pass: everyone else needs one /player call to learn their guild ---
+    rest = sorted(hiatus_uuids - returners)
+    if not rest:
+        _HIATUS_SWEEP_CURSOR = 0
+        return r
+    cap = max(1, int(getattr(CurrConfig, "JANITOR_HIATUS_SWEEP_MAX", 15)))
+    start = _HIATUS_SWEEP_CURSOR % len(rest)
+    batch = (rest + rest)[start:start + min(cap, len(rest))]
+    _HIATUS_SWEEP_CURSOR = (start + len(batch)) % len(rest)
+    logger.info(
+        "janitor (H): %d HIATUS holder(s), %d on roster, polling %d/%d others "
+        "(cursor %d, background tier)",
+        len(hiatus_uuids), len(back_in), len(batch), len(rest), start,
+    )
+
+    for uuid in batch:
+        try:
+            player = await get_player_stats(uuid, background=True)
+        except Exception:  # noqa: BLE001 — one bad lookup must not abort the sweep
+            r.errors += 1
+            logger.warning("janitor (H): player lookup failed for %s", uuid)
+            continue
+        live = player.guild.name if player.guild else None
+        # WYNN-STALE-WORKAROUND (see lib/mc/resolve.refresh_mc_guild): the
+        # player endpoint runs ~12h stale, so a "Returners" here contradicts
+        # the roster we just fetched — and the roster is authoritative.
+        if live == "Returners":
+            live = None
+        if live is None:
+            continue  # genuinely guildless — HIATUS is correct
+        r.flagged += 1
+        account = await MinecraftAccount.get_or_none(uuid=uuid)
+        r.samples.append(
+            f"`{account.mc_username if account else uuid}` is in `{live}` "
+            "→ REGISTERED" + ("" if enforce else " (would fix)")
+        )
+        if not enforce:
+            continue
+        try:
+            if account is not None and account.guild != live:
+                account.guild = live
+                await account.save(update_fields=["guild"])
+            await fire_trigger_for_mc_uuids(
+                bot, [uuid], Trigger.JOINED_OTHER_GUILD, reason="janitor:hiatus-in-guild"
+            )
+            r.repaired += 1
+        except Exception:  # noqa: BLE001
+            r.errors += 1
+            logger.exception("janitor (H): repair failed for %s", uuid)
+
+    return r
+
+
 RECONCILERS = (
     reconcile_blocklisted_registered_only,  # (F) — first: strongest invariant
     reconcile_linked_baseline,              # (A) — the Flame self-heal
     reconcile_waitlist_role,                # (D) — needs A's baseline grants first
     reconcile_kept_linkcodes,               # (B) — sees the post-F/A/D world
+    reconcile_hiatus_guild,                 # (H) — last: the only one that spends WAPI budget
 )
 
 

@@ -21,7 +21,6 @@ from typing import Optional
 
 import discord
 from discord.ext import commands
-from tortoise.expressions import Q
 
 from config import CurrConfig
 from cogs.events.returns import Tier, register, register_manage
@@ -34,15 +33,14 @@ from cogs.events.returns.lib.cult_threads import (
     CULT_THREADS,  # legacy seed source, used only by backfill
 )
 from lib.discord_utils.converters import CaseInsensitiveMember
+from lib.mc.resolve import ensure_mc_account
 from lib.mc.wynn_api.errors import WynnApiError
-from lib.mc.wynn_api.player import get_player_stats
 from lib.role_state import resolve_guild_member
 from orm import (
     Cult,
     CultMembership,
     DiscordAccount,
     MinecraftAccount,
-    UNKNOWN_LAST_ONLINE,
 )
 
 logger = logging.getLogger("dazebot.cogs.events.returns.week_0")
@@ -310,27 +308,16 @@ async def _resolve_owner_mc(ctx: commands.Context, owner: str) -> Optional[Minec
                 return None
             return await MinecraftAccount.get(id=disc.minecraft_account_id)
 
-    mc = await MinecraftAccount.filter(
-        Q(uuid=owner)
-        | Q(mc_username__iexact=owner)
-        | Q(wynn_username__iexact=owner)
-    ).first()
-    if mc is not None:
-        return mc
-
+    # Delegate the local-lookup-then-create half to the shared helper. This
+    # used to be an inlined copy of it, which meant it also carried the
+    # rename bug ensure_mc_account now handles: a name-keyed miss on a
+    # renamed player fell through to a create that violated the uuid
+    # UNIQUE constraint.
     try:
-        fs = await get_player_stats(owner, full=True)
+        return await ensure_mc_account(owner)
     except WynnApiError as e:
         logger.info("week_0 owner resolution: Wynn API lookup failed for %r: %s", owner, e)
         return None
-    return await MinecraftAccount.create(
-        uuid=fs.uuid,
-        wynn_username=fs.username,
-        mc_username=fs.username,
-        last_online=fs.lastJoin or UNKNOWN_LAST_ONLINE,
-        last_manual_check=UNKNOWN_LAST_ONLINE,
-        first_join=fs.firstJoin,
-    )
 
 
 # ---------------------------------------------------------------------------

@@ -27,11 +27,12 @@ from typing import Optional
 
 import discord
 from discord.ext import commands
+from tortoise.exceptions import IntegrityError
 from tortoise.expressions import Q
 
 from config import CurrConfig
 from lib.discord_utils.converters import CaseInsensitiveMember
-from lib.mc.mojang import get_mc_uuid
+from lib.mc.mojang import get_mc_uuid, resolve_canonical_username
 from lib.mc.wynn_api.errors import WynnApiError
 # >>> PATCH BEGIN: WYNN-STALE-WORKAROUND (2026-07-11)
 # Reason: /v3/player/{uuid}.guild ~12h stale for offline players.
@@ -83,6 +84,14 @@ async def ensure_mc_account(value: str) -> MinecraftAccount:
     is returned -- this catches Mojang renames where Wynncraft only knows
     the player by their new name but our DB still records the old one.
     This branch never creates new rows; it only finds existing ones.
+
+    New-name fallback: the mirror case, where Wynncraft *does* know
+    ``value`` but our DB filed the same UUID under the player's old name.
+    The name-keyed lookup above misses, so we re-check by the UUID the API
+    just handed us before creating anything, and refresh the stale
+    usernames on the row we find (see :func:`_sync_usernames`). Without
+    that re-check the create below raises ``UNIQUE constraint failed:
+    minecraft_accounts.uuid`` out of whatever command invoked us.
     """
     existing = await resolve_mc_account_loose(value)
     if existing is not None:
@@ -112,17 +121,91 @@ async def ensure_mc_account(value: str) -> MinecraftAccount:
                 )
                 return existing_by_uuid
         raise
-    return await MinecraftAccount.create(
-        uuid=fs.uuid,
-        wynn_username=fs.username,
-        mc_username=fs.username,
-        guild=fs.guild.name if fs.guild else None,
-        # fs.lastJoin / firstJoin can be None per Wynncraft privacy opt-out;
-        # use UNKNOWN_LAST_ONLINE as the in-band "unknown" marker.
-        last_online=fs.lastJoin or UNKNOWN_LAST_ONLINE,
-        last_manual_check=UNKNOWN_LAST_ONLINE,
-        first_join=fs.firstJoin,
-    )
+    # A name-keyed miss does NOT prove the account is new. Stored usernames
+    # go stale the instant a player renames on Mojang, and only accounts on
+    # the Returners roster get them refreshed (``cogs/activity._apply_guild``
+    # is the sole periodic writer of the two username columns). So an
+    # operator typing a player's *current* name for a row we filed under
+    # their *old* one arrives here holding a UUID we already have.
+    existing_by_uuid = await MinecraftAccount.filter(uuid=fs.uuid).first()
+    if existing_by_uuid is not None:
+        logger.info(
+            "ensure_mc_account: %r resolved to existing MinecraftAccount %s, "
+            "stored as %r/%r -- treating as a rename",
+            value, fs.uuid,
+            existing_by_uuid.mc_username, existing_by_uuid.wynn_username,
+        )
+        return await _sync_usernames(existing_by_uuid, fs.username)
+    try:
+        return await MinecraftAccount.create(
+            uuid=fs.uuid,
+            wynn_username=fs.username,
+            mc_username=fs.username,
+            guild=fs.guild.name if fs.guild else None,
+            # fs.lastJoin / firstJoin can be None per Wynncraft privacy opt-out;
+            # use UNKNOWN_LAST_ONLINE as the in-band "unknown" marker.
+            last_online=fs.lastJoin or UNKNOWN_LAST_ONLINE,
+            last_manual_check=UNKNOWN_LAST_ONLINE,
+            first_join=fs.firstJoin,
+        )
+    except IntegrityError:
+        # Lost a create race -- the activity loop, the linking flow and any
+        # concurrent command can all reach MinecraftAccount.create for the
+        # same UUID, and the awaits above give them plenty of room. Adopt
+        # the winner's row rather than surfacing a raw DB error.
+        raced = await MinecraftAccount.filter(uuid=fs.uuid).first()
+        if raced is None:
+            raise
+        logger.info(
+            "ensure_mc_account: lost a create race for %s; adopting the "
+            "concurrently-created row",
+            fs.uuid,
+        )
+        return await _sync_usernames(raced, fs.username)
+
+
+async def _sync_usernames(
+    mc: MinecraftAccount, wynn_username: str
+) -> MinecraftAccount:
+    """Bring a stored row's usernames back in line with a fresh Wynncraft
+    lookup. Mutates and saves ``mc`` (only the columns that actually
+    changed, so a concurrent writer's other fields survive); returns it for
+    call chaining.
+
+    Only called from :func:`ensure_mc_account`'s UUID-recheck path, where
+    the row was found by UUID *after* a name-keyed lookup missed it -- so
+    the stored names are provably stale and worth the write. Nothing in the
+    periodic path would otherwise fix them for an account outside the
+    Returners roster scan.
+
+    ``mc_username`` goes through :func:`lib.mc.mojang.resolve_canonical_username`
+    with the Wynncraft name as the tiebreaker hint, matching how the
+    activity loop derives it. On total Mojang failure we take the
+    Wynncraft name rather than leave a value we know to be stale.
+    """
+    fields: list[str] = []
+    changes: list[str] = []
+    if mc.wynn_username != wynn_username:
+        changes.append(f"wynn_username {mc.wynn_username!r} -> {wynn_username!r}")
+        mc.wynn_username = wynn_username
+        fields.append("wynn_username")
+    try:
+        canonical = await resolve_canonical_username(mc.uuid, hint=wynn_username)
+    except Exception:  # noqa: BLE001 - third-party API; best-effort contract
+        logger.warning(
+            "_sync_usernames: Mojang lookup failed for %s; using the "
+            "Wynncraft name %r",
+            mc.uuid, wynn_username,
+        )
+        canonical = wynn_username
+    if mc.mc_username != canonical:
+        changes.append(f"mc_username {mc.mc_username!r} -> {canonical!r}")
+        mc.mc_username = canonical
+        fields.append("mc_username")
+    if fields:
+        logger.info("_sync_usernames: %s: %s", mc.uuid, "; ".join(changes))
+        await mc.save(update_fields=fields)
+    return mc
 
 
 async def refresh_mc_guild(mc: MinecraftAccount) -> MinecraftAccount:

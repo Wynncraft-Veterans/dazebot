@@ -28,6 +28,11 @@ can fire more than once for what a human would call one event:
   the roster is still in the guild; DMing them "you dropped off the
   roster" would be both wrong and unstoppable, since the alt keeps
   re-stamping the rejoin evidence on every guild tick forever.
+* the away window -- the copy tells them they dropped off the roster and
+  suggests an inactivity prune, which is a silly thing to say to someone
+  who was gone for two days. ``HIATUS_RETURN_DM_MIN_AWAY_DAYS`` mirrors
+  ``/purgelist``'s default window, so the message uses the same threshold
+  the pruning decision does.
 * the blocklist -- a blocked user is forced to REGISTERED-only and can
   never be Hiatus, so "welcome back, ask for a re-invite" is the last
   thing we should be telling them. Checked against the DB rather than
@@ -65,26 +70,67 @@ import uuid as uuid_mod
 import discord
 
 from config import CurrConfig
-from orm import Blocklist, DiscordAccount, HiatusReturnNotice, MinecraftAccount, MinecraftAlt
+from orm import (
+    Blocklist,
+    DiscordAccount,
+    HiatusReturnNotice,
+    MinecraftAccount,
+    MinecraftAlt,
+    is_last_online_unknown,
+)
 
 logger = logging.getLogger("dazebot.lib.mc.hiatus_return_dm")
 
 MUTE_BUTTON_CUSTOM_ID = "hiatus_return:mute"
 SNOOZE_BUTTON_CUSTOM_ID = "hiatus_return:snooze"
 
-# Rolling window of send timestamps backing HIATUS_RETURN_DM_MAX_PER_HOUR.
+# Rolling window of *reservations* backing HIATUS_RETURN_DM_MAX_PER_HOUR.
 # In-memory on purpose: it is a burst damper, and the event it damps (a
 # restart handing the whole online cohort over at once) is the same event
 # that would clear a persisted copy, so persisting it would be a false
 # comfort. The per-user floor in the DB is the part that must survive.
+#
+# A *reservation*, not a counter of sends. The distinction matters twice:
+#
+#  - It is taken in ``plan_return_dm`` with no ``await`` between the check
+#    and the take. ``server_watcher`` gathers its whole cohort
+#    concurrently, so a read-then-later-write budget would let every
+#    coroutine in one batch read the same "8 remaining" and all send.
+#  - It is held by anything that goes on to spend upstream requests, not
+#    just by a delivered DM. The expensive path here is a *rejected* DM —
+#    verifying someone's alts costs the same whether or not they end up
+#    getting the message — so counting only sends would leave the cap
+#    reading 8/8 free while the bot burned a bucket's worth of requests.
+#    Cheap rejections (member gone, role gone, blocklisted) release it
+#    again; anything that has already touched the network keeps it.
 _SEND_TIMES: deque[datetime] = deque()
 
 
-def _budget_remaining() -> int:
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+def _reserve_slot() -> datetime | None:
+    """Take a fleet slot, or None when the hour's budget is spent. Contains
+    no ``await``: check and take happen in one event-loop turn, so
+    concurrent callers cannot both win the last slot."""
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=1)
     while _SEND_TIMES and _SEND_TIMES[0] < cutoff:
         _SEND_TIMES.popleft()
-    return int(CurrConfig.HIATUS_RETURN_DM_MAX_PER_HOUR) - len(_SEND_TIMES)
+    if len(_SEND_TIMES) >= int(CurrConfig.HIATUS_RETURN_DM_MAX_PER_HOUR):
+        return None
+    _SEND_TIMES.append(now)
+    return now
+
+
+def release_slot(plan: "ReturnDmPlan") -> None:
+    """Hand a reservation back after a rejection that cost us nothing.
+
+    Only for the free rejections. A rejection that already spent Wynncraft
+    requests must keep its slot, or the cap stops bounding the thing it
+    exists to bound.
+    """
+    try:
+        _SEND_TIMES.remove(plan.reserved_at)
+    except ValueError:  # already rolled out of the window
+        pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,8 +151,12 @@ class ReturnDmPlan:
     via_snooze: bool
     # Every MC account the person owns, resolved once at plan time so the
     # verify pass doesn't re-walk the link tables. Includes the spotted
-    # account.
-    owned_uuids: frozenset[str] = frozenset()
+    # account. Deliberately has no default: an empty set turns off both of
+    # verify's DB gates, and a safety gate must not be skippable by
+    # omitting a field.
+    owned_uuids: frozenset[str]
+    # The fleet-budget reservation this plan holds, for ``release_slot``.
+    reserved_at: datetime
 
 
 async def linked_mc_uuids_for_disc(disc_uuid: str) -> set[str]:
@@ -149,14 +199,46 @@ async def _owner_of(account: MinecraftAccount) -> DiscordAccount | None:
     return alt.discord_account if alt is not None else None
 
 
+def _away_since(account: MinecraftAccount, explicit: datetime | None) -> datetime | None:
+    """When this player was last online *before* the session that just
+    triggered a detection, or None if we cannot tell.
+
+    ``MinecraftAccount.last_online`` is the right source and, for most of
+    this cohort, needs no help: nothing refreshes it for a guildless
+    account. ``activity._apply_guild`` only runs for members of a scanned
+    roster, ``server_watcher`` only polls the privacy-hidden, and
+    ``hiatus_watcher`` writes ``online_seen_at`` and never this. So it sits
+    frozen at their last real ``lastJoin``, which is exactly the value we
+    want to subtract from now.
+
+    The exception is the privacy-hidden cohort, which ``server_watcher``
+    *does* poll -- and it bumps ``last_online = now`` before calling into
+    the alert path, so by the time we look the evidence is gone. Those
+    callers capture the pre-tick value and pass it as ``explicit``.
+    """
+    if explicit is not None:
+        return None if is_last_online_unknown(explicit) else explicit
+    if is_last_online_unknown(account.last_online):
+        return None
+    return account.last_online
+
+
 async def plan_return_dm(
-    bot, account: MinecraftAccount, *, login_edge: bool
+    bot,
+    account: MinecraftAccount,
+    *,
+    login_edge: bool,
+    away_since: datetime | None = None,
 ) -> ReturnDmPlan | None:
     """Decide whether ``account``'s owner is owed the DM. **Pure reads.**
 
     Returns None -- send nothing -- far more often than not. Callers rely
     on a None here to skip the live guild crosscheck entirely, so this
     must stay free of both writes and network calls.
+
+    ``away_since`` is the caller's pre-tick snapshot of when the player was
+    last online, for the paths that clobber it before getting here; see
+    :func:`_away_since`. Omit it and the stored value is used.
     """
     if not CurrConfig.HIATUS_RETURN_DM_ENABLED:
         return None
@@ -164,45 +246,86 @@ async def plan_return_dm(
     # already watching. Cheapest gate, and the one that does the work.
     if not login_edge:
         return None
-    if _budget_remaining() <= 0:
+    # Were they actually away? Cheapest of the remaining gates -- the value
+    # is already on the row -- so it goes above the reservation, and a
+    # too-recent return never burns a fleet slot.
+    #
+    # An unknown answer suppresses rather than sends. That permanently
+    # silences the ~2% of the cohort whose ``lastJoin`` is privacy-hidden
+    # and who have no real timestamp on record, which is a genuine cost;
+    # it is still the better side to err on, because the alternative is
+    # asserting "while you were gone" to someone we have no evidence was
+    # gone at all.
+    since = _away_since(account, away_since)
+    if since is None:
+        logger.info(
+            "hiatus-return DM for %s suppressed: no usable last_online, so we "
+            "cannot tell how long they were away", account.mc_username,
+        )
+        return None
+    away = datetime.now(timezone.utc) - since
+    if away < timedelta(days=float(CurrConfig.HIATUS_RETURN_DM_MIN_AWAY_DAYS)):
+        logger.info(
+            "hiatus-return DM for %s suppressed: away %.1fd < %sd minimum",
+            account.mc_username, away.total_seconds() / 86400,
+            CurrConfig.HIATUS_RETURN_DM_MIN_AWAY_DAYS,
+        )
+        return None
+
+    reserved_at = _reserve_slot()
+    if reserved_at is None:
         logger.info(
             "hiatus-return DM for %s deferred: fleet budget (%s/h) exhausted",
             account.mc_username, CurrConfig.HIATUS_RETURN_DM_MAX_PER_HOUR,
         )
         return None
 
+    # From here on every ``return None`` has to hand the slot back.
+    def _decline(reason: str | None = None) -> None:
+        if reason:
+            logger.info("hiatus-return DM for %s suppressed: %s", account.mc_username, reason)
+        try:
+            _SEND_TIMES.remove(reserved_at)
+        except ValueError:
+            pass
+
     guild = bot.get_guild(CurrConfig.GUILD)
     if guild is None:
+        _decline()
         return None
 
     disc = await _owner_of(account)
     if disc is None:
+        _decline()
         return None
     try:
         member = guild.get_member(int(disc.disc_uuid))
     except ValueError:
+        _decline()
         return None
     # Deliberately cache-only, no REST fallback: this runs off a 30s poll,
     # `members` intent is on, and a member who isn't cached is a member who
     # left the server -- not someone to spend a REST call confirming.
     if member is None:
+        _decline()
         return None
     # The copy says "welcome back from your hiatus". If the roles have
     # moved on since the watcher built its uuid set, it hasn't.
     if not any(r.id == CurrConfig.ROLE_HIATUS for r in member.roles):
+        _decline()
         return None
 
     # Step 2, applied to the person rather than the spotted account. The
     # live crosscheck downstream only ever refreshes ONE account, so it
     # structurally cannot see an alt that is still on a roster.
     owned = await linked_mc_uuids_for_disc(disc.disc_uuid)
-    if owned and await MinecraftAccount.filter(
-        uuid__in=list(owned), guild__isnull=False
-    ).exists():
-        logger.info(
-            "hiatus-return DM for %s suppressed: another linked account is in a guild",
-            member,
-        )
+    # No linked accounts at all means we cannot run either person-level
+    # gate below, so there is nothing to base a send on.
+    if not owned:
+        _decline("no linked Minecraft accounts")
+        return None
+    if await MinecraftAccount.filter(uuid__in=list(owned), guild__isnull=False).exists():
+        _decline("another linked account is in a guild")
         return None
 
     # Blocklisted people are forced to REGISTERED-only and can never hold
@@ -212,8 +335,8 @@ async def plan_return_dm(
     # role write fails. Ask the table directly. Any linked account being
     # blocked blocks the person: the block is a statement about a human,
     # and staying quiet is the safe direction to err in.
-    if owned and await Blocklist.filter(minecraft_account__uuid__in=list(owned)).exists():
-        logger.info("hiatus-return DM for %s suppressed: on the blocklist", member)
+    if await Blocklist.filter(minecraft_account__uuid__in=list(owned)).exists():
+        _decline("on the blocklist")
         return None
 
     notice = await HiatusReturnNotice.filter(disc_uuid=disc.disc_uuid).first()
@@ -228,8 +351,10 @@ async def plan_return_dm(
             snooze_armed=False,
             via_snooze=False,
             owned_uuids=frozenset(owned),
+            reserved_at=reserved_at,
         )
     if notice.muted:
+        _decline()
         return None
 
     now = datetime.now(timezone.utc)
@@ -242,6 +367,7 @@ async def plan_return_dm(
     if floor_from is not None:
         gap = timedelta(hours=float(CurrConfig.HIATUS_RETURN_DM_MIN_GAP_HOURS))
         if now - floor_from < gap:
+            _decline()
             return None
 
     if notice.snooze_armed:
@@ -252,11 +378,10 @@ async def plan_return_dm(
         # Step 3 proper: they must have been back in Returners since we
         # last wrote to them -- on any of their accounts, since a rejoin
         # on a main is a rejoin for the person.
-        if not owned:
-            return None
         if not await MinecraftAccount.filter(
             uuid__in=list(owned), last_in_returners_at__gt=notice.last_sent_at
         ).exists():
+            _decline()
             return None
         via_snooze = False
 
@@ -267,6 +392,7 @@ async def plan_return_dm(
         snooze_armed=notice.snooze_armed,
         via_snooze=via_snooze,
         owned_uuids=frozenset(owned),
+        reserved_at=reserved_at,
     )
 
 
@@ -287,65 +413,117 @@ async def verify_return_dm(bot, account: MinecraftAccount, plan: ReturnDmPlan) -
 
     When we do find one, the person doesn't just lose the DM -- they get
     the role transition they were owed all along, via the same
-    ``heal_stale_hiatus`` the spotted-account path uses. So the fix is
-    permanent: next login they are REGISTERED, out of the watchers' scope,
-    and nothing here reconsiders them.
+    ``heal_stale_hiatus`` the spotted-account path uses, and we persist the
+    guild we found. So it costs its requests once: the next detection dies
+    at ``plan_return_dm``'s stored-column gate, for free, and the healed
+    role drops them out of the watchers' scope entirely.
 
-    **Cost.** Zero for the common case (nobody has an alt), and one
-    ``refresh_mc_guild`` per additional linked account otherwise. The
-    ceiling is the fleet budget -- at most
-    ``HIATUS_RETURN_DM_MAX_PER_HOUR`` people reach this per hour, since
-    the caller only gets here for a plan that survived every cheap gate.
+    **Fails closed.** If the upstream can't tell us where these accounts
+    are, we do not send. That is the opposite of ``refresh_mc_guild``'s
+    best-effort contract, and deliberately so: that helper leaves the
+    stored value untouched on an API failure, and since every account
+    reaching here is stored as guildless by construction (the cheap gate
+    already rejected anyone stored as guilded), "API down" and "confirmed
+    guildless" would otherwise be the same observation. Getting that
+    backwards would mean an outage turns the gate off exactly when it is
+    least able to check -- so a null answer from
+    :func:`lib.mc.resolve.live_guilds_for` drops the DM. The cost of erring
+    this way is one delayed message; a rejoin or the snooze button
+    recovers it.
+
+    **Cost.** Zero requests for anyone with no second account -- the
+    common case, and it returns before touching the network. Otherwise one
+    Returners roster fetch plus one background ``/v3/player`` per linked
+    account the roster doesn't already name. Bounded above by
+    ``HIATUS_RETURN_DM_MAX_PER_HOUR`` per hour, because the caller only
+    reaches here holding a fleet reservation and the expensive branches
+    below keep it.
     """
     # local: import cycle -- hiatus_alerts imports this module.
     from lib.mc.hiatus_alerts import heal_stale_hiatus
-    from lib.mc.resolve import refresh_mc_guild
+    from lib.mc.resolve import live_guilds_for
 
     guild = bot.get_guild(CurrConfig.GUILD)
     member = guild.get_member(int(plan.disc_uuid)) if guild is not None else None
     if member is None:
+        release_slot(plan)
         return False
     # Re-read rather than trusting the plan: the shared crosscheck above
     # can itself have healed them out of HIATUS between the two phases.
     if not any(r.id == CurrConfig.ROLE_HIATUS for r in member.roles):
         logger.info("hiatus-return DM for %s dropped: no longer holds HIATUS", member)
+        release_slot(plan)
         return False
-    if plan.owned_uuids and await Blocklist.filter(
-        minecraft_account__uuid__in=list(plan.owned_uuids)
-    ).exists():
+    # Re-asked because the window between the two phases spans network
+    # I/O, and a staff /block landing inside it should still win.
+    if await Blocklist.filter(minecraft_account__uuid__in=list(plan.owned_uuids)).exists():
         logger.info("hiatus-return DM for %s dropped: on the blocklist", member)
+        release_slot(plan)
         return False
 
     others = [u for u in plan.owned_uuids if u != account.uuid]
     if not others:
         return True
-    for alt in await MinecraftAccount.filter(uuid__in=others):
-        await refresh_mc_guild(alt)  # best-effort; leaves the value alone on API failure
-        if alt.guild is not None:
-            logger.info(
-                "hiatus-return DM for %s dropped: linked account %s is live in guild %r",
-                member, alt.mc_username, alt.guild,
-            )
-            await heal_stale_hiatus(bot, alt)
-            return False
-    return True
+
+    # One roster fetch for the whole set, then a background player call for
+    # whoever it doesn't name -- 1+N, not the 2N that looping
+    # ``refresh_mc_guild`` would cost. Same contract the janitor's hiatus
+    # sweep holds itself to.
+    live = await live_guilds_for(others, background=True)
+    if live is None:
+        logger.info(
+            "hiatus-return DM for %s dropped: could not verify %d linked account(s) "
+            "against the live API", member, len(others),
+        )
+        return False
+
+    guilded = {u: g for u, g in live.items() if g is not None}
+    if not guilded:
+        return True
+
+    rows = {r.uuid: r for r in await MinecraftAccount.filter(uuid__in=list(guilded))}
+    for uuid, name in guilded.items():
+        row = rows.get(uuid)
+        if row is not None and row.guild != name:
+            row.guild = name
+            await row.save(update_fields=["guild"])
+    # Heal off a Returners hit in preference to any other guild: the two
+    # produce different transitions (MEMBER vs REGISTERED) and being back
+    # in Returners is the more specific, more consequential fact. Without
+    # this the choice would fall to row order.
+    pick = next((u for u, g in guilded.items() if g == "Returners"), next(iter(guilded)))
+    row = rows.get(pick)
+    if row is None:  # raced with a delete; nothing to heal, but still don't send
+        return False
+    logger.info(
+        "hiatus-return DM for %s dropped: linked account %s is live in guild %r",
+        member, row.mc_username, row.guild,
+    )
+    await heal_stale_hiatus(bot, row)
+    return False
 
 
 def build_dm_body(username: str) -> str:
     """The message body.
 
-    Deliberately does *not* assert a reason for the departure. HIATUS is
-    granted by ``Trigger.BECAME_GUILDLESS``, which fires for anyone who
-    leaves the Returners roster for any reason -- an inactivity kick, a
-    voluntary leave, a transfer, a chief's decision -- and staff can also
-    set it by hand. Naming a cause would be wrong for a good share of an
-    unsolicited mailing.
+    Hedged ("it seems likely", "seems to have been") rather than flat.
+    HIATUS is granted by ``Trigger.BECAME_GUILDLESS``, which fires for
+    anyone who leaves the Returners roster for any reason -- an inactivity
+    prune, a voluntary leave, a transfer, a chief's decision -- and staff
+    can set it by hand too. The prune is much the most common of those, so
+    naming it is fair; stating it as fact would not be, on an unsolicited
+    mailing that also lands on people who left of their own accord.
+
+    Note where the f-prefix sits. The username is on one line of a
+    multi-line implicit concatenation, and putting the ``f`` on any other
+    line ships ``{username}`` to the recipient verbatim.
     """
     return (
         "## Welcome back from your hiatus!\n"
-        f"While you were gone, `{username}` dropped off the **VETS** roster — if that "
-        "was the inactivity sweep, sorry about that! Either way, you're always "
-        "welcome back.\n\n"
+        "It would seem that your account likely ended up activity pruned while you were away.\n"
+        f"`{username}` seems to have been removed from the in-game guild as a result.\n\n"
+        "Sorry about that! Slots must have been in high demand!\n"
+        "In any event, you're always welcome back!\n\n"
         "Simply message anyone on `/onlinemembers VETS` for a re-invite!\n"
         "-# Note that `/gu join VETS` is, for some reason, case sensitive."
     )
@@ -371,12 +549,18 @@ async def send_return_dm(bot, account: MinecraftAccount, plan: ReturnDmPlan) -> 
     the send and therefore must not make it. The cost of erring in that
     direction is one missed DM, which the next rejoin -- or the snooze
     button on the DM they did get -- recovers.
+
+    The fleet reservation was already taken in :func:`plan_return_dm` (it
+    has to be, to bound the request spend of the verify pass in between),
+    so nothing is counted here. The three early returns below are all free
+    failures and hand the slot back.
     """
     from lib.mc.linking import dm_or_log  # local: import cycle
 
     guild = bot.get_guild(CurrConfig.GUILD)
     member = guild.get_member(int(plan.disc_uuid)) if guild is not None else None
     if member is None:
+        release_slot(plan)
         return False
 
     now = datetime.now(timezone.utc)
@@ -385,6 +569,7 @@ async def send_return_dm(bot, account: MinecraftAccount, plan: ReturnDmPlan) -> 
     else:
         notice = await HiatusReturnNotice.filter(id=plan.notice_id).first()
         if notice is None:  # cleared by /alerts return_dm_clear mid-flight
+            release_slot(plan)
             return False
 
     # Re-assert the witness. ``.update()`` returns the affected row count,
@@ -403,9 +588,11 @@ async def send_return_dm(bot, account: MinecraftAccount, plan: ReturnDmPlan) -> 
             "hiatus-return DM for %s skipped: claim lost (concurrent send, or muted "
             "since the plan was built)", member,
         )
+        # The winner of the race holds its own reservation; ours bought
+        # nothing, so hand it back.
+        release_slot(plan)
         return False
 
-    _SEND_TIMES.append(now)
     ok = await dm_or_log(
         member,
         build_dm_body(account.mc_username),

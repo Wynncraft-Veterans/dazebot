@@ -292,8 +292,8 @@ class HiatusReturnNotice(Model):
       them. NULL means never sent, which passes the gate trivially -- a
       first-ever spot is exactly the case the feature exists for.
     * ``muted`` -- set by the DM's "Don't message me again" button. Nothing
-      in the automated path ever clears it; only ``/alerts return_dm_unmute``
-      does.
+      in the automated path ever clears it, and it survives a rejoin /
+      re-kick cycle; only ``/alerts return_dm_clear`` lifts it.
     * ``snooze_armed`` / ``snoozed_at`` -- set by the "Remind me next time I
       log in" button. A one-shot bypass of the ``last_sent_at`` comparison,
       consumed on the next send. It does *not* bypass the login-edge

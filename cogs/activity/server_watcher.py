@@ -227,6 +227,11 @@ class ServerWatcher(commands.Cog):
         # consults it — the channel alert's behaviour is unchanged.
         gap = timedelta(minutes=float(self.bot.config.HIATUS_RETURN_DM_LOGOUT_GAP_MINUTES))
         login_edge = account.online_seen_at is None or (now - account.online_seen_at) > gap
+        # Same reason, second value: all three branches below bump
+        # ``last_online`` to now (or to a fresh lastJoin) before reaching the
+        # alert path, so the DM's "were they actually away?" gate would only
+        # ever see zero. This is the pre-tick reading it needs.
+        prior_last_online = account.last_online
 
         # Stat-delta activity signal: every monotonic counter the envelope
         # carries is positive proof of online play even when the player
@@ -271,7 +276,8 @@ class ServerWatcher(commands.Cog):
             # as a spot. ``maybe_alert_hiatus`` enforces the 24h cooldown.
             if account.uuid in self._hiatus_uuid_set:
                 await maybe_alert_hiatus(
-                    self.bot, account.uuid, server=observed, login_edge=login_edge
+                    self.bot, account.uuid, server=observed,
+                    login_edge=login_edge, away_since=prior_last_online,
                 )
             return
 
@@ -304,7 +310,8 @@ class ServerWatcher(commands.Cog):
             )
             if account.uuid in self._hiatus_uuid_set:
                 await maybe_alert_hiatus(
-                    self.bot, account.uuid, server=observed, login_edge=login_edge
+                    self.bot, account.uuid, server=observed,
+                    login_edge=login_edge, away_since=prior_last_online,
                 )
             return
 
@@ -331,11 +338,17 @@ class ServerWatcher(commands.Cog):
             logger.info(
                 f"{account.mc_username}: stat delta ({deltas}); bumping last_online=now"
             )
-            if account.uuid in self._hiatus_uuid_set:
-                await maybe_alert_hiatus(
-                    self.bot, account.uuid, server=observed, login_edge=login_edge
-                )
+        # Persist before alerting, as branches 1 and 2 already do. The
+        # alert path can now spend several Wynncraft round-trips (the
+        # hiatus-return DM's verify pass), and holding this
+        # read-modify-write open across them races the sibling coroutines
+        # in the same gather and hiatus_watcher's 30s bulk heartbeat write.
         await account.save(update_fields=fields)
+        if stat_signal and account.uuid in self._hiatus_uuid_set:
+            await maybe_alert_hiatus(
+                self.bot, account.uuid, server=observed,
+                login_edge=login_edge, away_since=prior_last_online,
+            )
 
 
 async def setup(bot: Bot):

@@ -23,7 +23,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 import logging
 import re
-from typing import Optional
+from typing import Optional, Sequence
 
 import discord
 from discord.ext import commands
@@ -206,6 +206,72 @@ async def _sync_usernames(
         logger.info("_sync_usernames: %s: %s", mc.uuid, "; ".join(changes))
         await mc.save(update_fields=fields)
     return mc
+
+
+async def live_guilds_for(
+    uuids: "Sequence[str]", *, background: bool = False
+) -> dict[str, str | None] | None:
+    """Batch form of :func:`refresh_mc_guild`: the live guild name for each
+    uuid, or **None** if we could not get a live answer for all of them.
+
+    Two things this exists for, both of which the single-account helper
+    gets wrong when you have a set:
+
+    **Request count.** ``refresh_mc_guild`` re-fetches
+    ``/v3/guild/Returners`` on *every* call, so looping it over N accounts
+    costs 2N requests. This fetches the roster once and resolves everyone
+    on it by set intersection for free, leaving one ``/v3/player`` for the
+    remainder: 1+N. Same shape, and the same reasoning, as the janitor's
+    hiatus sweep (``cogs/maintenance/janitor.py`` reconciler (H)) — see the
+    rate-budget note there. Player calls default to ``background`` so this
+    can be used from opportunistic paths without preempting interactive
+    lookups.
+
+    **Failure is reported, not swallowed.** ``refresh_mc_guild`` is
+    best-effort by contract: on an API failure it returns the account with
+    the stored value untouched, which is indistinguishable from "refreshed,
+    still guildless". That is fine for callers who want to act on stale
+    data rather than not act, and *wrong* for any caller whose whole reason
+    to ask is to avoid acting on a wrong answer. Those callers get a None
+    here and can fail closed.
+
+    Returned names are written back to the rows only by the caller — this
+    function does not save.
+    """
+    uuid_list = list(uuids)
+    if not uuid_list:
+        return {}
+
+    # >>> PATCH BEGIN: WYNN-STALE-WORKAROUND (2026-07-11)
+    # Same reasoning as refresh_mc_guild above: /v3/player/{uuid}.guild runs
+    # ~12h stale for offline players, while the Returners roster IS on the
+    # officer-write invalidation path. So the roster is authoritative for
+    # "in Returners", and a player-endpoint response that still names
+    # Returners after the roster said otherwise is provably stale.
+    try:
+        roster = await get_guild("Returners")
+    except Exception:  # noqa: BLE001 - third-party API
+        logger.warning("live_guilds_for: Returners roster fetch failed for %d uuid(s)", len(uuid_list))
+        return None
+    on_roster = {m.uuid for m in roster.members.all_members()}
+
+    out: dict[str, str | None] = {}
+    for uuid in uuid_list:
+        if uuid in on_roster:
+            out[uuid] = "Returners"
+            continue
+        try:
+            fs = await get_player_stats(uuid, background=background)
+        except Exception:  # noqa: BLE001 - third-party API
+            logger.warning("live_guilds_for: player lookup failed for %s", uuid)
+            return None
+        live = fs.guild.name if fs.guild else None
+        if live == "Returners":
+            # The roster already said no, and it is the fresher source.
+            live = None
+        out[uuid] = live
+    # <<< PATCH END: WYNN-STALE-WORKAROUND
+    return out
 
 
 async def refresh_mc_guild(mc: MinecraftAccount) -> MinecraftAccount:

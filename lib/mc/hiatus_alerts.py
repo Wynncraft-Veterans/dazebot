@@ -88,7 +88,12 @@ async def _post_channel_alert(bot, account: MinecraftAccount, server: str) -> bo
 
 
 async def maybe_alert_hiatus(
-    bot, uuid: str, *, server: str | None = None, login_edge: bool = False
+    bot,
+    uuid: str,
+    *,
+    server: str | None = None,
+    login_edge: bool = False,
+    away_since: datetime | None = None,
 ) -> bool:
     """Run both hiatus sinks for ``uuid``. Returns True if the *channel*
     alert was posted — unchanged from before the DM existed, so the two
@@ -110,6 +115,12 @@ async def maybe_alert_hiatus(
     newly-online diff is empty-initialised on every restart — neither is a
     login, and the DM must not treat them as one.
 
+    ``away_since`` is likewise DM-only: the last time we saw this player
+    online *before* the session that triggered this call. Only the callers
+    that overwrite ``last_online`` on their way in need to pass it —
+    everyone else leaves it None and the stored value is used. See
+    ``lib/mc/hiatus_return_dm._away_since``.
+
     **Guild gate.** HIATUS means "ex-member, currently guildless" (see
     ``../../.claude/role_state.md`` — *in a guild -> never Hiatus*), so an
     account that is in *any* guild is skipped, not just Returners. The
@@ -129,9 +140,15 @@ async def maybe_alert_hiatus(
     used to swallow. That is a strictly better outcome — the heal is the
     thing that stops us polling someone who shouldn't be in scope — but it
     is a real change in when Discord role writes happen.
+
+    Both heal routes therefore run before the channel post: the
+    spotted-account one returns outright, and the DM's ``verify_return_dm``
+    is sequenced ahead of it. A post that asserts someone is on hiatus
+    should never be immediately falsified by this same call.
     """
     from lib.mc.hiatus_return_dm import (  # local: import cycle
         plan_return_dm,
+        release_slot,
         send_return_dm,
         verify_return_dm,
     )
@@ -152,7 +169,9 @@ async def maybe_alert_hiatus(
     # still a zero-request outcome.
     cutoff = datetime.now(timezone.utc) - HIATUS_ALERT_COOLDOWN
     channel_due = not await HiatusSpottedAlert.filter(uuid=uuid, created_at__gte=cutoff).exists()
-    dm_plan = await plan_return_dm(bot, account, login_edge=login_edge)
+    dm_plan = await plan_return_dm(
+        bot, account, login_edge=login_edge, away_since=away_since
+    )
     if not channel_due and dm_plan is None:
         return False
 
@@ -167,20 +186,34 @@ async def maybe_alert_hiatus(
         await heal_stale_hiatus(bot, account)
         return False
 
-    posted = False
-    if channel_due:
-        posted = await _post_channel_alert(bot, account, server or account.last_seen_server or "?")
-
+    # The DM's live second pass runs BEFORE the channel post, not after.
+    # It can heal a stale HIATUS off one of the person's other accounts,
+    # exactly as the spotted-account crosscheck above does — and that
+    # branch returns before posting. If verify ran later, staff could read
+    # "Hiatus user X is currently online" a second before the same
+    # detection healed X out of HIATUS, and have no way to reconcile the
+    # post against the member's roles.
+    send_dm = False
     if dm_plan is not None:
         # A failure here must not take the channel alert down with it —
         # the staff-facing signal is the one that has to be reliable.
         try:
-            # Second, live pass: the plan was built on stored data, and for
-            # this cohort the stored `guild` of the person's *other*
-            # accounts is exactly what goes stale. See verify_return_dm.
-            if await verify_return_dm(bot, account, dm_plan):
-                await send_return_dm(bot, account, dm_plan)
+            send_dm = await verify_return_dm(bot, account, dm_plan)
         except Exception:  # noqa: BLE001 — Discord + DB, best-effort by contract
+            release_slot(dm_plan)
+            logger.exception(
+                "hiatus-return DM verify failed for %s (%s)", account.mc_username, uuid
+            )
+
+    posted = False
+    if channel_due:
+        posted = await _post_channel_alert(bot, account, server or account.last_seen_server or "?")
+
+    if send_dm:
+        try:
+            await send_return_dm(bot, account, dm_plan)
+        except Exception:  # noqa: BLE001 — Discord + DB, best-effort by contract
+            release_slot(dm_plan)
             logger.exception("hiatus-return DM failed for %s (%s)", account.mc_username, uuid)
 
     return posted

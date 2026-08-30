@@ -50,6 +50,18 @@ class Config:
     # makes the snooze button mean "next time you log in" instead of "in six
     # hours whether or not you ever left".
     HIATUS_RETURN_DM_LOGOUT_GAP_MINUTES = 10.0
+    # How long someone must have been away before the "welcome back" DM is
+    # true enough to send. The copy asserts they dropped off the roster and
+    # suggests an inactivity prune, so it should not reach someone who was
+    # gone two days.
+    #
+    # 9 to match `/purgelist`'s default window, which is the criterion staff
+    # actually kick on -- a DM about being pruned should use the same
+    # threshold the pruning decision used. The two are separate constants
+    # (purgelist's is a command-parameter default, which cannot read a
+    # runtime override without changing the command's signature), so if you
+    # retune one, retune the other.
+    HIATUS_RETURN_DM_MIN_AWAY_DAYS = 9.0
     # Channel the DM's third button links to ("Say hi in #guild-general").
     GUILD_GENERAL_CHANNEL = 1313769181321236493
 

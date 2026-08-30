@@ -19,7 +19,7 @@ from discord.ext import commands
 from bot import Bot
 from config import CurrConfig
 from lib import runtime_config
-from lib.auth import is_admin
+from lib.auth import is_admin, is_staff
 from orm import HiatusReturnNotice
 
 
@@ -32,7 +32,31 @@ _ALERTS_MUTE_SECONDS = 10 * 365 * 24 * 3600
 
 
 class RuntimeConfigCog(commands.Cog):
-    """Admin commands to view/modify runtime config and guild alerts."""
+    """Staff/admin commands to view/modify runtime config and guild alerts.
+
+    ``/alerts`` is **STAFF**: muting a noisy alert is routine duty work,
+    and gating it on the Discord Administrator permission meant the people
+    actually watching the alert channel couldn't act on it. ``/config``
+    stays **ADMIN** — it can set any key on ``Config``, which is a strictly
+    larger surface than silencing one alert, and includes the same alert
+    keys by name for anyone who needs them.
+
+    **Every subcommand carries its own check, and that is not redundant
+    with the one on the group.** Group checks do not reach subcommands in
+    discord.py: ``HybridGroup`` sets ``invoke_without_command = True``
+    unconditionally, so on the text path the group's ``prepare()`` — and
+    therefore its checks — never runs before dispatching to the child; and
+    on the slash path ``HybridAppCommand`` evaluates only the
+    *subcommand's* own checks plus the parent's ``interaction_check``,
+    which here is the inherited default returning True.
+    ``Command.can_run`` never walks parents.
+
+    Decorating only the group leaves every subcommand open to **any user**
+    — which is what this cog did until 2026-08-30, while
+    ``COMMAND-PERMISSIONS.md`` documented the whole surface as ADMIN. Any
+    new subcommand added here needs its own decorator; there is no
+    inheritance to fall back on.
+    """
 
     bot: Bot
 
@@ -51,6 +75,7 @@ class RuntimeConfigCog(commands.Cog):
             )
 
     @config_group.command(name="list")
+    @is_admin()
     async def config_list(self, ctx: commands.Context):
         keys = runtime_config.list_keys()
         chunks: list[str] = []
@@ -74,6 +99,7 @@ class RuntimeConfigCog(commands.Cog):
             await ctx.send(c)
 
     @config_group.command(name="get")
+    @is_admin()
     async def config_get(self, ctx: commands.Context, key: str):
         if not hasattr(CurrConfig, key):
             await ctx.reply(f"Unknown key: `{key}`.")
@@ -86,6 +112,7 @@ class RuntimeConfigCog(commands.Cog):
         await ctx.reply(f"`{key}` = `{v}`")
 
     @config_group.command(name="set")
+    @is_admin()
     async def config_set(self, ctx: commands.Context, key: str, value: str):
         try:
             new = await runtime_config.set_override(key, value)
@@ -95,6 +122,7 @@ class RuntimeConfigCog(commands.Cog):
         await ctx.reply(f"✅ `{key}` = `{new}` (persisted)")
 
     @config_group.command(name="reset")
+    @is_admin()
     async def config_reset(self, ctx: commands.Context, key: str):
         await runtime_config.clear_override(key)
         await ctx.reply(
@@ -103,8 +131,8 @@ class RuntimeConfigCog(commands.Cog):
 
     # ---------- /alerts (shortcuts on top of /config for the guild dead/full alerts) ----------
 
-    @commands.hybrid_group(name="alerts", description="(Admin) Mute / unmute / tune guild dead+full+hiatus alerts.")
-    @is_admin()
+    @commands.hybrid_group(name="alerts", description="(Staff) Mute / unmute / tune guild dead+full+hiatus alerts.")
+    @is_staff()
     async def alerts_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
             await ctx.reply(
@@ -118,6 +146,7 @@ class RuntimeConfigCog(commands.Cog):
         name="status",
         description="Show current dead/full alert thresholds, throttle deltas, and hiatus alert state.",
     )
+    @is_staff()
     async def alerts_status(self, ctx: commands.Context):
         dead_when = runtime_config.get_value("GUILD_DEAD_WHEN")
         full_slots_remaining = runtime_config.get_value("GUILD_FULL_SLOTS_REMAINING")
@@ -147,6 +176,7 @@ class RuntimeConfigCog(commands.Cog):
         description="Silence dead+full guild alerts (default: ~forever).",
     )
     @app_commands.describe(duration_hours="How long to mute, in hours. Omit for ~forever.")
+    @is_staff()
     async def alerts_mute(self, ctx: commands.Context, duration_hours: Optional[float] = None):
         seconds = int(duration_hours * 3600) if duration_hours else _ALERTS_MUTE_SECONDS
         try:
@@ -162,6 +192,7 @@ class RuntimeConfigCog(commands.Cog):
         name="unmute",
         description="Restore the compiled default throttle for dead+full alerts.",
     )
+    @is_staff()
     async def alerts_unmute(self, ctx: commands.Context):
         await runtime_config.clear_override("GUILD_DEAD_ALERT_DELTA")
         await runtime_config.clear_override("GUILD_FULL_ALERT_DELTA")
@@ -175,6 +206,7 @@ class RuntimeConfigCog(commands.Cog):
         name="hiatus_mute",
         description="Silence hiatus-spotted alerts + the return DM (stops the bulk /v3/player poll too).",
     )
+    @is_staff()
     async def alerts_hiatus_mute(self, ctx: commands.Context):
         try:
             await runtime_config.set_override("HIATUS_ALERTS_ENABLED", "false")
@@ -193,6 +225,7 @@ class RuntimeConfigCog(commands.Cog):
         name="hiatus_unmute",
         description="Re-enable hiatus-spotted alerts.",
     )
+    @is_staff()
     async def alerts_hiatus_unmute(self, ctx: commands.Context):
         try:
             await runtime_config.set_override("HIATUS_ALERTS_ENABLED", "true")
@@ -205,22 +238,12 @@ class RuntimeConfigCog(commands.Cog):
         )
 
     # ---------- /alerts return_dm_* ----------
-    #
-    # NOTE: @is_admin() is repeated on every subcommand deliberately. It is
-    # NOT inherited from ``alerts_group``. HybridGroup sets
-    # ``invoke_without_command = True`` unconditionally, so on the text path
-    # the group's ``prepare()`` -- and therefore its checks -- never runs;
-    # and on the slash path HybridAppCommand evaluates only the
-    # *subcommand's* own checks plus the parent's ``interaction_check``,
-    # which is the inherited default returning True. Decorating the group
-    # alone leaves these open to anyone. (The pre-existing subcommands in
-    # this file have the same hole; fixing those is a separate change.)
 
     @alerts_group.command(
         name="return_dm_on",
         description="Start DMing spotted hiatus users the 'welcome back' message.",
     )
-    @is_admin()
+    @is_staff()
     async def alerts_return_dm_on(self, ctx: commands.Context):
         try:
             await runtime_config.set_override("HIATUS_RETURN_DM_ENABLED", "true")
@@ -238,7 +261,7 @@ class RuntimeConfigCog(commands.Cog):
         name="return_dm_off",
         description="Stop the hiatus-return DM (leaves the #activity alert running).",
     )
-    @is_admin()
+    @is_staff()
     async def alerts_return_dm_off(self, ctx: commands.Context):
         try:
             await runtime_config.set_override("HIATUS_RETURN_DM_ENABLED", "false")
@@ -255,7 +278,7 @@ class RuntimeConfigCog(commands.Cog):
         description="Show a user's hiatus-return DM state (muted / snoozed / last sent).",
     )
     @app_commands.describe(user="The Discord user to inspect.")
-    @is_admin()
+    @is_staff()
     async def alerts_return_dm_check(self, ctx: commands.Context, user: discord.User):
         row = await HiatusReturnNotice.filter(disc_uuid=str(user.id)).first()
         if row is None:
@@ -280,7 +303,7 @@ class RuntimeConfigCog(commands.Cog):
         description="Lift a user's hiatus-return DM mute/snooze (keeps their last-sent stamp).",
     )
     @app_commands.describe(user="The Discord user to un-mute.")
-    @is_admin()
+    @is_staff()
     async def alerts_return_dm_clear(self, ctx: commands.Context, user: discord.User):
         row = await HiatusReturnNotice.filter(disc_uuid=str(user.id)).first()
         if row is None:
@@ -311,6 +334,7 @@ class RuntimeConfigCog(commands.Cog):
         dead_when="Online-player count at or below which the dead alert fires.",
         full_slots_remaining="Open-slot count at or below which the full alert fires. Cap is derived per-tick from guild level.",
     )
+    @is_staff()
     async def alerts_thresholds(
         self,
         ctx: commands.Context,

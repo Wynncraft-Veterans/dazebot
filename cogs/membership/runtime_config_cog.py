@@ -12,6 +12,7 @@ from datetime import timedelta
 import logging
 from typing import Optional
 
+import discord
 from discord import app_commands
 from discord.ext import commands
 
@@ -19,6 +20,7 @@ from bot import Bot
 from config import CurrConfig
 from lib import runtime_config
 from lib.auth import is_admin
+from orm import HiatusReturnNotice
 
 
 logger = logging.getLogger("dazebot.cogs.membership.runtime_config_cog")
@@ -108,7 +110,8 @@ class RuntimeConfigCog(commands.Cog):
             await ctx.reply(
                 "Use `/alerts status`, `/alerts mute [duration_hours]`, `/alerts unmute`, "
                 "`/alerts thresholds <dead_when> <full_when>`, "
-                "`/alerts hiatus_mute`, `/alerts hiatus_unmute`."
+                "`/alerts hiatus_mute`, `/alerts hiatus_unmute`, "
+                "`/alerts return_dm_on|return_dm_off|return_dm_check|return_dm_clear`."
             )
 
     @alerts_group.command(
@@ -121,6 +124,7 @@ class RuntimeConfigCog(commands.Cog):
         dead_delta = runtime_config.get_value("GUILD_DEAD_ALERT_DELTA")
         full_delta = runtime_config.get_value("GUILD_FULL_ALERT_DELTA")
         hiatus_enabled = runtime_config.get_value("HIATUS_ALERTS_ENABLED")
+        dm_enabled = runtime_config.get_value("HIATUS_RETURN_DM_ENABLED")
 
         def _muted(delta: timedelta) -> str:
             return " ⛔ muted" if delta.total_seconds() >= 365 * 24 * 3600 else ""
@@ -132,7 +136,10 @@ class RuntimeConfigCog(commands.Cog):
             f"throttled `{dead_delta}`{_muted(dead_delta)}\n"
             f"• Full alert: fires when ≤ `{full_slots_remaining}` slot(s) remain "
             f"(cap derived from guild level), throttled `{full_delta}`{_muted(full_delta)}\n"
-            f"• Hiatus-spotted alert: {hiatus_state} (24h per-user cooldown)"
+            f"• Hiatus-spotted alert: {hiatus_state} (24h per-user cooldown)\n"
+            f"• Hiatus-return DM: {'🔊 enabled' if dm_enabled else '🔇 off'} "
+            f"(≤{runtime_config.get_value('HIATUS_RETURN_DM_MAX_PER_HOUR')}/h fleet-wide, "
+            f"≥{runtime_config.get_value('HIATUS_RETURN_DM_MIN_GAP_HOURS')}h per user)"
         )
 
     @alerts_group.command(
@@ -166,7 +173,7 @@ class RuntimeConfigCog(commands.Cog):
 
     @alerts_group.command(
         name="hiatus_mute",
-        description="Silence hiatus-spotted alerts (stops the bulk /v3/player poll too).",
+        description="Silence hiatus-spotted alerts + the return DM (stops the bulk /v3/player poll too).",
     )
     async def alerts_hiatus_mute(self, ctx: commands.Context):
         try:
@@ -177,7 +184,9 @@ class RuntimeConfigCog(commands.Cog):
         await ctx.reply(
             "🔇 Muted hiatus-spotted alerts. The bulk-endpoint poll is suspended; "
             "the server_watcher HIATUS scope continues writing activity data but "
-            "won't post alerts. Use `/alerts hiatus_unmute` to restore."
+            "won't post alerts. This also silences the hiatus-return DM, which runs "
+            "off the same detections — `/alerts return_dm_off` silences just the DM. "
+            "Use `/alerts hiatus_unmute` to restore."
         )
 
     @alerts_group.command(
@@ -190,7 +199,109 @@ class RuntimeConfigCog(commands.Cog):
         except (KeyError, PermissionError, ValueError) as e:
             await ctx.reply(f"❌ {e}")
             return
-        await ctx.reply("🔊 Re-enabled hiatus-spotted alerts.")
+        await ctx.reply(
+            "🔊 Re-enabled hiatus-spotted alerts. The hiatus-return DM resumes too "
+            "if `HIATUS_RETURN_DM_ENABLED` is on — check with `/alerts status`."
+        )
+
+    # ---------- /alerts return_dm_* ----------
+    #
+    # NOTE: @is_admin() is repeated on every subcommand deliberately. It is
+    # NOT inherited from ``alerts_group``. HybridGroup sets
+    # ``invoke_without_command = True`` unconditionally, so on the text path
+    # the group's ``prepare()`` -- and therefore its checks -- never runs;
+    # and on the slash path HybridAppCommand evaluates only the
+    # *subcommand's* own checks plus the parent's ``interaction_check``,
+    # which is the inherited default returning True. Decorating the group
+    # alone leaves these open to anyone. (The pre-existing subcommands in
+    # this file have the same hole; fixing those is a separate change.)
+
+    @alerts_group.command(
+        name="return_dm_on",
+        description="Start DMing spotted hiatus users the 'welcome back' message.",
+    )
+    @is_admin()
+    async def alerts_return_dm_on(self, ctx: commands.Context):
+        try:
+            await runtime_config.set_override("HIATUS_RETURN_DM_ENABLED", "true")
+        except (KeyError, PermissionError, ValueError) as e:
+            await ctx.reply(f"❌ {e}")
+            return
+        await ctx.reply(
+            "🔊 Hiatus-return DMs enabled. Sends are capped at "
+            f"`{runtime_config.get_value('HIATUS_RETURN_DM_MAX_PER_HOUR')}`/hour fleet-wide "
+            f"and `{runtime_config.get_value('HIATUS_RETURN_DM_MIN_GAP_HOURS')}`h per user, "
+            "and only fire on a genuine login. `/alerts return_dm_off` to stop."
+        )
+
+    @alerts_group.command(
+        name="return_dm_off",
+        description="Stop the hiatus-return DM (leaves the #activity alert running).",
+    )
+    @is_admin()
+    async def alerts_return_dm_off(self, ctx: commands.Context):
+        try:
+            await runtime_config.set_override("HIATUS_RETURN_DM_ENABLED", "false")
+        except (KeyError, PermissionError, ValueError) as e:
+            await ctx.reply(f"❌ {e}")
+            return
+        await ctx.reply(
+            "🔇 Hiatus-return DMs off. The `#activity` hiatus-spotted post is "
+            "unaffected — use `/alerts hiatus_mute` to silence that too."
+        )
+
+    @alerts_group.command(
+        name="return_dm_check",
+        description="Show a user's hiatus-return DM state (muted / snoozed / last sent).",
+    )
+    @app_commands.describe(user="The Discord user to inspect.")
+    @is_admin()
+    async def alerts_return_dm_check(self, ctx: commands.Context, user: discord.User):
+        row = await HiatusReturnNotice.filter(disc_uuid=str(user.id)).first()
+        if row is None:
+            await ctx.reply(
+                f"<@{user.id}> has no hiatus-return DM record — they've never been sent "
+                "one, and haven't muted or snoozed it.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        last = f"<t:{int(row.last_sent_at.timestamp())}:R>" if row.last_sent_at else "never"
+        snoozed = f"<t:{int(row.snoozed_at.timestamp())}:R>" if row.snoozed_at else "—"
+        await ctx.reply(
+            f"**Hiatus-return DM — <@{user.id}>**\n"
+            f"• Muted: {'🔕 yes' if row.muted else 'no'}\n"
+            f"• Snooze armed: {'⏰ yes' if row.snooze_armed else 'no'} (set {snoozed})\n"
+            f"• Last sent: {last}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @alerts_group.command(
+        name="return_dm_clear",
+        description="Lift a user's hiatus-return DM mute/snooze (keeps their last-sent stamp).",
+    )
+    @app_commands.describe(user="The Discord user to un-mute.")
+    @is_admin()
+    async def alerts_return_dm_clear(self, ctx: commands.Context, user: discord.User):
+        row = await HiatusReturnNotice.filter(disc_uuid=str(user.id)).first()
+        if row is None:
+            await ctx.reply(
+                f"<@{user.id}> has no hiatus-return DM record — nothing to clear.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        # Deliberately keeps ``last_sent_at``. Deleting the row would drop
+        # them back into the never-DMed-before branch, which bypasses the
+        # rejoin gate entirely and re-sends on their next login -- the exact
+        # thing they pressed mute to stop.
+        row.muted = False
+        row.snooze_armed = False
+        row.snoozed_at = None
+        await row.save(update_fields=["muted", "snooze_armed", "snoozed_at"])
+        await ctx.reply(
+            f"✅ Cleared the hiatus-return DM mute/snooze for <@{user.id}>. They're "
+            "eligible again once they rejoin VETS and drop off the roster after that.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @alerts_group.command(
         name="thresholds",

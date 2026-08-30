@@ -14,6 +14,45 @@ class Config:
     # alert post is suppressed. Toggle via /alerts hiatus_mute / hiatus_unmute.
     HIATUS_ALERTS_ENABLED = True
 
+    # --- "Welcome back from your hiatus" DM (lib/mc/hiatus_return_dm.py) ---
+    # Master switch for the DM a spotted HIATUS user receives. The #activity
+    # channel post is governed separately by HIATUS_ALERTS_ENABLED above --
+    # the two sinks are deliberately independent so staff can silence the
+    # outbound DM without going dark on the internal alert.
+    #
+    # Ships OFF, and that is not timidity. First deploy is the one moment
+    # when *every* hiatus_return_notices row is missing, i.e. when every
+    # spotted user takes the never-DMed-before branch at once; and
+    # hiatus_watcher's ``_prev_online`` is empty on every start, so the
+    # first tick after any restart hands the entire online HIATUS cohort to
+    # that branch in one loop. Bulk-opening DM channels to users who have
+    # never messaged the bot is also the classic way to get an application
+    # flagged. Turn on with `/alerts return_dm_on` once the channel alert is
+    # confirmed unchanged and last_in_returners_at has backfilled (one
+    # check_guild tick).
+    HIATUS_RETURN_DM_ENABLED = False
+    # Fleet-wide ceiling. Per-user gating cannot bound the *aggregate* send
+    # rate -- 100 different users spotted in one tick are 100 first-ever
+    # sends, each individually legitimate. Overflow is not lost: the
+    # recipient is still online, so a later tick picks them up.
+    HIATUS_RETURN_DM_MAX_PER_HOUR = 8
+    # Floor on how often any one user can receive the DM, whichever gate let
+    # it through (a snooze included). Backstop, not the primary defence --
+    # the login-edge requirement below is that -- but it is what turns a
+    # mis-read login into a no-op rather than a loop.
+    HIATUS_RETURN_DM_MIN_GAP_HOURS = 6.0
+    # How long a hole in our online observations has to be before the next
+    # sighting counts as a fresh *login* rather than a continuation of the
+    # session we were already watching. hiatus_watcher polls every 30s and
+    # server_watcher every 2 min, so a gap this size cannot be produced by
+    # normal polling -- only by the player actually being gone (or by us
+    # being down, which is the restart case this also absorbs). This is what
+    # makes the snooze button mean "next time you log in" instead of "in six
+    # hours whether or not you ever left".
+    HIATUS_RETURN_DM_LOGOUT_GAP_MINUTES = 10.0
+    # Channel the DM's third button links to ("Say hi in #guild-general").
+    GUILD_GENERAL_CHANNEL = 1313769181321236493
+
     # --- VETS membership-state roles (see .claude/membership_spec.md §6) ---
     ROLE_REGISTERED = 1407078577450520637  # Never been a vets member
     ROLE_HIATUS = 1407078148440592444  # Was in vets, currently guildless
@@ -186,6 +225,7 @@ class DevConfig(Config):
     HIATUS_SPOTTED_ALERT_CHANNEL = 1407388410393399494  # general (never post into prod from dev)
     LINK_FALLBACK_CHANNEL = 1407388410393399494  # general
     JANITOR_ALERT_CHANNEL = 1407388410393399494  # general (never post into prod from dev)
+    GUILD_GENERAL_CHANNEL = 1407388410393399494  # general (dev guild has no #guild-general)
     GUILD_FULL_ALERT_ROLE = 1409300773439012874  # @aaaaa
     GUILD_DEAD_WHEN = 10
     # n is huge so threshold = max-n <= 0; the test guild always triggers the full-alert path.

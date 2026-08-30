@@ -217,6 +217,17 @@ class ServerWatcher(commands.Cog):
         observed = player.server
         now = datetime.now(timezone.utc)
 
+        # Prior online heartbeat, read before any branch below overwrites it.
+        # A hole longer than the logout gap is the only evidence we get that
+        # a privacy-hidden player actually logged out and back in: all three
+        # activity branches below re-enter ``maybe_alert_hiatus`` repeatedly
+        # during one continuous session (the stat-delta one on essentially
+        # every tick of active play), so without this the "welcome back" DM
+        # would read a play session as a stream of logins. Only the DM sink
+        # consults it — the channel alert's behaviour is unchanged.
+        gap = timedelta(minutes=float(self.bot.config.HIATUS_RETURN_DM_LOGOUT_GAP_MINUTES))
+        login_edge = account.online_seen_at is None or (now - account.online_seen_at) > gap
+
         # Stat-delta activity signal: every monotonic counter the envelope
         # carries is positive proof of online play even when the player
         # keeps logging into the same world (no server transition for the
@@ -243,12 +254,13 @@ class ServerWatcher(commands.Cog):
         # without needing to wait for a server transition. Same monotonic
         # discipline as ``lib/mc/wynn.py``: never roll back.
         if player.lastJoin is not None:
-            fields = ["last_seen_server", "server_observed_at"] + stat_fields
+            fields = ["last_seen_server", "server_observed_at", "online_seen_at"] + stat_fields
             if is_last_online_unknown(account.last_online) or account.last_online < player.lastJoin:
                 account.last_online = player.lastJoin
                 fields.append("last_online")
             account.last_seen_server = observed
             account.server_observed_at = now
+            account.online_seen_at = now
             await account.save(update_fields=fields)
             logger.info(
                 f"{account.mc_username}: un-hid lastJoin ({player.lastJoin.isoformat()}); "
@@ -258,7 +270,9 @@ class ServerWatcher(commands.Cog):
             # definition, observably online (or has been recently). Treat
             # as a spot. ``maybe_alert_hiatus`` enforces the 24h cooldown.
             if account.uuid in self._hiatus_uuid_set:
-                await maybe_alert_hiatus(self.bot, account.uuid, server=observed)
+                await maybe_alert_hiatus(
+                    self.bot, account.uuid, server=observed, login_edge=login_edge
+                )
             return
 
         prev_server = account.last_seen_server
@@ -279,13 +293,19 @@ class ServerWatcher(commands.Cog):
             account.last_online = now
             account.last_seen_server = observed
             account.server_observed_at = now
-            await account.save(update_fields=["last_online", "last_seen_server", "server_observed_at"] + stat_fields)
+            account.online_seen_at = now
+            await account.save(
+                update_fields=["last_online", "last_seen_server", "server_observed_at", "online_seen_at"]
+                + stat_fields
+            )
             logger.info(
                 f"{account.mc_username}: server {prev_server!r} -> {observed!r}; "
                 "bumping last_online=now"
             )
             if account.uuid in self._hiatus_uuid_set:
-                await maybe_alert_hiatus(self.bot, account.uuid, server=observed)
+                await maybe_alert_hiatus(
+                    self.bot, account.uuid, server=observed, login_edge=login_edge
+                )
             return
 
         # No actionable change in the server field. Touch the observation
@@ -298,7 +318,8 @@ class ServerWatcher(commands.Cog):
         account.server_observed_at = now
         if stat_signal:
             account.last_online = now
-            fields.append("last_online")
+            account.online_seen_at = now
+            fields.extend(("last_online", "online_seen_at"))
             # Surface which counter(s) tripped the signal — useful when
             # diagnosing why someone exited the Unknown bucket and which
             # privacy-toggle subsets remain useful for which players.
@@ -311,7 +332,9 @@ class ServerWatcher(commands.Cog):
                 f"{account.mc_username}: stat delta ({deltas}); bumping last_online=now"
             )
             if account.uuid in self._hiatus_uuid_set:
-                await maybe_alert_hiatus(self.bot, account.uuid, server=observed)
+                await maybe_alert_hiatus(
+                    self.bot, account.uuid, server=observed, login_edge=login_edge
+                )
         await account.save(update_fields=fields)
 
 

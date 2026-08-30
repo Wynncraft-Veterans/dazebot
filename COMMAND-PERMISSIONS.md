@@ -81,6 +81,9 @@ Special, non-hierarchical:
 | `/waitlist leave` | PUBLIC | Self-remove (former `/leave_waitlist`) |
 | `/config list \| get \| set \| reset` | ADMIN | Runtime-config overrides |
 | `/alerts status \| mute \| unmute \| thresholds` | ADMIN | Shortcut wrappers around `/config` for guild dead/full alerts |
+| `/alerts hiatus_mute \| hiatus_unmute` | ADMIN | Master switch for hiatus-spotted detection — silences the `#activity` post **and** the return DM, and suspends the bulk `/v3/player` poll |
+| `/alerts return_dm_on \| return_dm_off` | ADMIN | Just the "welcome back from your hiatus" DM; leaves the `#activity` post running |
+| `/alerts return_dm_check \| return_dm_clear <user>` | ADMIN | Inspect / lift one user's return-DM mute or snooze |
 
 ### Activity / shouts — `cogs/activity/activity.py`
 

@@ -135,6 +135,38 @@ class MinecraftAccount(Model):
     # SQL WHERE clauses, only read them per-tick in Python.
     last_stat_snapshot: dict | None = fields.JSONField(null=True, default=None)  # type: ignore
     first_join: datetime | None = fields.DatetimeField(use_tz=True, null=True)  # type: ignore
+    # Most recent tick on which we observed this account on the *Returners*
+    # roster. Written by ``cogs/activity/activity.py::_apply_guild`` (which
+    # sees every roster member every 2 min) and, for the paths that discover
+    # a rejoin out-of-band, by ``lib/role_state.fire_trigger_for_mc_uuids``
+    # on JOINED_VETS.
+    #
+    # Exists solely to answer "has this person been back in vets since we
+    # last DMed them?" for the hiatus-return DM gate in
+    # ``lib/mc/hiatus_return_dm.py``. It has to be an *observation*
+    # timestamp rather than a JOINED_VETS event log because the event has
+    # three separate firing sites and a missed one would silently suppress
+    # the DM forever; being on the roster is a superset of having joined it.
+    # NULL = never seen in Returners since this column was added (which is
+    # every pre-existing row -- the DM gate treats NULL as "no evidence",
+    # not as "definitely never").
+    last_in_returners_at: datetime | None = fields.DatetimeField(use_tz=True, null=True, default=None)  # type: ignore
+    # Most recent tick at which we had positive evidence this account was
+    # *online*, written by both hiatus watchers: ``hiatus_watcher`` bulk-
+    # stamps everyone in the 30s bulk-endpoint response, and
+    # ``server_watcher`` stamps the privacy-hidden accounts whose activity
+    # it infers from a server hop / stat delta / un-hidden lastJoin.
+    #
+    # Distinct from ``last_online``, which is a claim about the *player*
+    # sourced from Wynncraft's ``lastJoin`` and is deliberately monotonic
+    # (never rolled back) and epoch-sentinelled when hidden. This column is
+    # a claim about *our observations* and exists for one purpose: a hole in
+    # it that is longer than ``HIATUS_RETURN_DM_LOGOUT_GAP_MINUTES`` is the
+    # only evidence we have that a player logged out and back in, which is
+    # what the hiatus-return DM's snooze button promises. Persisted rather
+    # than in-memory precisely so a bot restart cannot manufacture a fake
+    # login edge for every player who was already online.
+    online_seen_at: datetime | None = fields.DatetimeField(use_tz=True, null=True, default=None)  # type: ignore
     token: Optional[str] = fields.CharField(max_length=6, null=True, default=None)  # type: ignore
     is_honourary = fields.BooleanField(default=False)
 
@@ -240,6 +272,47 @@ class HiatusSpottedAlert(Model):
 
     class Meta:
         table = "hiatus_spotted_alerts"
+
+
+class HiatusReturnNotice(Model):
+    """Per-Discord-user state for the "welcome back from your hiatus" DM
+    sent by ``lib/mc/hiatus_return_dm.py``.
+
+    Keyed by Discord user, not Minecraft UUID: the DM lands in a person's
+    DMs, and a person may have several linked MC accounts (``MinecraftAlt``).
+    Keying by UUID would DM the same human once per alt.
+
+    One row per user, created lazily on the first send (or the first button
+    click). The three fields drive the three gates:
+
+    * ``last_sent_at`` -- the "since the last time this message was sent
+      out" half of the repeat gate. Compared against
+      ``MinecraftAccount.last_in_returners_at``: we only re-send once the
+      person has actually been back in the guild since we last wrote to
+      them. NULL means never sent, which passes the gate trivially -- a
+      first-ever spot is exactly the case the feature exists for.
+    * ``muted`` -- set by the DM's "Don't message me again" button. Nothing
+      in the automated path ever clears it; only ``/alerts return_dm_unmute``
+      does.
+    * ``snooze_armed`` / ``snoozed_at`` -- set by the "Remind me next time I
+      log in" button. A one-shot bypass of the ``last_sent_at`` comparison,
+      consumed on the next send. It does *not* bypass the login-edge
+      requirement -- that is the whole content of the promise the button
+      makes -- nor ``HIATUS_RETURN_DM_MIN_GAP_HOURS``, measured from
+      ``max(last_sent_at, snoozed_at)`` so that snoozing a four-day-old DM
+      doesn't make the follow-up instantly due.
+    """
+
+    id = fields.UUIDField(pk=True)
+    disc_uuid = fields.CharField(max_length=255, unique=True)
+    last_sent_at: datetime | None = fields.DatetimeField(use_tz=True, null=True, default=None)  # type: ignore
+    muted = fields.BooleanField(default=False)
+    snooze_armed = fields.BooleanField(default=False)
+    snoozed_at: datetime | None = fields.DatetimeField(use_tz=True, null=True, default=None)  # type: ignore
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "hiatus_return_notices"
 
 
 class Shout(Model):

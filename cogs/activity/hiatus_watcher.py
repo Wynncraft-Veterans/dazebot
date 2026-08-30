@@ -41,6 +41,7 @@ need a separate review.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import logging
 
 from discord.ext import commands, tasks
@@ -49,6 +50,7 @@ from bot import Bot
 from lib.mc.hiatus_alerts import maybe_alert_hiatus
 from lib.mc.wynn_api.requestor import Requestor
 from lib.role_state import hiatus_member_uuids
+from orm import MinecraftAccount
 
 logger = logging.getLogger("dazebot.cogs.activity.hiatus_watcher")
 
@@ -102,11 +104,38 @@ class HiatusWatcher(commands.Cog):
         newly_online = online_hiatus - self._prev_online
         self._prev_online = online_hiatus
 
+        # Persist the online heartbeat for the whole cohort, not just the
+        # newly-online slice: one UPDATE, no API spend, and it is what lets
+        # the *next* tick tell a real login from an artefact of our own
+        # state having been reset. Read the prior values first — the write
+        # below destroys exactly the evidence we need.
+        now = datetime.now(timezone.utc)
+        gap = timedelta(minutes=float(self.bot.config.HIATUS_RETURN_DM_LOGOUT_GAP_MINUTES))
+        still_warm: set[str] = set()
+        if newly_online:
+            still_warm = set(
+                await MinecraftAccount.filter(
+                    uuid__in=list(newly_online), online_seen_at__gt=now - gap
+                ).values_list("uuid", flat=True)
+            )
+        if online_hiatus:
+            await MinecraftAccount.filter(uuid__in=list(online_hiatus)).update(online_seen_at=now)
+
         if not newly_online:
             return
         logger.debug(f"newly-online hiatus uuids: {newly_online}")
         for uuid in newly_online:
-            await maybe_alert_hiatus(self.bot, uuid, server=players.get(uuid))
+            # ``newly_online`` is a diff against an in-memory set that is
+            # empty on every start, so after a restart it names everyone who
+            # happens to be online rather than anyone who just logged in.
+            # A persisted observation from inside the logout gap is proof
+            # this is that case: we were watching them a moment ago.
+            await maybe_alert_hiatus(
+                self.bot,
+                uuid,
+                server=players.get(uuid),
+                login_edge=uuid not in still_warm,
+            )
 
     @poll.before_loop
     async def _before_poll(self):

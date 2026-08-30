@@ -9,6 +9,7 @@ States are derived from which of the five state-roles a member currently has.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import enum
 import logging
 from typing import Iterable
@@ -449,7 +450,24 @@ async def fire_trigger_for_mc_uuids(
     ``compute_transition`` no-ops on states the trigger doesn't apply to,
     so over-broad uuid sets are safe.
     """
-    disc_uuids = await linked_disc_uuids_for_mc(uuids)
+    from orm import MinecraftAccount  # local: orm may import lib
+
+    uuid_list = list(uuids)
+    if trigger is Trigger.JOINED_VETS and uuid_list:
+        # Positive observation that these accounts are in Returners *now*,
+        # recorded for the hiatus-return DM's step-3 gate. Done here rather
+        # than at each of the three JOINED_VETS call sites (activity's join
+        # diff, the janitor's hiatus sweep, hiatus_alerts' stale-HIATUS
+        # heal) because this is the one funnel all three pass through, and
+        # it lands immediately instead of waiting up to 2 min for the next
+        # roster tick to stamp it. Deliberately above the early returns
+        # below: an account with no Discord link yet should still carry the
+        # evidence for whenever it does get linked.
+        await MinecraftAccount.filter(uuid__in=uuid_list).update(
+            last_in_returners_at=datetime.now(timezone.utc)
+        )
+
+    disc_uuids = await linked_disc_uuids_for_mc(uuid_list)
     if not disc_uuids:
         return
     guild = bot.get_guild(bot.config.GUILD)

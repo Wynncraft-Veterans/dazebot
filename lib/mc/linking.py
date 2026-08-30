@@ -346,16 +346,26 @@ async def _enforce_linked_baseline_for(bot: Bot, disc_uuid: str, mc: MinecraftAc
 
 
 async def dm_or_log(
-    user: discord.abc.User, content: str, *, fallback_logger: logging.Logger | None = None
+    user: discord.abc.User,
+    content: str,
+    *,
+    view: discord.ui.View | None = None,
+    fallback_logger: logging.Logger | None = None,
 ) -> bool:
     """Best-effort DM. Returns True on success, False if DMs are closed or any
     other HTTP error occurs. The caller is responsible for surfacing the
     fallback to the user (e.g. ephemeral reply).
+
+    ``view`` attaches message components. Pass a *persistent* view (no
+    timeout, fixed custom_ids) — a DM the bot can't re-fetch on restart has
+    no other way to keep its buttons working.
     """
     log = fallback_logger or logger
     try:
         dm = await user.create_dm()
-        await dm.send(content)
+        # discord.py rejects `view=None` on some paths; only pass it when set.
+        kwargs = {"view": view} if view is not None else {}
+        await dm.send(content, **kwargs)
         return True
     except discord.Forbidden:
         log.info(f"DM blocked: {user} ({user.id}) has DMs closed")

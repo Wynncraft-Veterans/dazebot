@@ -146,6 +146,14 @@ class Activity(commands.Cog):
         # lastJoin is visible, set it when hidden.
         lastjoin_hidden = is_last_online_unknown(api_last_online)
 
+        # Roster-presence stamp for the hiatus-return DM's step-3 gate
+        # ("have they been back in vets since we last DMed them?"). Written
+        # here rather than off the JOINED_VETS trigger because this runs for
+        # every roster member on every tick: it backfills the whole guild on
+        # the first tick after deploy, and it cannot be missed by a trigger
+        # fire-site we forgot about. See orm.MinecraftAccount.
+        in_returners = guild.name == "Returners"
+
         account, created = await MinecraftAccount.get_or_create(
             uuid=member.uuid,
             defaults={
@@ -155,6 +163,7 @@ class Activity(commands.Cog):
                 "last_online": api_last_online,
                 "last_manual_check": UNKNOWN_LAST_ONLINE,
                 "lastjoin_hidden_at": now if lastjoin_hidden else None,
+                "last_in_returners_at": now if in_returners else None,
             },
         )
 
@@ -167,6 +176,9 @@ class Activity(commands.Cog):
             # isn't clobbered by our stale in-memory copy. Only include
             # last_online when we actually mutate it.
             fields = ["guild", "wynn_username", "mc_username"]
+            if in_returners:
+                account.last_in_returners_at = now
+                fields.append("last_in_returners_at")
             if not lastjoin_hidden:
                 if is_last_online_unknown(account.last_online) or account.last_online < api_last_online:
                     account.last_online = api_last_online

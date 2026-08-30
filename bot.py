@@ -67,6 +67,12 @@ class Bot(commands.Bot):
         except Exception as e:
             logger.error(f"Failed to register FirstInstallView: {e}")
         try:
+            from lib.mc.hiatus_return_dm import HiatusReturnView
+
+            self.add_view(HiatusReturnView())
+        except Exception as e:
+            logger.error(f"Failed to register HiatusReturnView: {e}")
+        try:
             from cogs.integrations.vetsmod import VetsmodFallbackView
 
             self.add_view(VetsmodFallbackView())

@@ -235,7 +235,8 @@ class Scripts(commands.Cog):
                 "`~script install_recruitment`, `~script install_recruitment_deercult`, "
                 "`~script extract_anni_timestamps`, "
                 "`~script r81_recover_stuck_picker <team_number> [<line>]`, "
-                "`~script r81_revoke_or_targets [commit=True]`."
+                "`~script r81_revoke_or_targets [commit=True]`, "
+                "`~script retune_alerts`."
             )
 
     @script_group.command(
@@ -1453,6 +1454,113 @@ class Scripts(commands.Cog):
             "r81 revoke or-list: commit=%s applied=%d skipped=%d "
             "affected_subs=%d unique_recipients=%d",
             commit, applied, len(skipped), len(affected), len(revocations),
+        )
+
+    @script_group.command(
+        name="retune_alerts",
+        description="(Operator) One-off: dead alert off, full alert at 1 slot, hiatus alert + return DM on.",
+    )
+    @is_operator()
+    async def script_retune_alerts(self, ctx: commands.Context):
+        """Apply the guild-alert retune of 2026-08-30 in one shot.
+
+        Every individual change here is reachable through ``/alerts`` and
+        ``/config``; this exists so all four land together rather than as a
+        sequence of staff commands, and so the two footguns below are closed
+        in the same pass.
+
+        - **Dead alert off** -- muted through ``GUILD_DEAD_ALERT_DELTA``,
+          the same ~10y throttle ``/alerts mute`` writes, so ``/alerts
+          status`` renders it as muted and ``/alerts unmute`` is the
+          documented way back. ``activity.py`` compares that delta against
+          the newest ``DeadGuildAlert`` row and falls back to the epoch when
+          the table is empty -- which would let exactly one alert through
+          *after* the mute -- so a sentinel row is stamped in that case.
+        - **Full alert at 1 remaining slot** -- ``activity.py`` fires on
+          ``total >= max - GUILD_FULL_SLOTS_REMAINING``, so at a cap of 102
+          the old value of 2 alerted from 100/102. 1 alerts at 101/102 and
+          not before. A stale ``/alerts mute`` on the full throttle is also
+          lifted, since the alert is supposed to be live.
+        - **Hiatus-spotted on** -- its 24h per-user cooldown is
+          ``lib.mc.hiatus_alerts.HIATUS_ALERT_COOLDOWN``, a module constant
+          rather than a ``Config`` key, and is already 24h. Reported, not
+          set; changing it needs a code edit and a deploy.
+        - **Return DM on, with the per-user floor raised 6h -> 72h.**
+
+        Production-shaped. ``DevConfig`` deliberately pins
+        ``GUILD_FULL_SLOTS_REMAINING = 100`` so the dev guild always trips
+        the full-alert path, and this overwrites that.
+        """
+        # The mute constant lives on the cog that owns ``/alerts``; import it
+        # rather than restating the magic number, so a retune of one moves both.
+        from cogs.membership.runtime_config_cog import _ALERTS_MUTE_SECONDS
+        from config import CurrConfig
+        from lib import runtime_config
+        from lib.mc.hiatus_alerts import HIATUS_ALERT_COOLDOWN
+        from orm import DeadGuildAlert
+
+        await ctx.defer(ephemeral=True)
+
+        _MUTED_SECONDS = 365 * 24 * 3600  # what /alerts status calls "muted"
+
+        try:
+            await runtime_config.set_override(
+                "GUILD_DEAD_ALERT_DELTA", str(_ALERTS_MUTE_SECONDS)
+            )
+            await runtime_config.set_override("GUILD_FULL_SLOTS_REMAINING", "1")
+            await runtime_config.set_override("HIATUS_ALERTS_ENABLED", "true")
+            await runtime_config.set_override("HIATUS_RETURN_DM_ENABLED", "true")
+            await runtime_config.set_override("HIATUS_RETURN_DM_MIN_GAP_HOURS", "72")
+        except (KeyError, PermissionError, ValueError) as e:
+            await ctx.reply(f"❌ {e}", ephemeral=True)
+            return
+
+        stamped = False
+        if not await DeadGuildAlert.all().exists():
+            await DeadGuildAlert.create()
+            stamped = True
+
+        unmuted_full = False
+        if runtime_config.get_value("GUILD_FULL_ALERT_DELTA").total_seconds() >= _MUTED_SECONDS:
+            # ``clear_override`` only deletes the persisted row; the muted
+            # value was written onto the ``CurrConfig`` *instance*, which keeps
+            # it until a restart. Dropping the instance attribute uncovers the
+            # compiled class default immediately -- no restart, no override row
+            # shadowing a future retune of that default.
+            await runtime_config.clear_override("GUILD_FULL_ALERT_DELTA")
+            try:
+                delattr(CurrConfig, "GUILD_FULL_ALERT_DELTA")
+            except AttributeError:
+                pass
+            unmuted_full = True
+
+        cooldown_h = HIATUS_ALERT_COOLDOWN.total_seconds() / 3600
+        body = (
+            "✅ **Alert config retuned**\n"
+            f"• Dead alert: 🔇 **off** — throttle `{runtime_config.get_value('GUILD_DEAD_ALERT_DELTA')}`. "
+            "`/alerts unmute` restores it (that clears the full throttle too).\n"
+            + ("  ↳ stamped a `DeadGuildAlert` sentinel row: the table was empty, "
+               "so the throttle would have measured from the epoch and let one "
+               "alert through.\n" if stamped else "")
+            + f"• Full alert: fires at ≤ `{runtime_config.get_value('GUILD_FULL_SLOTS_REMAINING')}` "
+              "remaining slot — 101/102 alerts, 100/102 doesn't. Throttled "
+              f"`{runtime_config.get_value('GUILD_FULL_ALERT_DELTA')}`.\n"
+            + ("  ↳ lifted a pre-existing mute on the full throttle (it was set to ~forever).\n"
+               if unmuted_full else "")
+            + f"• Hiatus-spotted: 🔊 **on**, `{cooldown_h:g}h` per-user cooldown — that one is a "
+              "compile-time constant (`lib/mc/hiatus_alerts.HIATUS_ALERT_COOLDOWN`), already 24h, "
+              "so nothing was written for it.\n"
+            f"• Hiatus-return DM: 🔊 **on**, ≥`{runtime_config.get_value('HIATUS_RETURN_DM_MIN_GAP_HOURS'):g}`h "
+            f"per user, ≤`{runtime_config.get_value('HIATUS_RETURN_DM_MAX_PER_HOUR')}`/h fleet-wide.\n"
+            "  ↳ first enable: every spotted HIATUS user is a never-DMed-before send, so expect the "
+            "hourly cap to be the thing pacing it. `/alerts return_dm_off` stops it.\n"
+            "\nAll five writes are persisted overrides — they survive restarts. `/alerts status` to re-read."
+        )
+        await _reply_maybe_chunked(ctx, body)
+        logger.info(
+            "retune_alerts: dead muted (%ss), full_slots=1, full_unmuted=%s, "
+            "dead_sentinel_stamped=%s, hiatus on, return_dm on @72h",
+            _ALERTS_MUTE_SECONDS, unmuted_full, stamped,
         )
 
 

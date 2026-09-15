@@ -128,6 +128,7 @@ def r90(monkeypatch):
     monkeypatch.setenv("R90_BOT_SECRET", "s")
     monkeypatch.setenv("R90_PUBLIC_BASE_URL", "https://return.wynnvets.org")
     monkeypatch.setattr(w, "_call", fake)
+    monkeypatch.setattr(w, "_body_synced", False)
     w._failures.clear()
     return fake
 
@@ -136,6 +137,7 @@ def r90(monkeypatch):
 def discord_env():
     message = MagicMock()
     message.id = ANNOUNCE_MESSAGE
+    message.content = w._ANNOUNCEMENT_BODY
     message.edit = AsyncMock()
     message.jump_url = "https://discord.com/channels/1/2/3"
 
@@ -206,6 +208,16 @@ async def test_in_sync_does_nothing_and_lost_ack_is_resent(_isolated_db, r90, di
     assert message.edit.await_count == 0
     assert "In sync" in await w._reconcile(bot)
     assert len(r90.paths("/bot/displayed")) == 1
+
+
+async def test_stale_announcement_text_is_edited_once(_isolated_db, r90, discord_env):
+    bot, _, _, message = discord_env
+    await posted()
+    message.content = ""
+    assert "In sync" in await w._reconcile(bot)
+    assert message.edit.await_args_list == [((), {"content": w._ANNOUNCEMENT_BODY})]
+    await w._reconcile(bot)
+    assert message.edit.await_count == 1
 
 
 async def test_notifications_ping_only_the_role_and_are_acked(_isolated_db, r90, discord_env):
@@ -323,7 +335,7 @@ async def test_post_force_keeps_notify_fields(_isolated_db, r90, discord_env):
     r90.epoch = 2
     await MANAGE_REGISTRY[90]["post"].callback(ctx_for(bot), [str(ANNOUNCE_CHANNEL), "--force"])
     assert announce.send.await_count == 2
-    assert announce.send.await_args.args == (None,)          # image only, no text
+    assert announce.send.await_args.args == (w._ANNOUNCEMENT_BODY,)
     post = await Return90Post.get(id=1)
     assert (post.staff_channel_id, post.ping_role_id) == (STAFF_CHANNEL, ROLE)
     assert (post.shown_kind, post.shown_epoch) == ("card", 2)

@@ -54,15 +54,25 @@ WEEK = 90
 # For a fax, r90 then takes it out of the queue so the next one can go up.
 MAX_DISPLAY_FAILURES = 3
 
-# Posted once by `post`, above the card. Deliberately empty: the announcement
-# is just the image, with no explanation. Sent as `None` (not "") so the
-# message has no content at all.
-_ANNOUNCEMENT_BODY: Optional[str] = None
+# Posted by `post`, above the card. Changing it also updates a live
+# announcement: the first reconcile after a restart edits the message's
+# content to match (see :func:`_sync_body`).
+_ANNOUNCEMENT_BODY: Optional[str] = (
+    "# Retirement Home Bulletin\n"
+    "*Anything you send here will be displayed for at least 1h!*\n"
+    "\n"
+    "# `+1 807 500 VETS`\n"
+    "\n"
+    "-# Fax us your best vets memes, stories, art, sketches, and any other silliness!"
+)
 
 _lock = asyncio.Lock()
 _session: aiohttp.ClientSession | None = None
 _failures: dict[tuple, int] = {}
 _last_unreachable_log = 0.0
+# Set once the live message's content is confirmed to match _ANNOUNCEMENT_BODY,
+# so the check costs one message fetch per process, not one per tick.
+_body_synced = False
 
 _ID_RE = re.compile(r"^<?[#@&!]*(\d{15,21})>?$")
 
@@ -310,9 +320,34 @@ async def _reconcile_locked(bot: discord.Client) -> str:
     prefix = f"Delivered {delivered} notification(s). " if delivered else ""
     if not post.message_id:
         return prefix + "No announcement posted yet."
+    if not await _sync_body(bot, post):
+        return prefix + "The announcement message is gone."
     if post.frozen:
         return prefix + "Frozen after a takedown — run `resume` once r90 is back."
     return prefix + await _converge(bot, post, state)
+
+
+async def _sync_body(bot: discord.Client, post: Return90Post) -> bool:
+    """Make the announcement's text match :data:`_ANNOUNCEMENT_BODY`, once per process.
+
+    Only ``content`` is edited, so attachments (and a takedown) are untouched.
+    Returns False if the message is gone. Other failures retry next tick.
+    """
+    global _body_synced
+    if _body_synced:
+        return True
+    try:
+        msg = await _fetch_announcement(bot, post)
+        if (msg.content or None) != _ANNOUNCEMENT_BODY:
+            await msg.edit(content=_ANNOUNCEMENT_BODY)
+    except discord.NotFound:
+        await _message_gone(bot, post)
+        return False
+    except discord.HTTPException as exc:
+        logger.warning("r90 announcement text not updated: %s", exc)
+        return True
+    _body_synced = True
+    return True
 
 
 async def _converge(bot: discord.Client, post: Return90Post, state: dict) -> str:

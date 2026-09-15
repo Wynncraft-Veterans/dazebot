@@ -137,6 +137,14 @@ Special, non-hierarchical:
 | `/return 73` | ROLE-GATED (`1407078065137254563` / `1407078148440592444` / `1407078577450520637`; ADMIN+ bypass) | Collaborative story. No args shows the most recent segment + how to add. |
 | `/return 73 message:<text>` | same role gate | Append the next fragment (capped at 125 chars; any punctuation allowed anywhere; can't have authored either of the last two segments). Awards +1 week-73 `/score`; posts a non-ephemeral "added" message. |
 | `/return 73 action:full` | ADMIN | Dump the entire week-73 story (paginated, ephemeral). |
+| `~manage_return 90 notify <staff_channel_id> <role_id>` | ADMIN | The Bulletin: set where new-fax pings go and which role they ping. Upserts only those two fields. |
+| `~manage_return 90 post <channel_id> [--force]` | OPERATOR | Post the announcement with the card. Refuses unless r90 has the card wanted + current with an empty queue; `--force` replaces an existing announcement pointer (keeps the notify fields). |
+| `~manage_return 90 status` | STAFF | Announcement link, what dazebot is showing, r90 reachability, queue depth, intake state, frozen/ended flags. |
+| `~manage_return 90 sync` | STAFF | Reconcile the announcement with r90 now instead of waiting for the 60 s tick. |
+| `~manage_return 90 takedown` | STAFF | Emergency: retract the fax dazebot is showing, skipping the 1 h hold. If r90 is down, clears the attachments and freezes syncing. |
+| `~manage_return 90 resume [--force]` | STAFF | Unfreeze after an offline takedown. Refuses while r90 still wants the taken-down fax. |
+| `~manage_return 90 pause` / `resume_intake` | STAFF | Pause / resume fax intake in r90 (paused faxes are deleted unread). |
+| `~manage_return 90 end` | OPERATOR | Teardown: the week-90 tick becomes a no-op. |
 
 ## Background / listener-only cogs (no slash surface)
 

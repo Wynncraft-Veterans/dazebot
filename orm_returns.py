@@ -21,6 +21,7 @@ What lives here:
 - ``StorySegment`` (week 73 — collaborative story)
 - ``Return3*`` (week 3 — four-faction territorial conquest: game state,
   tiles, votes, alert subscriptions, dashboard message pointers)
+- ``Return90Post`` (week 90 — the fax bulletin's announcement pointer)
 
 The models intentionally do **not** FK to ``DiscordAccount``: SQLite has
 no cross-database FK enforcement, so the relation would be unenforceable
@@ -350,3 +351,40 @@ class BingoBingoEvent(Model):
     class Meta:
         table = "return_81_bingo_events"
         unique_together = (("team", "line_key"),)
+
+
+# ---------------------------------------------------------------------------
+# Return 90 — The Bulletin
+# ---------------------------------------------------------------------------
+#
+# An announcement whose image is replaced by approved faxes. The faxes, the
+# moderation queue and the display rules all live in the external r90-bulletin
+# app; dazebot only mirrors what that app says should be on the message. So
+# this table holds pointers and flags and never any fax content.
+
+
+class Return90Post(Model):
+    """Singleton (``id`` is always 1): the announcement message and what dazebot
+    last put on it.
+
+    ``shown_*`` is dazebot's own record of the message's attachments, kept
+    separately from r90's idea of "current" because the two diverge exactly
+    when an ack is lost - and ``takedown`` must act on what people can see.
+    ``shown_kind`` is ``card``, ``sub``, or ``cleared`` (attachments removed by
+    a takedown; ``shown_id`` then remembers which fax was taken down).
+    """
+
+    id = fields.IntField(pk=True)
+    channel_id = fields.BigIntField(null=True)
+    message_id = fields.BigIntField(null=True)
+    staff_channel_id = fields.BigIntField(null=True)
+    ping_role_id = fields.BigIntField(null=True)
+    shown_kind = fields.CharField(max_length=16, default="card")
+    shown_id = fields.IntField(null=True)
+    shown_epoch = fields.IntField(default=0)
+    frozen = fields.BooleanField(default=False)
+    ended = fields.BooleanField(default=False)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "return_90_post"

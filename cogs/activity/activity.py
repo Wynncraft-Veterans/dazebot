@@ -531,15 +531,21 @@ class Activity(commands.Cog):
     @commands.check_any(is_staff(), is_shouter(ROLES_ALLOWED_TO_SHOUT))
     async def shout_last(self, ctx: commands.Context):
         shouts = await Shout.all().order_by("-created_at").limit(3).prefetch_related("shouter")
+        now = datetime.now(timezone.utc)
         lines = []
-        for shout in shouts:
-            delta = datetime.now(timezone.utc) - shout.created_at
-            user = await self.bot.fetch_user(int(shout.shouter.disc_uuid))
-            lines.append(
-                f"{user.mention} - {delta.seconds // 3600} hours and {(delta.seconds // 60) % 60} minutes ago"
-            )
+        # Newest three, displayed oldest -> newest.
+        for shout in reversed(shouts):
+            delta = now - shout.created_at
+            # timedelta.seconds is only the sub-day remainder; days live in
+            # .days and must be shown separately.
+            age = f"{delta.seconds // 3600} hours and {(delta.seconds // 60) % 60} minutes ago"
+            if delta.days:
+                age = f"{delta.days} day{'s' if delta.days != 1 else ''}, {age}"
+            lines.append(f"<@{shout.shouter.disc_uuid}> - {age}")
         if lines:
-            await ctx.send("\n".join(lines), silent=True)
+            # silent=True only suppresses the push notification; the mention
+            # itself still pings unless allowed_mentions strips it.
+            await ctx.send("\n".join(lines), silent=True, allowed_mentions=discord.AllowedMentions.none())
         else:
             await ctx.send("There have been no recorded shouts.")
 
@@ -549,8 +555,7 @@ class Activity(commands.Cog):
         shouters = await DiscordAccount.filter(shout_count__gt=0).order_by("-shout_count")
         lines = []
         for shouter in shouters:
-            user = await self.bot.fetch_user(int(shouter.disc_uuid))
-            lines.append(f"{user.mention}: {shouter.shout_count} shouts")
+            lines.append(f"<@{shouter.disc_uuid}>: {shouter.shout_count} shouts")
         if lines:
             embeds = from_lines("Shouterboard", lines, 10, logger)
             await ctx.send(embed=embeds[0], view=Paginator(embeds))

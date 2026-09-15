@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -64,6 +65,8 @@ class FakeR90:
         self.wanted = {"kind": "card", "id": None, "pages": 1, "version": 0}
         self.current = {"kind": "card", "id": None, "pages": 1, "version": 0}
         self.queue_depth = 0
+        self.next_slot_at = 0.0
+        self.intake_paused = False
         self.notifications: list[dict] = []
         self.calls: list[tuple[str, str, dict | None]] = []
         self.down = False
@@ -80,7 +83,9 @@ class FakeR90:
         if path == "/bot/state":
             return 200, json.dumps({
                 "epoch": self.epoch, "wanted": self.wanted, "current": self.current,
-                "queue_depth": self.queue_depth, "intake_paused": False,
+                "queue_depth": self.queue_depth, "intake_paused": self.intake_paused,
+                "next_slot_at": self.next_slot_at,
+                "wait_seconds": max(0, int(self.next_slot_at - time.time())),
                 "notifications": self.notifications,
             }).encode()
         if path == "/bot/card":
@@ -121,6 +126,12 @@ def not_found():
     return discord.NotFound(MagicMock(status=404, reason="Not Found"), "gone")
 
 
+def body(depth=0, at=0.0, paused=False) -> str:
+    """The announcement text week_90 should render for that r90 state. The
+    defaults are FakeR90's, so a test only says what it changes."""
+    return w._body({"queue_depth": depth, "next_slot_at": at, "intake_paused": paused})
+
+
 @pytest.fixture
 def r90(monkeypatch):
     fake = FakeR90()
@@ -128,7 +139,7 @@ def r90(monkeypatch):
     monkeypatch.setenv("R90_BOT_SECRET", "s")
     monkeypatch.setenv("R90_PUBLIC_BASE_URL", "https://return.wynnvets.org")
     monkeypatch.setattr(w, "_call", fake)
-    monkeypatch.setattr(w, "_body_synced", False)
+    monkeypatch.setattr(w, "_body_shown", None)
     w._failures.clear()
     return fake
 
@@ -137,7 +148,7 @@ def r90(monkeypatch):
 def discord_env():
     message = MagicMock()
     message.id = ANNOUNCE_MESSAGE
-    message.content = w._ANNOUNCEMENT_BODY
+    message.content = body()
     message.edit = AsyncMock()
     message.jump_url = "https://discord.com/channels/1/2/3"
 
@@ -215,9 +226,42 @@ async def test_stale_announcement_text_is_edited_once(_isolated_db, r90, discord
     await posted()
     message.content = ""
     assert "In sync" in await w._reconcile(bot)
-    assert message.edit.await_args_list == [((), {"content": w._ANNOUNCEMENT_BODY})]
+    assert message.edit.await_args_list == [((), {"content": body()})]
     await w._reconcile(bot)
     assert message.edit.await_count == 1
+
+
+async def test_announcement_text_carries_the_queue_and_the_wait(_isolated_db, r90, discord_env):
+    bot, _, _, message = discord_env
+    await posted()
+    r90.queue_depth = 3
+    r90.next_slot_at = time.time() + 3 * 3600
+    await w._reconcile(bot)
+    text = message.edit.await_args.kwargs["content"]
+    assert "3 faxes are waiting to go up" in text
+    assert f"<t:{int(r90.next_slot_at // 60 + 1) * 60}:R>" in text
+    # Discord counts the timestamp down itself, so a quiet tick edits nothing.
+    message.edit.reset_mock()
+    await w._reconcile(bot)
+    assert message.edit.await_count == 0
+    # One edit when the queue changes, and none more.
+    r90.queue_depth = 2
+    r90.next_slot_at -= 3600
+    await w._reconcile(bot)
+    await w._reconcile(bot)
+    assert message.edit.await_count == 1
+    assert "2 faxes are waiting to go up" in message.edit.await_args.kwargs["content"]
+
+
+async def test_announcement_text_says_when_intake_is_paused(_isolated_db, r90, discord_env):
+    bot, _, _, message = discord_env
+    await posted()
+    r90.intake_paused = True
+    await w._reconcile(bot)
+    assert "closed right now" in message.edit.await_args.kwargs["content"]
+    r90.intake_paused = False
+    await w._reconcile(bot)
+    assert "Nothing is waiting to go up" in message.edit.await_args.kwargs["content"]
 
 
 async def test_notifications_ping_only_the_role_and_are_acked(_isolated_db, r90, discord_env):
@@ -335,7 +379,7 @@ async def test_post_force_keeps_notify_fields(_isolated_db, r90, discord_env):
     r90.epoch = 2
     await MANAGE_REGISTRY[90]["post"].callback(ctx_for(bot), [str(ANNOUNCE_CHANNEL), "--force"])
     assert announce.send.await_count == 2
-    assert announce.send.await_args.args == (w._ANNOUNCEMENT_BODY,)
+    assert announce.send.await_args.args == (body(),)
     post = await Return90Post.get(id=1)
     assert (post.staff_channel_id, post.ping_role_id) == (STAFF_CHANNEL, ROLE)
     assert (post.shown_kind, post.shown_epoch) == ("card", 2)

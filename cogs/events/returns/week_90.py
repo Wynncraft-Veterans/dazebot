@@ -9,6 +9,8 @@ the Discord half, and it only *mirrors*:
 * every 60 s it pulls ``GET /bot/state`` from r90 over the ``proxy`` Docker
   network,
 * posts the staff pings r90 has queued (and acks each one),
+* keeps the announcement's text showing how many faxes are waiting and when
+  one sent now would go up,
 * makes the announcement's attachments match what r90 says is wanted, and
 * tells r90 once they do (``POST /bot/displayed``) — the hold starts at that
   ack, so an image is never "up for an hour" that nobody could see.
@@ -54,10 +56,10 @@ WEEK = 90
 # For a fax, r90 then takes it out of the queue so the next one can go up.
 MAX_DISPLAY_FAILURES = 3
 
-# Posted by `post`, above the card. Changing it also updates a live
-# announcement: the first reconcile after a restart edits the message's
-# content to match (see :func:`_sync_body`).
-_ANNOUNCEMENT_BODY: Optional[str] = (
+# Posted by `post`, above the card, with the live queue line under it.
+# Changing it also updates a live announcement: the first reconcile after a
+# restart edits the message's content to match (see :func:`_sync_body`).
+_ANNOUNCEMENT_HEAD: str = (
     "# Retirement Home Bulletin\n"
     "*Anything you send here will be displayed for at least 1h!*\n"
     "\n"
@@ -66,13 +68,48 @@ _ANNOUNCEMENT_BODY: Optional[str] = (
     "-# Fax us your best vets memes, stories, art, sketches, and any other silliness!"
 )
 
+
+def _slot_text(state: dict) -> str:
+    """When a fax approved now would go up, as a Discord relative timestamp.
+
+    r90 sends the slot as an absolute time that holds still while the queue
+    and the current hold do, so Discord counts it down client-side and we
+    never edit the message just because time passed. Rounded to a whole
+    minute so a stray second cannot cost an edit either.
+    """
+    try:
+        at = float(state["next_slot_at"])
+    except (KeyError, TypeError, ValueError):
+        return "once the fax before it has had its hour"
+    if at - time.time() <= 90:
+        return "at the next check, within a minute or two"
+    return f"<t:{int(at // 60 + 1) * 60}:R>"
+
+
+def _queue_line(state: dict) -> str:
+    """The one line under the blurb: how many faxes are waiting, and when one
+    sent now would go up. Both only move when the queue does."""
+    if state.get("intake_paused"):
+        return "-# The fax line is closed right now - anything sent to it is not read."
+    depth = int(state.get("queue_depth") or 0)
+    waiting = ("Nothing is waiting to go up" if depth == 0
+               else "1 fax is waiting to go up" if depth == 1
+               else f"{depth} faxes are waiting to go up")
+    return f"-# {waiting} - a fax approved now goes up {_slot_text(state)}."
+
+
+def _body(state: dict) -> str:
+    return "\n".join((_ANNOUNCEMENT_HEAD, _queue_line(state)))
+
+
 _lock = asyncio.Lock()
 _session: aiohttp.ClientSession | None = None
 _failures: dict[tuple, int] = {}
 _last_unreachable_log = 0.0
-# Set once the live message's content is confirmed to match _ANNOUNCEMENT_BODY,
-# so the check costs one message fetch per process, not one per tick.
-_body_synced = False
+# The text we last put on the announcement, so a tick that changes nothing
+# costs neither a message fetch nor an edit. None until the first reconcile
+# of the process, which fetches the message once to see what is really there.
+_body_shown: Optional[str] = None
 
 _ID_RE = re.compile(r"^<?[#@&!]*(\d{15,21})>?$")
 
@@ -320,33 +357,38 @@ async def _reconcile_locked(bot: discord.Client) -> str:
     prefix = f"Delivered {delivered} notification(s). " if delivered else ""
     if not post.message_id:
         return prefix + "No announcement posted yet."
-    if not await _sync_body(bot, post):
+    if not await _sync_body(bot, post, state):
         return prefix + "The announcement message is gone."
     if post.frozen:
         return prefix + "Frozen after a takedown — run `resume` once r90 is back."
     return prefix + await _converge(bot, post, state)
 
 
-async def _sync_body(bot: discord.Client, post: Return90Post) -> bool:
-    """Make the announcement's text match :data:`_ANNOUNCEMENT_BODY`, once per process.
+async def _sync_body(bot: discord.Client, post: Return90Post, state: dict) -> bool:
+    """Make the announcement's text match :func:`_body`.
 
     Only ``content`` is edited, so attachments (and a takedown) are untouched.
+    The text is the blurb plus a queue line whose two moving parts - the count
+    and an absolute timestamp - change only when the queue itself does, so
+    this is one edit per queue change and nothing on a quiet tick.
+
     Returns False if the message is gone. Other failures retry next tick.
     """
-    global _body_synced
-    if _body_synced:
+    global _body_shown
+    body = _body(state)
+    if _body_shown == body:
         return True
     try:
         msg = await _fetch_announcement(bot, post)
-        if (msg.content or None) != _ANNOUNCEMENT_BODY:
-            await msg.edit(content=_ANNOUNCEMENT_BODY)
+        if (msg.content or None) != body:
+            await msg.edit(content=body)
     except discord.NotFound:
         await _message_gone(bot, post)
         return False
     except discord.HTTPException as exc:
         logger.warning("r90 announcement text not updated: %s", exc)
         return True
-    _body_synced = True
+    _body_shown = body
     return True
 
 
@@ -486,6 +528,7 @@ async def _manage_notify(ctx: commands.Context, args: list[str]) -> None:
     usage="<channel_id> [--force]",
 )
 async def _manage_post(ctx: commands.Context, args: list[str]) -> None:
+    global _body_shown
     persist = is_persist_context(ctx)
     force = "--force" in args
     rest = [a for a in args if a != "--force"]
@@ -530,8 +573,9 @@ async def _manage_post(ctx: commands.Context, args: list[str]) -> None:
         except (_FetchFailed, R90Unavailable) as exc:
             await send_feedback(ctx, f"Couldn't fetch the card from r90 ({exc}).", persist=persist)
             return
+        body = _body(state)
         msg = await channel.send(
-            _ANNOUNCEMENT_BODY, files=files, allowed_mentions=discord.AllowedMentions.none()
+            body, files=files, allowed_mentions=discord.AllowedMentions.none()
         )
         if post is None:
             post = await Return90Post.create(id=1)
@@ -544,6 +588,7 @@ async def _manage_post(ctx: commands.Context, args: list[str]) -> None:
         # owns those, and a forced repost must not silence the pings.
         await post.save()
         _failures.clear()
+        _body_shown = body
     await send_feedback(ctx, f"✅ Posted: {msg.jump_url}", persist=persist)
 
 

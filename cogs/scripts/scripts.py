@@ -236,7 +236,8 @@ class Scripts(commands.Cog):
                 "`~script extract_anni_timestamps`, "
                 "`~script r81_recover_stuck_picker <team_number> [<line>]`, "
                 "`~script r81_revoke_or_targets [commit=True]`, "
-                "`~script retune_alerts`."
+                "`~script retune_alerts`, "
+                "`~script r90_shutdown [#channel]`."
             )
 
     @script_group.command(
@@ -1562,6 +1563,165 @@ class Scripts(commands.Cog):
             "dead_sentinel_stamped=%s, hiatus on, return_dm on @72h",
             _ALERTS_MUTE_SECONDS, unmuted_full, stamped,
         )
+
+    @script_group.command(
+        name="r90_shutdown",
+        description="(Operator) One-off: stop everything week 90 does, and title its announcement for the archive.",
+    )
+    @is_operator()
+    async def script_r90_shutdown(
+        self,
+        ctx: commands.Context,
+        channel: Optional[discord.TextChannel] = None,
+    ):
+        """Close Return 90 on the dazebot side and archive its announcement.
+
+        Step 1 of the teardown in ``stacks/r90-bulletin/README.md`` is
+        ``~manage_return 90 takedown`` (or wait for the card to be back)
+        and then ``end``. ``end`` alone stops the 60 s tick, but leaves
+        the rest of week 90 running in the process -- so this puts away
+        the pieces it doesn't, and leaves the announcement looking like a
+        past event rather than a live one:
+
+        - **``ended``**, first, and under :data:`week_90._lock` for the
+          whole script. Both matter: a tick landing between the edit and
+          the flag would rewrite ``content`` from ``_body(state)`` and
+          wipe the title straight back off.
+        - **Fax intake paused** at r90, best effort. The staff pings stop
+          with the tick, so an open line from here on means faxes arriving
+          that nobody is told about; paused, they're deleted unread. If
+          r90 is already gone this is a no-op and the stack teardown
+          closes the line anyway.
+        - **The title prepended** to the announcement. Attachments are
+          left alone -- the card is meant to stay up -- and a message that
+          already carries the title is left as it is, so re-running this
+          is safe.
+        - **The aiohttp session to r90 closed**, and the module's caches
+          dropped, rather than holding a connector open against a service
+          that is about to be uninstalled.
+
+        Deliberately *not* done here: clearing the image. If a fax is
+        still up the report says so and leaves it to the operator --
+        ``takedown`` keeps working after ``ended`` (``_reconcile_locked``
+        returns early on it, then the clear runs), and it only touches
+        attachments, so acting on that warning undoes none of this.
+        """
+        from cogs.events.returns import week_90
+        from orm_returns import Return90Post
+
+        # The bulletin announcement, and the archive title that goes above it.
+        ANNOUNCEMENT_ID = 1549227485483237430
+        HEADER = "# Weekly Return: Event 90"
+
+        await ctx.defer(ephemeral=True)
+
+        async with week_90._lock:
+            post, created = await Return90Post.get_or_create(id=1)
+            was_ended = post.ended
+            shown = week_90._label(post.shown_kind, post.shown_id)
+            post.ended = True
+            await post.save(update_fields=["ended", "updated_at"])
+
+            if not week_90._configured():
+                intake = "left as it was — `R90_BASE_URL` / `R90_BOT_SECRET` aren't set"
+            else:
+                try:
+                    status, _ = await week_90._call(
+                        "POST", "/bot/intake", json_body={"paused": True}
+                    )
+                    intake = (
+                        "**paused** — anything faxed from now on is deleted unread"
+                        if status == 200
+                        else f"**not** paused — r90 said HTTP {status}"
+                    )
+                except week_90.R90Unavailable as exc:
+                    intake = f"left as it was — r90 is unreachable ({exc})"
+
+            target = channel or await week_90._resolve_channel(self.bot, post.channel_id)
+            if target is None:
+                edited = (
+                    "⚠️ I can't work out which channel it's in — the row has none. Re-run as "
+                    "`~script r90_shutdown #channel`; everything else here is already done."
+                )
+            else:
+                edited = await self._r90_title_announcement(target, ANNOUNCEMENT_ID, HEADER)
+
+            week_90._failures.clear()
+            week_90._body_shown = None
+            week_90._last_unreachable_log = 0.0
+            session = week_90._session
+            week_90._session = None
+            if session is not None and not session.closed:
+                await session.close()
+
+        body = (
+            "✅ **Return 90 is shut down on the dazebot side.**\n"
+            "• Tick: **stopped** — `ended` set on `return_90_post`"
+            + (" (it already was).\n" if was_ended else ".\n")
+            + f"• Fax intake: {intake}.\n"
+            f"• Announcement: {edited}\n"
+            f"• Was showing: {shown}.\n"
+            "• Closed the HTTP session to r90; dropped the display-failure counters "
+            "and the announcement-body cache.\n"
+        )
+        if created:
+            body += (
+                "\n⚠️ There was no `return_90_post` row at all — week 90 was never set up on "
+                "this bot, or its DB was replaced. One has been created, ended, so the tick "
+                "stays a no-op either way.\n"
+            )
+        if post.message_id and post.message_id != ANNOUNCEMENT_ID:
+            body += (
+                f"\n⚠️ The row points at message `{post.message_id}`, not the `{ANNOUNCEMENT_ID}` "
+                "this script titles — one of the two is the wrong message. Worth settling "
+                "before the channel is archived.\n"
+            )
+        if post.shown_kind == "sub":
+            body += (
+                f"\n⚠️ **{shown} is still on the announcement.** `~manage_return 90 takedown` "
+                "still works after this and only clears the image, so it won't undo any of "
+                "the above.\n"
+            )
+        body += (
+            "\nStill to do, from `stacks/r90-bulletin/README.md` §8: the S3 purge under "
+            "`skien/r90/`, `manage uninstall r90-bulletin --purge --no-backup`, the Telnyx "
+            "purge + key roll, then drop the three `R90_*` lines from dazebot's `.env` and "
+            "`manage update dazebot`. `week_90.py`, the model and migration 4 stay."
+        )
+        await _reply_maybe_chunked(ctx, body)
+        logger.info(
+            "r90_shutdown: ended=True (was %s), intake=%r, announcement=%r, was_showing=%r",
+            was_ended, intake, edited, shown,
+        )
+
+    async def _r90_title_announcement(self, target, message_id: int, header: str) -> str:
+        """Prepend ``header`` to the bulletin announcement; return a report line.
+
+        Split out of :meth:`script_r90_shutdown` to keep the branch tree
+        there flat. Every outcome is reported and none raises: the
+        flag-setting half of the shutdown has already happened by the time
+        this runs, and a bad message id must not roll it back.
+        """
+        try:
+            msg = await target.fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+            return f"❌ couldn't fetch `{message_id}` in {target.mention}: {e}"
+        if msg.author.id != self.bot.user.id:
+            return f"❌ {msg.jump_url} wasn't posted by me, so I can't edit it."
+        if (msg.content or "").startswith(header):
+            return f"already titled, left as it is: {msg.jump_url}"
+        body = f"{header}\n{msg.content or ''}".rstrip("\n")
+        if len(body) > 2000:
+            return (
+                f"❌ the title would take it to {len(body)} characters, and Discord's limit "
+                "is 2000 — shorten the message by hand, then re-run this."
+            )
+        try:
+            # content only: no attachments= kwarg, so the card stays up.
+            await msg.edit(content=body)
+        except discord.HTTPException as e:
+            return f"❌ edit failed: {e}"
+        return f"titled for the archive: {msg.jump_url}"
 
 
 async def _reply_maybe_chunked(ctx: commands.Context, body: str) -> None:

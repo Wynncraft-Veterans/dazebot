@@ -15,7 +15,13 @@ logger = logging.getLogger("dazebot.cogs.events.weekly_event")
 from bot import Bot
 
 WeekRange = commands.Range[int, 0]
-ValueRange = commands.Range[int, 0]
+ValueRange = commands.Range[float, 0]
+
+
+def _fmt_score(value: float) -> str:
+    """Render a score without float noise: ``95.0`` -> ``95``,
+    ``0.1 + 0.2`` -> ``0.3``, ``115.42`` -> ``115.42``."""
+    return f"{value:.6f}".rstrip("0").rstrip(".")
 
 
 async def _resolve_score_target(
@@ -78,7 +84,7 @@ class WeeklyEvent(commands.Cog):
         await Score.update_or_create(event=event, discord_account=disc_account, defaults={"score": value})
 
         await ctx.send(
-            f"Set {mention}'s score to {value} for week {week}", allowed_mentions=discord.AllowedMentions.none()
+            f"Set {mention}'s score to {_fmt_score(value)} for week {week}", allowed_mentions=discord.AllowedMentions.none()
         )
 
     @score.command(name="add")
@@ -104,7 +110,7 @@ class WeeklyEvent(commands.Cog):
             await score_obj.save(update_fields=["score"])
 
         await ctx.send(
-            f"Added {value} points to {mention} for week {week}", allowed_mentions=discord.AllowedMentions.none()
+            f"Added {_fmt_score(value)} points to {mention} for week {week}", allowed_mentions=discord.AllowedMentions.none()
         )
 
     @score.command(name="print")
@@ -121,7 +127,7 @@ class WeeklyEvent(commands.Cog):
 
         if score:
             await ctx.send(
-                f"{mention} has {score.score} points for week {week}",
+                f"{mention} has {_fmt_score(score.score)} points for week {week}",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         else:
@@ -144,7 +150,7 @@ class WeeklyEvent(commands.Cog):
             await ctx.send(f"No one has any points for week {week}")
             return
 
-        lines = [f"<@{score.discord_account.disc_uuid}> {score.score}" for score in scores]
+        lines = [f"<@{score.discord_account.disc_uuid}> {_fmt_score(score.score)}" for score in scores]
         embeds = from_lines(f"Leaderboard — week {week}", lines, 10, logger)
         await ctx.send(embed=embeds[0], view=Paginator(embeds))
 

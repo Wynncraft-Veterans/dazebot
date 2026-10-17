@@ -222,7 +222,7 @@ class Score(Model):
     id = fields.UUIDField(pk=True)
     event = fields.ForeignKeyField("models.WeeklyEvent", related_name="scores", on_delete=fields.CASCADE)
     discord_account = fields.ForeignKeyField("models.DiscordAccount", related_name="scores", on_delete=fields.CASCADE)
-    score = fields.IntField()
+    score = fields.FloatField()
 
     class Meta:
         table = "scores"

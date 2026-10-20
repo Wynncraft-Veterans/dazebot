@@ -24,6 +24,8 @@ Hard rules:
   → tile stays, defender reduced to ``max(0, defender - attacker_sent)``.
 * Passive growth: +``LOOP_GROWTH`` to every owned tile when a new loop
   starts (``current_turn_number % 4 == 0``).
+* Eliminated cults (no tiles) have their turns skipped instantly. The
+  skipped turns still count toward the loop.
 * Win: dominance (≥``DOMINANCE_TILE_THRESHOLD`` tiles at the end of
   ``DOMINANCE_LOOP_STREAK`` consecutive loops) OR elimination (single
   cult with any tiles).
@@ -1216,6 +1218,44 @@ async def _notify_capture(
         logger.warning("return_3 capture-notice send in %s failed: %s", victim, e)
 
 
+async def _roll_turn(bot: discord.Client, state: Return3GameState) -> bool:
+    """Bump the turn counter, running the loop-boundary growth + win check
+    if a new loop starts. Returns True if the game ended (state saved and
+    dashboards refreshed); otherwise the caller saves.
+    """
+    state.current_turn_number += 1
+    state.turn_started_at = datetime.now(timezone.utc)
+
+    new_loop_started = state.current_turn_number % 4 == 0
+    if new_loop_started:
+        # Passive growth: +LOOP_GROWTH on every owned tile.
+        fresh_tiles = await _load_tiles()
+        for t in fresh_tiles:
+            if t.controlling_cult is not None:
+                t.army_count += LOOP_GROWTH
+                await t.save(update_fields=["army_count"])
+
+        # Win check (only relevant at loop boundaries because dominance
+        # streak counts in loops).
+        winner = _check_win(state, fresh_tiles)
+        if winner is not None:
+            state.phase = "ended"
+            state.winner_cult = winner
+            state.ended_at = datetime.now(timezone.utc)
+            await state.save()
+            logger.info("return_3 ended; winner=%s", winner)
+            await _refresh_all_dashboards(bot)
+            return True
+    return False
+
+
+async def _active_cult_eliminated(state: Return3GameState) -> bool:
+    active = _current_cult(state)
+    if active is None:
+        return False
+    return _tile_counts(await _load_tiles())[active] == 0
+
+
 async def _advance_one_turn(bot: discord.Client, state: Return3GameState) -> None:
     """Resolve the just-expired turn and roll over."""
     tiles = await _load_tiles()
@@ -1249,29 +1289,21 @@ async def _advance_one_turn(bot: discord.Client, state: Return3GameState) -> Non
     # keeps the row count tidy).
     await Return3Vote.filter(turn_number=state.current_turn_number).delete()
 
-    state.current_turn_number += 1
-    state.turn_started_at = datetime.now(timezone.utc)
-
-    new_loop_started = state.current_turn_number % 4 == 0
-    if new_loop_started:
-        # Passive growth: +LOOP_GROWTH on every owned tile.
-        fresh_tiles = await _load_tiles()
-        for t in fresh_tiles:
-            if t.controlling_cult is not None:
-                t.army_count += LOOP_GROWTH
-                await t.save(update_fields=["army_count"])
-
-        # Win check (only relevant at loop boundaries because dominance
-        # streak counts in loops).
-        winner = _check_win(state, fresh_tiles)
-        if winner is not None:
-            state.phase = "ended"
-            state.winner_cult = winner
-            state.ended_at = datetime.now(timezone.utc)
-            await state.save()
-            logger.info("return_3 ended; winner=%s", winner)
-            await _refresh_all_dashboards(bot)
+    # Roll over. An eliminated cult (no tiles) has no legal action and
+    # can never come back, so its turns are skipped instantly instead of
+    # burning a day each; they still count, so loop numbering and the
+    # loop-boundary growth/win check are unchanged.
+    alive = set(_tile_counts(tiles_by_id.values()))
+    while True:
+        if await _roll_turn(bot, state):
             return
+        nxt = _current_cult(state)
+        if not alive or nxt is None or nxt in alive:
+            break
+        logger.info(
+            "return_3 turn %s: skipping eliminated %s",
+            state.current_turn_number, nxt,
+        )
 
     await state.save()
     await _refresh_all_dashboards(bot)
@@ -1318,7 +1350,12 @@ async def tick(bot: discord.Client) -> None:
         state.turn_started_at = now
         await state.save(update_fields=["turn_started_at"])
         return
-    if now - state.turn_started_at < TURN_DURATION:
+    # An eliminated cult's turn is passed straight away — this catches a
+    # turn that landed on one before the skip existed, or after setTile.
+    if (
+        now - state.turn_started_at < TURN_DURATION
+        and not await _active_cult_eliminated(state)
+    ):
         return
 
     await _advance_one_turn(bot, state)

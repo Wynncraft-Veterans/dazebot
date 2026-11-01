@@ -8,9 +8,13 @@ carries traffic, because vetsmod may not reach dazebot:
   :class:`orm.SudokuDay`,
 * ``api/main.py`` serves it to temporary-server's poller and records solves
   through :func:`today` and :func:`submit`,
-* each minute the tick edits the day's live post if the solved count changed,
+* on even Halifax hours the tick posts everyone who solved since the last such
+  post, naming them without a ping unless they asked for one,
 * from 05:00 the tick posts the previous day's final results, once the new
-  puzzle exists, and sets ``rollup_done``, which closes that day.
+  puzzle exists, pinging everyone listed unless they opted out, and sets
+  ``rollup_done``, which closes that day,
+* the button on each post opens a player's own ping settings for those two posts
+  and for a reminder before a streak expires, which is off by default.
 
 A day takes submissions until then, so the final post really is final. Only the
 tick posts, so a client retry cannot double-post. Each post is sent, then saved:
@@ -31,6 +35,7 @@ import asyncio
 import logging
 import re
 import time
+from collections.abc import Iterable
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from typing import Optional
@@ -44,15 +49,21 @@ from cogs.events.returns.lib import sudoku
 from cogs.events.returns.lib.sudoku_cards import Card, render_cards
 from config import CurrConfig
 from lib.staff.verify_keys import _find_member
-from orm import SudokuDay, SudokuResult
+from orm import SudokuDay, SudokuNotification, SudokuResult
 
 logger = logging.getLogger("dazebot.cogs.events.returns.week_4")
 
 WEEK = 4
 
-TOP_N = 10
+# The most players one post lists, which keeps its text under Discord's 2000
+# characters. A longer post would fail on every retry and hold the day open.
+LIST_CAP = 50
 ALL_TIME_TOP_N = 5
 GENERATE_RETRY_SECONDS = 600
+
+REMINDER_HOURS = (1, 2, 3, 4, 6, 8, 12, 18)
+REMINDER_STREAKS = (1, 2, 3, 5, 7, 10, 14, 21, 30, 50, 100)
+MENU_SECONDS = 600
 
 _PLAY_NOTE = "Play it with `/wv extras sudoku` in game."
 _FINAL_NOTE = "Today's puzzle is up: `/wv extras sudoku` in game."
@@ -190,23 +201,22 @@ def _difficulty_line(difficulty: str) -> str:
     return f"Difficulty: {label} (x{multiplier} score)" if multiplier > 1 else f"Difficulty: {label}"
 
 
-def _results_lines(row: SudokuDay, ranked: list[SudokuResult], group_streak: int, crown: str) -> list[str]:
-    """The lines the live and final posts share. ``ranked`` must not be empty."""
-    first = ranked[0]
-    lines = [
-        f"Your group is on a {group_streak} day streak!",
-        _difficulty_line(row.difficulty),
-        f"👑 <@{first.disc_uuid}> {crown} {sudoku.format_time(first.seconds)}",
-    ]
-    lines += [f"{sudoku.format_time(r.seconds)} <@{r.disc_uuid}>" for r in ranked[:TOP_N]]
-    others = len(ranked) - TOP_N
-    if others > 0:
-        lines.append(f"and {others} other{'' if others == 1 else 's'}")
-    return lines
+def _others(count: int) -> str:
+    return f"{count} other{'' if count == 1 else 's'}"
 
 
-def _live_text(row: SudokuDay, ranked: list[SudokuResult], group_streak: int) -> str:
-    return "\n".join([*_results_lines(row, ranked, group_streak, "leads with"), _PLAY_NOTE])
+def _playing_text(disc_uuids: list[str]) -> str:
+    """``@a, @b, and @c were playing``, with anyone past the cap as a count."""
+    names = [f"<@{disc_uuid}>" for disc_uuid in disc_uuids[:LIST_CAP]]
+    if len(disc_uuids) > LIST_CAP:
+        names.append(_others(len(disc_uuids) - LIST_CAP))
+    if len(names) == 1:
+        who = f"{names[0]} was"
+    elif len(names) == 2:
+        who = f"{names[0]} and {names[1]} were"
+    else:
+        who = f"{', '.join(names[:-1])}, and {names[-1]} were"
+    return f"{who} playing.\n{_PLAY_NOTE}"
 
 
 def _final_text(
@@ -216,7 +226,17 @@ def _final_text(
     top: list[tuple[str, int]],
     heading: str,
 ) -> str:
-    lines = [f"**{heading}**", *_results_lines(row, ranked, group_streak, "won with")]
+    """The day's results. ``ranked`` must not be empty."""
+    first = ranked[0]
+    lines = [
+        f"**{heading}**",
+        f"Your group is on a {group_streak} day streak!",
+        _difficulty_line(row.difficulty),
+        f"👑 <@{first.disc_uuid}> won with {sudoku.format_time(first.seconds)}",
+    ]
+    lines += [f"{sudoku.format_time(r.seconds)} <@{r.disc_uuid}>" for r in ranked[:LIST_CAP]]
+    if len(ranked) > LIST_CAP:
+        lines.append(f"and {_others(len(ranked) - LIST_CAP)}")
     lines.append("**All-time top 5**")
     lines += [f"{i}. <@{disc_uuid}> {points}" for i, (disc_uuid, points) in enumerate(top, start=1)]
     lines.append(_FINAL_NOTE)
@@ -235,6 +255,34 @@ def _heading(day: date, newest: date) -> str:
     return "Yesterday's results" if (newest - day).days == 1 else f"Results for {day.isoformat()}"
 
 
+def _reminder_text(disc_uuid: str, streak: int, expires: datetime) -> str:
+    when = discord.utils.format_dt(expires, "R")
+    return f"<@{disc_uuid}> your {streak} day sudoku streak expires {when}. {_PLAY_NOTE}"
+
+
+def _hours_label(hours: int) -> str:
+    return f"{hours} hour{'' if hours == 1 else 's'}"
+
+
+def _streak_label(days: int) -> str:
+    return f"{days}+ day streak"
+
+
+def _on_off(enabled: bool) -> str:
+    return "on" if enabled else "off"
+
+
+def _menu_text(settings: SudokuNotification) -> str:
+    return (
+        "**Sudoku notifications**\n"
+        f"**Solve posts ({_on_off(settings.solve_ping)}):** ping me when a two-hourly post names me.\n"
+        f"**Daily results ({_on_off(settings.daily_ping)}):** ping me when the day's results name me.\n"
+        f"**Streak reminder ({_on_off(settings.streak_ping)}):** ping me "
+        f"{_hours_label(settings.hours_before)} before a {_streak_label(settings.min_streak)} "
+        "would expire, unless I've already solved that day's puzzle."
+    )
+
+
 async def _avatar(member: Optional[discord.Member]) -> Optional[bytes]:
     if member is None:
         return None
@@ -245,18 +293,19 @@ async def _avatar(member: Optional[discord.Member]) -> Optional[bytes]:
 
 
 async def _render(
-    bot: discord.Client, ranked: list[SudokuResult], day: date, puzzle_days: list[date], filename: str
+    bot: discord.Client, results: list[SudokuResult], filename: str, *, crown_first: bool
 ) -> discord.File:
+    puzzle_days = await _puzzle_days()
     cards = []
-    for rank, result in enumerate(ranked[:TOP_N], start=1):
+    for i, result in enumerate(results):
         member = _find_member(bot, int(result.disc_uuid))
         cards.append(
             Card(
                 name=member.display_name if member is not None else "Former member",
                 seconds=result.seconds,
-                streak=await _personal_streak(result.disc_uuid, day, puzzle_days),
+                streak=await _personal_streak(result.disc_uuid, result.day, puzzle_days),
                 fills=result.fills,
-                crowned=rank == 1,
+                crowned=crown_first and i == 0,
                 avatar=await _avatar(member),
             )
         )
@@ -278,6 +327,77 @@ async def _resolve_channel(bot: discord.Client, channel_id: int):
             logger.warning("sudoku channel %s not fetchable: %s", channel_id, exc)
             return None
     return channel if hasattr(channel, "send") else None
+
+
+def _pings(disc_uuids: Iterable[str]) -> discord.AllowedMentions:
+    """Only these users are pinged; anyone else the text names is just shown."""
+    users = [discord.Object(id=int(disc_uuid)) for disc_uuid in disc_uuids]
+    return discord.AllowedMentions(users=users, roles=False, everyone=False)
+
+
+async def _save_settings(interaction: discord.Interaction, **changes: object) -> None:
+    settings, _ = await SudokuNotification.get_or_create(disc_uuid=str(interaction.user.id))
+    settings.update_from_dict(changes)
+    await settings.save(update_fields=list(changes))
+    await interaction.response.edit_message(content=_menu_text(settings), view=_MenuView(settings))
+
+
+class _SettingSelect(discord.ui.Select):
+    def __init__(self, field: str, choices: tuple[int, ...], current: int, label, row: int) -> None:
+        super().__init__(
+            options=[
+                discord.SelectOption(label=label(choice), value=str(choice), default=choice == current)
+                for choice in choices
+            ],
+            row=row,
+        )
+        self._field = field
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await _save_settings(interaction, **{self._field: int(self.values[0])})
+
+
+class _SettingToggle(discord.ui.Button):
+    def __init__(self, field: str, label: str, enabled: bool) -> None:
+        super().__init__(
+            label=f"{label}: {_on_off(enabled)}",
+            style=discord.ButtonStyle.success if enabled else discord.ButtonStyle.secondary,
+            row=0,
+        )
+        self._field = field
+        self._enable = not enabled
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await _save_settings(interaction, **{self._field: self._enable})
+
+
+class _MenuView(discord.ui.View):
+    """The menu one player sees after pressing the button on a post."""
+
+    def __init__(self, settings: SudokuNotification) -> None:
+        super().__init__(timeout=MENU_SECONDS)
+        self.add_item(_SettingToggle("solve_ping", "Solve posts", settings.solve_ping))
+        self.add_item(_SettingToggle("daily_ping", "Daily results", settings.daily_ping))
+        self.add_item(_SettingToggle("streak_ping", "Streak reminder", settings.streak_ping))
+        self.add_item(_SettingSelect("hours_before", REMINDER_HOURS, settings.hours_before, _hours_label, 1))
+        self.add_item(_SettingSelect("min_streak", REMINDER_STREAKS, settings.min_streak, _streak_label, 2))
+
+
+class SudokuNotificationView(discord.ui.View):
+    """The button on every sudoku post. Registered in ``bot.py:setup_hook``."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Notifications",
+        style=discord.ButtonStyle.secondary,
+        emoji="🔔",
+        custom_id="sudoku:notifications",
+    )
+    async def open_menu(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        settings, _ = await SudokuNotification.get_or_create(disc_uuid=str(interaction.user.id))
+        await interaction.response.send_message(_menu_text(settings), view=_MenuView(settings), ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +439,9 @@ async def _send_final(
     if not ranked:
         earlier = [d for d in puzzle_days if d < row.day]
         prior = await _group_streak(max(earlier), puzzle_days) if earlier else 0
-        await channel.send(_empty_final_text(prior), allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(
+            _empty_final_text(prior), view=SudokuNotificationView(), allowed_mentions=discord.AllowedMentions.none()
+        )
         return
     text = _final_text(
         row,
@@ -328,8 +450,11 @@ async def _send_final(
         await _all_time_top(row.day),
         _heading(row.day, newest),
     )
-    file = await _render(bot, ranked, row.day, puzzle_days, f"sudoku-{row.day}-final.png")
-    await channel.send(text, file=file, allowed_mentions=discord.AllowedMentions.none())
+    listed = ranked[:LIST_CAP]
+    file = await _render(bot, listed, f"sudoku-{row.day}-final.png", crown_first=True)
+    opted_out = set(await SudokuNotification.filter(daily_ping=False).values_list("disc_uuid", flat=True))
+    pings = _pings(r.disc_uuid for r in listed if r.disc_uuid not in opted_out)
+    await channel.send(text, file=file, view=SudokuNotificationView(), allowed_mentions=pings)
 
 
 async def _close_day(bot: discord.Client, row: SudokuDay, newest: date, channel_id: int) -> None:
@@ -345,6 +470,8 @@ async def _close_day(bot: discord.Client, row: SudokuDay, newest: date, channel_
         await _send_final(bot, channel, row, ranked, newest)
     row.rollup_done = True
     await row.save(update_fields=["rollup_done"])
+    # The final post covers everyone, so nobody from this day is left to batch.
+    await SudokuResult.filter(day=row.day, announced=False).update(announced=True)
 
 
 async def _post_finals(bot: discord.Client, now: datetime) -> None:
@@ -363,52 +490,75 @@ async def _post_finals(bot: discord.Client, now: datetime) -> None:
             _closing.discard(row.day)
 
 
-async def _sync_live_row(bot: discord.Client, row: SudokuDay, channel_id: int) -> None:
-    ranked = await _ranked(row.day)
-    count = len(ranked)
-    if count == 0 or (row.live_message_id and count == row.live_count):
+async def _post_batch(bot: discord.Client, now: datetime) -> None:
+    """Post everyone who solved before the latest even hour. While the kill switch
+    is on they count as posted, or turning it back off would flood the channel."""
+    pending = await SudokuResult.filter(announced=False, finished_at__lt=sudoku.batch_cutoff(now)).order_by(
+        "finished_at", "id"
+    )
+    if not pending:
         return
-    puzzle_days = await _puzzle_days()
-    text = _live_text(row, ranked, await _group_streak(row.day, puzzle_days))
-    # A new filename each time busts Discord's image cache.
-    file = await _render(bot, ranked, row.day, puzzle_days, f"sudoku-{row.day}-{count}.png")
-    if row.live_message_id:
-        try:
-            channel = bot.get_channel(row.channel_id) or await bot.fetch_channel(row.channel_id)
-            message = await channel.fetch_message(row.live_message_id)
-            await message.edit(content=text, attachments=[file], allowed_mentions=discord.AllowedMentions.none())
-        except discord.NotFound:
-            row.channel_id = row.live_message_id = None
-            row.live_count = 0
-            await row.save(update_fields=["channel_id", "live_message_id", "live_count"])
-            return
-    else:
+    channel_id = CurrConfig.SUDOKU_CHANNEL
+    if channel_id:
         channel = await _resolve_channel(bot, channel_id)
         if channel is None:
             return
-        message = await channel.send(text, file=file, allowed_mentions=discord.AllowedMentions.none())
-        row.channel_id = channel.id
-        row.live_message_id = message.id
-    row.live_count = count
-    await row.save(update_fields=["channel_id", "live_message_id", "live_count"])
-
-
-async def _sync_live(bot: discord.Client, _now_at: datetime) -> None:
-    channel_id = CurrConfig.SUDOKU_CHANNEL
-    if not channel_id:
-        return
-    for row in await SudokuDay.filter(rollup_done=False).order_by("day"):
+        # One player can appear twice if the bot fell behind across a rollover.
+        players = list(dict.fromkeys(r.disc_uuid for r in pending))
+        file = await _render(bot, pending[:LIST_CAP], f"sudoku-batch-{pending[0].id}.png", crown_first=False)
+        opted_in = set(await SudokuNotification.filter(solve_ping=True).values_list("disc_uuid", flat=True))
+        pings = _pings(p for p in players[:LIST_CAP] if p in opted_in)
         try:
-            await _sync_live_row(bot, row, channel_id)
+            await channel.send(_playing_text(players), file=file, view=SudokuNotificationView(), allowed_mentions=pings)
         except discord.HTTPException as exc:
-            logger.warning("sudoku live post for %s failed, will retry: %s", row.day, exc)
+            logger.warning("sudoku batch post failed, will retry: %s", exc)
+            return
+    await SudokuResult.filter(id__in=[r.id for r in pending]).update(announced=True)
+
+
+async def _send_reminders(bot: discord.Client, now: datetime) -> None:
+    """Ping each subscriber once a day, if the newest puzzle is due to expire
+    unsolved with a long enough streak riding on it."""
+    channel_id = CurrConfig.SUDOKU_CHANNEL
+    newest = await SudokuDay.all().order_by("-day").first()
+    if not channel_id or newest is None:
+        return
+    due = [
+        settings
+        for settings in await SudokuNotification.filter(streak_ping=True)
+        if settings.last_reminded_day != newest.day
+        and sudoku.reminder_due(newest.day, settings.hours_before, now)
+    ]
+    if not due:
+        return
+    solved = set(await SudokuResult.filter(day=newest.day).values_list("disc_uuid", flat=True))
+    puzzle_days = await _puzzle_days()
+    for settings in due:
+        disc_uuid = settings.disc_uuid
+        if disc_uuid in solved or _find_member(bot, int(disc_uuid)) is None:
+            continue
+        # As of the day before, since the newest day is the one still unsolved.
+        streak = await _personal_streak(disc_uuid, newest.day - timedelta(days=1), puzzle_days)
+        if streak < settings.min_streak:
+            continue
+        channel = await _resolve_channel(bot, channel_id)
+        if channel is None:
+            return
+        text = _reminder_text(disc_uuid, streak, sudoku.expires_at(newest.day))
+        try:
+            await channel.send(text, view=SudokuNotificationView(), allowed_mentions=_pings([disc_uuid]))
+        except discord.HTTPException as exc:
+            logger.warning("sudoku reminder for %s failed, will retry: %s", disc_uuid, exc)
+            return
+        settings.last_reminded_day = newest.day
+        await settings.save(update_fields=["last_reminded_day"])
 
 
 @register_tick(WEEK)
 async def tick(bot: discord.Client) -> None:
     now = _now()
     # Separate steps, so a failure in one can't hold up the others.
-    for step in (_ensure_puzzle, _post_finals, _sync_live):
+    for step in (_ensure_puzzle, _post_finals, _post_batch, _send_reminders):
         try:
             await step(bot, now)
         except Exception:

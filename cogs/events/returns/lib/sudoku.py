@@ -15,12 +15,13 @@ import re
 import shutil
 from collections import Counter
 from collections.abc import Collection, Iterable
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 HALIFAX = ZoneInfo("America/Halifax")
 ROLLOVER_HOURS = 4  # a puzzle day runs 04:00 to 04:00 Halifax, the lowest-load time
 FINAL_POST_TIME = time(5)  # gives the previous day an hour's grace
+BATCH_HOURS = 2  # solves are posted together on even hours, so on the rollover too
 
 DIFFICULTY_WEIGHTS = {"easy": 6, "medium": 1}
 SCORE_MULTIPLIERS = {"easy": 1, "medium": 3}
@@ -48,6 +49,30 @@ def puzzle_day(now: datetime) -> date:
 def final_post_at(day: date) -> datetime:
     """The earliest instant ``day``'s final post may go out."""
     return datetime.combine(day + timedelta(days=1), FINAL_POST_TIME, tzinfo=HALIFAX)
+
+
+def batch_cutoff(now: datetime) -> datetime:
+    """The latest batch boundary at or before ``now``. A solve before it is due
+    to be posted; a later one waits for the next boundary. In UTC, because SQLite
+    compares ``finished_at`` as text, and that text is always in UTC."""
+    local = now.astimezone(HALIFAX)
+    cutoff = local.replace(hour=local.hour - local.hour % BATCH_HOURS, minute=0, second=0, microsecond=0)
+    return cutoff.astimezone(timezone.utc)
+
+
+def expires_at(day: date) -> datetime:
+    """When a streak needing ``day``'s puzzle runs out: the rollover, since a
+    player opening the board after it gets the next puzzle. The hour's grace
+    before the final post is for boards already being played."""
+    return datetime.combine(day + timedelta(days=1), time(ROLLOVER_HOURS), tzinfo=HALIFAX)
+
+
+def reminder_due(day: date, hours_before: int, now: datetime) -> bool:
+    """True from ``hours_before`` real hours before ``day`` expires until it does.
+    In UTC, because subtracting from a Halifax datetime is wall-clock arithmetic
+    and a clock change would move the ping by an hour."""
+    expires = expires_at(day).astimezone(timezone.utc)
+    return expires - timedelta(hours=hours_before) <= now < expires
 
 
 def pick_difficulty(day: date) -> str:

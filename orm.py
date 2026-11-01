@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from tortoise import fields
@@ -1021,17 +1021,12 @@ class SudokuDay(Model):
     """One puzzle per puzzle day, which runs 04:00 to 04:00 Halifax.
 
     ``givens`` is 81 digits with 0 for a blank. The day takes submissions until
-    ``rollup_done``, set once its final post has gone out. ``channel_id`` and
-    ``live_message_id`` point at the day's live post and are NULL until there
-    is one, or after it was deleted, which makes the next tick repost.
+    ``rollup_done``, set once its final post has gone out.
     """
 
     day = fields.DateField(pk=True)
     givens = fields.CharField(max_length=81)
     difficulty = fields.CharField(max_length=16)
-    channel_id: Optional[int] = fields.BigIntField(null=True)  # type: ignore
-    live_message_id: Optional[int] = fields.BigIntField(null=True)  # type: ignore
-    live_count = fields.IntField(default=0)
     rollup_done = fields.BooleanField(default=False)
 
     class Meta:
@@ -1039,7 +1034,8 @@ class SudokuDay(Model):
 
 
 class SudokuResult(Model):
-    """One player's solve of one day. Created on submit, never updated.
+    """One player's solve of one day. Created on submit; after that, only
+    ``announced`` changes, once a post has covered the solve.
 
     ``seconds`` is ``max(fills)``. ``fills[i]`` is 0 on a given, otherwise the
     whole seconds of active time when that cell was last set.
@@ -1051,10 +1047,30 @@ class SudokuResult(Model):
     seconds = fields.IntField()
     fills = fields.JSONField()
     finished_at = fields.DatetimeField()
+    announced = fields.BooleanField(default=False)
 
     class Meta:
         table = "sudoku_results"
         unique_together = (("day", "disc_uuid"),)
+
+
+class SudokuNotification(Model):
+    """One player's sudoku ping settings. A missing row means these defaults.
+
+    ``last_reminded_day`` is the puzzle day last reminded about, which keeps the
+    streak reminder to one ping per day however often the settings change.
+    """
+
+    disc_uuid = fields.CharField(max_length=255, pk=True)
+    solve_ping = fields.BooleanField(default=False)
+    daily_ping = fields.BooleanField(default=True)
+    streak_ping = fields.BooleanField(default=False)
+    hours_before = fields.IntField(default=3)
+    min_streak = fields.IntField(default=3)
+    last_reminded_day: Optional[date] = fields.DateField(null=True)  # type: ignore
+
+    class Meta:
+        table = "sudoku_notifications"
 
 
 def _inspect_db_state(db_path: str) -> tuple[bool, set[str]]:

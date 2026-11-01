@@ -98,6 +98,12 @@ class Bot(commands.Bot):
         except Exception as e:
             logger.error(f"Failed to register Return3 views: {e}")
         try:
+            from cogs.events.returns.week_4 import SudokuNotificationView
+
+            self.add_view(SudokuNotificationView())
+        except Exception as e:
+            logger.error(f"Failed to register SudokuNotificationView: {e}")
+        try:
             from cogs.events.returns.week_81 import (
                 BingoInviteConfirmView,
                 BingoPoolInviteConfirmView,

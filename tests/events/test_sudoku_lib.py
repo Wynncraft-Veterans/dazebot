@@ -17,7 +17,7 @@ import pytest
 from PIL import Image
 
 from cogs.events.returns.lib import sudoku
-from cogs.events.returns.lib.sudoku_cards import AVATAR, AVATAR_FALLBACK, CARD_H, GAP, PAD, Card, ramp, render_cards
+from cogs.events.returns.lib.sudoku_cards import AVATAR, AVATAR_FALLBACK, AVATAR_TOP, GAP, PAD, Card, ramp, render_cards
 
 SOLVED = "534678912672195348198342567859761423426853791713924856961537284287419635345286179"
 GIVENS = "".join(c if i % 2 else "0" for i, c in enumerate(SOLVED))
@@ -61,6 +61,52 @@ def test_final_post_at_is_five_the_next_morning_across_a_clock_change():
     assert sudoku.final_post_at(date(2026, 10, 31)) == halifax(2026, 11, 1, 5)
     assert sudoku.final_post_at(date(2026, 10, 31)).astimezone(timezone.utc).hour == 9  # AST
     assert sudoku.final_post_at(date(2027, 3, 13)).astimezone(timezone.utc).hour == 8  # ADT
+
+
+@pytest.mark.parametrize(
+    "now, cutoff",
+    [
+        (halifax(2026, 12, 10, 14), halifax(2026, 12, 10, 14)),
+        (halifax(2026, 12, 10, 15, 59), halifax(2026, 12, 10, 14)),
+        (halifax(2026, 12, 10, 4, 1), halifax(2026, 12, 10, 4)),
+        (halifax(2026, 12, 10, 0, 30), halifax(2026, 12, 10, 0)),
+    ],
+)
+def test_batch_cutoff_is_the_latest_even_hour(now, cutoff):
+    assert sudoku.batch_cutoff(now) == cutoff
+    assert sudoku.batch_cutoff(now.astimezone(timezone.utc)) == cutoff
+
+
+def test_batch_cutoff_is_never_after_now_across_a_clock_change():
+    # 02:00 doesn't exist on 2027-03-14, and it resolves to the instant of the jump.
+    now = datetime(2027, 3, 14, 6, 30, tzinfo=timezone.utc)  # 03:30 ADT
+    cutoff = sudoku.batch_cutoff(now)
+    assert cutoff.astimezone(timezone.utc) == datetime(2027, 3, 14, 6, tzinfo=timezone.utc)
+    # 01:30 happens twice on 2026-11-01; both round down to the same midnight.
+    for fold in (0, 1):
+        assert sudoku.batch_cutoff(halifax(2026, 11, 1, 1, 30, fold=fold)) == halifax(2026, 11, 1, 0)
+
+
+def test_expires_at_is_the_next_rollover():
+    assert sudoku.expires_at(date(2026, 10, 31)) == halifax(2026, 11, 1, 4)
+    assert sudoku.puzzle_day(sudoku.expires_at(date(2026, 10, 31))) == date(2026, 11, 1)
+
+
+def test_reminder_due_window():
+    day = date(2026, 12, 10)
+    assert not sudoku.reminder_due(day, 3, halifax(2026, 12, 11, 0, 59))
+    assert sudoku.reminder_due(day, 3, halifax(2026, 12, 11, 1))
+    assert sudoku.reminder_due(day, 3, halifax(2026, 12, 11, 3, 59))
+    assert not sudoku.reminder_due(day, 3, halifax(2026, 12, 11, 4))
+
+
+def test_reminder_due_counts_real_hours_across_a_clock_change():
+    # Clocks go back at 02:00 on 2026-11-01, so expiry is 08:00 UTC. Six real
+    # hours before is 02:00 UTC, where wall-clock arithmetic would say 04:00 UTC.
+    day = date(2026, 10, 31)
+    assert sudoku.expires_at(day).astimezone(timezone.utc).hour == 8
+    assert not sudoku.reminder_due(day, 6, datetime(2026, 11, 1, 1, 59, tzinfo=timezone.utc))
+    assert sudoku.reminder_due(day, 6, datetime(2026, 11, 1, 2, tzinfo=timezone.utc))
 
 
 def test_pick_difficulty_is_stable_and_about_six_to_one():
@@ -377,8 +423,21 @@ def _card(**kwargs):
     return Card(**{**defaults, **kwargs})
 
 
-@pytest.mark.parametrize("count, size", [(1, (450, 154)), (2, (890, 154)), (3, (890, 298)), (10, (890, 730))])
-def test_render_cards_lays_out_one_or_two_columns(count, size):
+@pytest.mark.parametrize(
+    "count, size",
+    [
+        (1, (281, 347)),
+        (2, (552, 347)),
+        (4, (1094, 347)),
+        (5, (1094, 684)),
+        (16, (1094, 1358)),
+        (17, (1365, 1358)),
+        (30, (1365, 2032)),
+        (31, (1636, 2032)),
+        (50, (1636, 3043)),
+    ],
+)
+def test_render_cards_widens_as_the_list_grows(count, size):
     with Image.open(BytesIO(render_cards([_card() for _ in range(count)]))) as image:
         assert image.format == "PNG"
         assert image.size == size
@@ -389,6 +448,10 @@ def test_render_cards_survives_a_long_name_and_a_bad_avatar():
     assert png.startswith(b"\x89PNG")
 
 
+def test_render_cards_survives_the_longest_time_and_a_huge_streak():
+    assert render_cards([_card(seconds=sudoku.MAX_FILL_SECONDS, streak=10**6)]).startswith(b"\x89PNG")
+
+
 @pytest.mark.parametrize(
     "pixel, expected",
     [((0, 0, 0, 0), AVATAR_FALLBACK), ((200, 30, 30, 255), (200, 30, 30))],
@@ -396,7 +459,7 @@ def test_render_cards_survives_a_long_name_and_a_bad_avatar():
 def test_render_cards_shows_the_plain_disc_through_a_transparent_avatar(pixel, expected):
     avatar = BytesIO()
     Image.new("RGBA", (64, 64), pixel).save(avatar, format="PNG")
-    centre = (GAP + PAD + AVATAR // 2, GAP + (CARD_H - AVATAR) // 2 + 6 + AVATAR // 2)
+    centre = (GAP + PAD + AVATAR // 2, GAP + AVATAR_TOP + AVATAR // 2)
     with Image.open(BytesIO(render_cards([_card(avatar=avatar.getvalue())]))) as image:
         assert image.convert("RGB").getpixel(centre) == expected
 

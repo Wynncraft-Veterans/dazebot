@@ -15,15 +15,16 @@ from PIL import Image, ImageDraw
 from cogs.events.returns.lib.sudoku import format_time
 from lib.fonts import load_font
 
-CARD_W = 430
-CARD_H = 134
 GAP = 10
 PAD = 12
-AVATAR = 56
-CELL = 11
+AVATAR = 52
+CELL = 25
 CELL_GAP = 1
 BOX_GAP = 2
 HEATMAP = 9 * CELL + 8 * CELL_GAP + 2 * BOX_GAP
+AVATAR_TOP = PAD + HEATMAP + 14  # within a card, below the heatmap
+CARD_W = PAD + HEATMAP + PAD
+CARD_H = AVATAR_TOP + AVATAR + PAD
 
 CANVAS_BG = (30, 31, 34)
 CARD_BG = (43, 45, 49)
@@ -105,24 +106,35 @@ def _draw_heatmap(draw: ImageDraw.ImageDraw, card: Card, x: int, y: int) -> None
 
 def _draw_card(canvas: Image.Image, draw: ImageDraw.ImageDraw, card: Card, x: int, y: int) -> None:
     draw.rounded_rectangle((x, y, x + CARD_W - 1, y + CARD_H - 1), radius=8, fill=CARD_BG)
-    avatar_x, avatar_y = x + PAD, y + (CARD_H - AVATAR) // 2 + 6
+    _draw_heatmap(draw, card, x + PAD, y + PAD)
+
+    avatar_x, avatar_y = x + PAD, y + AVATAR_TOP
     _paste_avatar(canvas, card.avatar, avatar_x, avatar_y)
     if card.crowned:
-        _draw_crown(draw, avatar_x + AVATAR // 2, avatar_y - 3)
+        _draw_crown(draw, avatar_x + AVATAR // 2, avatar_y + 5)
 
-    text_x = avatar_x + AVATAR + PAD
-    heat_x = x + CARD_W - PAD - HEATMAP
-    width = heat_x - text_x - PAD
-    name_font, time_font, streak_font = load_font(18), load_font(28), load_font(14)
-    draw.text((text_x, y + 24), _fit(draw, card.name, name_font, width), font=name_font, fill=TEXT)
-    draw.text((text_x, y + 50), format_time(card.seconds), font=time_font, fill=TEXT)
-    draw.text((text_x, y + 88), f"{card.streak} day streak", font=streak_font, fill=MUTED)
-    _draw_heatmap(draw, card, heat_x, y + (CARD_H - HEATMAP) // 2)
+    text_x = avatar_x + AVATAR + 10
+    right = x + CARD_W - PAD
+    name_font, time_font, streak_font = load_font(18), load_font(20), load_font(13)
+    draw.text((text_x, avatar_y + 1), _fit(draw, card.name, name_font, right - text_x), font=name_font, fill=TEXT)
+    time_text = format_time(card.seconds)
+    draw.text((text_x, avatar_y + 28), time_text, font=time_font, fill=TEXT)
+    # The streak sits at the right, in whatever room the time leaves it.
+    room = right - text_x - draw.textlength(time_text, font=time_font) - 6
+    streak = _fit(draw, f"{card.streak} day streak", streak_font, room)
+    draw.text((right - draw.textlength(streak, font=streak_font), avatar_y + 34), streak, font=streak_font, fill=MUTED)
+
+
+def _columns(count: int) -> int:
+    """One row up to four cards, then more columns so the image stays wide."""
+    if count <= 4:
+        return count
+    return 4 if count <= 16 else 5 if count <= 30 else 6
 
 
 def render_cards(cards: list[Card]) -> bytes:
-    """A PNG of ``cards`` (the caller caps them): one column for one, else two."""
-    cols = min(2, len(cards))
+    """A PNG of ``cards``, which the caller caps."""
+    cols = _columns(len(cards))
     rows = (len(cards) + cols - 1) // cols
     canvas = Image.new(
         "RGB",

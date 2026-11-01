@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import random
 import re
 import shutil
+import statistics
 from collections import Counter
 from collections.abc import Collection, Iterable
 from datetime import date, datetime, time, timedelta, timezone
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 HALIFAX = ZoneInfo("America/Halifax")
@@ -23,16 +24,17 @@ ROLLOVER_HOURS = 4  # a puzzle day runs 04:00 to 04:00 Halifax, the lowest-load 
 FINAL_POST_TIME = time(5)  # gives the previous day an hour's grace
 BATCH_HOURS = 2  # solves are posted together on even hours, so on the rollover too
 
-DIFFICULTY_WEIGHTS = {"easy": 6, "medium": 1}
-SCORE_MULTIPLIERS = {"easy": 1, "medium": 3}
+DIFFICULTIES = ("easy", "medium", "hard")  # easiest first; a day moves at most one step
+SCORE_MULTIPLIERS = {"easy": 1, "medium": 3, "hard": 5}
+TARGET_MEDIAN_SECONDS = (6 * 60, 10 * 60)  # a median outside this moves the next day's level
 MAX_FILL_SECONDS = 7 * 24 * 60 * 60
 
 GENERATE_TIMEOUT_SECONDS = 120
 STOP_TIMEOUT_SECONDS = 10
 
 _SOLVED_RE = re.compile(r"[1-9]{81}")
-_PUZZLE_RE = re.compile(r"(\d{81}) #(Easy|Medium)")
-_LEVELS = {"easy": ("0", "Easy"), "medium": ("1", "Medium")}
+_PUZZLE_RE = re.compile(r"(\d{81}) #(Easy|Medium|Hard)")
+_LEVELS = {"easy": ("0", "Easy"), "medium": ("1", "Medium"), "hard": ("2", "Hard")}
 
 
 class GenerationError(Exception):
@@ -75,10 +77,24 @@ def reminder_due(day: date, hours_before: int, now: datetime) -> bool:
     return expires - timedelta(hours=hours_before) <= now < expires
 
 
-def pick_difficulty(day: date) -> str:
-    """Seeded by the day, so a retry after a failed generation keeps the level."""
-    levels = list(DIFFICULTY_WEIGHTS)
-    return random.Random(day.isoformat()).choices(levels, weights=list(DIFFICULTY_WEIGHTS.values()))[0]
+def step_difficulty(difficulty: str, step: int) -> str:
+    """The level ``step`` places from ``difficulty``, stopping at either end."""
+    index = DIFFICULTIES.index(difficulty) + step
+    return DIFFICULTIES[min(max(index, 0), len(DIFFICULTIES) - 1)]
+
+
+def pick_difficulty(previous: Optional[str], seconds: Collection[int]) -> str:
+    """The next puzzle's level, from the last puzzle's level and its solve times.
+
+    At most one step from the last level, so it only ever changes gradually. With
+    no median to go on, the first puzzle or a day nobody solved, it starts over at
+    the easiest.
+    """
+    if previous is None or not seconds:
+        return DIFFICULTIES[0]
+    fast, slow = TARGET_MEDIAN_SECONDS
+    median = statistics.median(seconds)
+    return step_difficulty(previous, 1 if median < fast else -1 if median > slow else 0)
 
 
 def format_time(seconds: int) -> str:

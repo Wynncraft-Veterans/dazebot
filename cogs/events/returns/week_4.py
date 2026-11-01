@@ -20,8 +20,9 @@ A day takes submissions until then, so the final post really is final. Only the
 tick posts, so a client retry cannot double-post. Each post is sent, then saved:
 a crash between the two can cause a rare duplicate, which is accepted.
 
-There is no ``/return 4``: everything happens in game and in the tick. The
-tables are in ``orm.py`` because returns.db has a documented wipe that would
+There is no ``/return 4``: everything happens in game and in the tick, bar two
+staff commands: ``~manage_return 4 void`` swaps a bad puzzle for a new one, and
+``~manage_return 4 difficulty`` forces the next puzzle's level. The tables are in ``orm.py`` because returns.db has a documented wipe that would
 erase the streaks. ``SUDOKU_CHANNEL`` is read each tick, and 0 stops the posts
 while the puzzle keeps running.
 
@@ -42,9 +43,12 @@ from typing import Optional
 
 import aiohttp
 import discord
+from discord.ext import commands
 from tortoise.exceptions import IntegrityError
+from tortoise.transactions import in_transaction
 
-from cogs.events.returns import register_tick
+from cogs.events.returns import Tier, register_manage, register_tick
+from cogs.events.returns._common import is_persist_context, send_feedback
 from cogs.events.returns.lib import sudoku
 from cogs.events.returns.lib.sudoku_cards import Card, render_cards
 from config import CurrConfig
@@ -180,7 +184,9 @@ async def submit(bot: discord.Client, body: dict) -> dict:
             result = await SudokuResult.get(day=day, disc_uuid=disc_uuid)
 
     ranked = await _ranked(day)
-    rank = next(i for i, r in enumerate(ranked, start=1) if r.disc_uuid == disc_uuid)
+    rank = next((i for i, r in enumerate(ranked, start=1) if r.disc_uuid == disc_uuid), None)
+    if rank is None:  # a void wiped it since the insert
+        raise SubmitRejected(410, "that puzzle was replaced")
     return {
         "status": "ok",
         "seconds": result.seconds,
@@ -421,13 +427,24 @@ async def _ensure_puzzle(_bot: discord.Client, now: datetime) -> None:
         return
     if time.monotonic() < _retry_at:
         return
-    difficulty = sudoku.pick_difficulty(day)
+    if newest is None:
+        difficulty = sudoku.pick_difficulty(None, [])
+    elif newest.next_difficulty:
+        difficulty = newest.next_difficulty  # forced by ~manage_return 4 difficulty
+    else:
+        seconds = await SudokuResult.filter(day=newest.day).values_list("seconds", flat=True)
+        difficulty = sudoku.pick_difficulty(newest.difficulty, seconds)
     try:
         givens = await sudoku.generate_givens(difficulty)
     except Exception as exc:  # a missing java or jar, a bad run: never crash the tick
         _retry_at = time.monotonic() + GENERATE_RETRY_SECONDS
         logger.warning("sudoku generation for %s failed, will retry: %s", day, exc)
         return
+    # A force set while that ran has to win, so the next tick generates again.
+    if newest is not None:
+        await newest.refresh_from_db(fields=["next_difficulty"])
+        if newest.next_difficulty and newest.next_difficulty != difficulty:
+            return
     await SudokuDay.create(day=day, givens=givens, difficulty=difficulty)
     logger.info("sudoku puzzle for %s stored (%s)", day, difficulty)
 
@@ -552,6 +569,93 @@ async def _send_reminders(bot: discord.Client, now: datetime) -> None:
             return
         settings.last_reminded_day = newest.day
         await settings.save(update_fields=["last_reminded_day"])
+
+
+# ---------------------------------------------------------------------------
+# Manage
+# ---------------------------------------------------------------------------
+
+
+async def _replace_puzzle(day: date, givens: str) -> Optional[int]:
+    """Swap ``day``'s puzzle in place and wipe its solves, returning how many.
+
+    The row keeps its date, which is what sets when a puzzle expires, so the new
+    puzzle lasts exactly as long as the old one would have. None if ``day`` is no
+    longer the newest, because a rollover got in while generating.
+    """
+    async with _lock:
+        newest = await SudokuDay.all().order_by("-day").first()
+        if newest is None or newest.day != day:
+            return None
+        async with in_transaction("default"):
+            wiped = await SudokuResult.filter(day=day).delete()
+            # Someone reminded today may have just lost the solve that kept their streak.
+            await SudokuNotification.filter(last_reminded_day=day).update(last_reminded_day=None)
+            newest.givens = givens
+            await newest.save(update_fields=["givens"])
+    return wiped
+
+
+@register_manage(
+    WEEK, "void", tier=Tier.STAFF,
+    help="Replace the current puzzle with a new one at the same difficulty and wipe its results. "
+         "The new puzzle expires when the old one would have.",
+)
+async def _manage_void(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    row = await SudokuDay.all().order_by("-day").first()
+    if row is None:
+        await send_feedback(ctx, "There's no puzzle to void.", persist=persist)
+        return
+    # New puzzles are failing to generate, and the next success would replace it.
+    if _now() >= sudoku.expires_at(row.day):
+        await send_feedback(ctx, f"⚠️ The puzzle for {row.day} has already expired, so nothing changed.", persist=persist)
+        return
+    # Generate first, so a failure leaves the puzzle and its results alone.
+    try:
+        givens = await sudoku.generate_givens(row.difficulty)
+    except Exception as exc:
+        logger.warning("sudoku void of %s could not generate: %s", row.day, exc)
+        await send_feedback(ctx, f"⚠️ Couldn't generate a new puzzle, so nothing changed: {exc}", persist=persist)
+        return
+    wiped = await _replace_puzzle(row.day, givens)
+    if wiped is None:
+        await send_feedback(ctx, f"⚠️ A newer puzzle arrived, so {row.day} was left alone. Run it again.", persist=persist)
+        return
+    logger.info("sudoku puzzle for %s voided by %s, %d results wiped", row.day, ctx.author, wiped)
+    expires = discord.utils.format_dt(sudoku.expires_at(row.day), "R")
+    await send_feedback(
+        ctx,
+        f"✅ Replaced the {row.difficulty} puzzle for {row.day} and wiped {wiped} result(s). "
+        f"It expires {expires}, as before. Players get it within about a minute.",
+        persist=persist,
+    )
+
+
+@register_manage(
+    WEEK, "difficulty", tier=Tier.STAFF,
+    help="Show or force the next puzzle's difficulty, one step from the current puzzle's or from an "
+         "earlier force. Overrides the solve-time rule for that puzzle only; today's is unchanged.",
+    usage="[up|down]",
+)
+async def _manage_difficulty(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    row = await SudokuDay.all().order_by("-day").first()
+    if row is None:
+        await send_feedback(ctx, "There's no puzzle yet.", persist=persist)
+        return
+    if not args:
+        next_level = f"forced to {row.next_difficulty}" if row.next_difficulty else "set by today's solve times"
+        await send_feedback(ctx, f"Current puzzle: {row.difficulty}. Next puzzle: {next_level}.", persist=persist)
+        return
+    steps = {"up": 1, "down": -1}
+    if len(args) != 1 or args[0].lower() not in steps:
+        await send_feedback(ctx, "Usage: `~manage_return 4 difficulty [up|down]`", persist=persist)
+        return
+    row.next_difficulty = sudoku.step_difficulty(row.next_difficulty or row.difficulty, steps[args[0].lower()])
+    await row.save(update_fields=["next_difficulty"])
+    logger.info("sudoku next difficulty forced to %s by %s", row.next_difficulty, ctx.author)
+    await send_feedback(ctx, f"✅ The next puzzle will be {row.next_difficulty}.", persist=persist)
 
 
 @register_tick(WEEK)

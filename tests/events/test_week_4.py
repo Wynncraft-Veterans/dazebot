@@ -22,7 +22,7 @@ from tortoise import Tortoise
 from tortoise.exceptions import IntegrityError
 
 from api.main import create_app
-from cogs.events.returns import REGISTRY, TICK_REGISTRY
+from cogs.events.returns import MANAGE_REGISTRY, REGISTRY, TICK_REGISTRY, Tier
 from cogs.events.returns import week_4 as w
 from cogs.events.returns.lib import sudoku
 from orm import SudokuDay, SudokuNotification, SudokuResult, init_db
@@ -180,12 +180,316 @@ async def test_tick_stores_the_days_puzzle_once(_isolated_db, h, at, monkeypatch
     at(halifax(D2, 4))
     generate = AsyncMock(return_value=GIVENS)
     monkeypatch.setattr(sudoku, "generate_givens", generate)
-    monkeypatch.setattr(sudoku, "pick_difficulty", lambda day: "medium")
+    monkeypatch.setattr(sudoku, "pick_difficulty", lambda previous, seconds: "medium")
     await w.tick(h.bot)
     await w.tick(h.bot)
     generate.assert_awaited_once_with("medium")
     row = await SudokuDay.get(day=D2)
     assert (row.givens, row.difficulty, row.rollup_done) == (GIVENS, "medium", False)
+
+
+async def _solve(day: date, disc_uuid: str, seconds: int) -> None:
+    await SudokuResult.create(
+        day=day, disc_uuid=disc_uuid, seconds=seconds, fills=[seconds], finished_at=halifax(day, 12)
+    )
+
+
+async def test_the_next_level_follows_the_last_days_median(_isolated_db, h, at, monkeypatch):
+    await _seed(D1, difficulty="medium")
+    await _solve(D1, "1", 100)
+    await _solve(D1, "2", 200)
+    await _solve(D1, "3", 90000)
+    generate = AsyncMock(return_value=GIVENS)
+    monkeypatch.setattr(sudoku, "generate_givens", generate)
+    at(halifax(D2, 4))
+    await w.tick(h.bot)
+    generate.assert_awaited_once_with("hard")
+    assert (await SudokuDay.get(day=D2)).difficulty == "hard"
+
+
+async def test_the_next_level_starts_over_after_a_day_nobody_solved(_isolated_db, h, at, monkeypatch):
+    await _seed(D1, difficulty="hard")
+    monkeypatch.setattr(sudoku, "generate_givens", AsyncMock(return_value=GIVENS))
+    at(halifax(D2, 4))
+    await w.tick(h.bot)
+    assert (await SudokuDay.get(day=D2)).difficulty == "easy"
+
+
+# --- ~manage_return 4 difficulty ---------------------------------------------
+
+
+def test_difficulty_is_registered_for_staff():
+    assert MANAGE_REGISTRY[4]["difficulty"].tier is Tier.STAFF
+
+
+async def test_forcing_up_overrides_the_solve_times_once(_isolated_db, h, at, monkeypatch):
+    await _seed(D1)
+    # A slow day would step an easy puzzle nowhere, and a fast one up: use slow.
+    await _solve(D1, "1", 5000)
+    generate = AsyncMock(return_value=GIVENS)
+    monkeypatch.setattr(sudoku, "generate_givens", generate)
+    ctx = _void_ctx()
+
+    await w._manage_difficulty(ctx, ["up"])
+
+    assert "next puzzle will be medium" in _reply(ctx)
+    assert (await SudokuDay.get(day=D1)).difficulty == "easy"  # today's is untouched
+    at(halifax(D2, 4))
+    await w.tick(h.bot)
+    generate.assert_awaited_once_with("medium")
+    assert (await SudokuDay.get(day=D2)).difficulty == "medium"
+
+    # Only that puzzle: the one after goes back to solve times, here none, so easy.
+    generate.reset_mock()
+    at(halifax(D3, 4))
+    await w.tick(h.bot)
+    generate.assert_awaited_once_with("easy")
+
+
+async def test_a_force_during_generation_wins_on_the_next_tick(_isolated_db, h, at, monkeypatch):
+    await _seed(D1)
+    await _solve(D1, "1", 500)  # in the target, so it would stay easy
+    levels = []
+
+    async def force_meanwhile(difficulty):
+        levels.append(difficulty)
+        if len(levels) == 1:
+            await w._manage_difficulty(_void_ctx(), ["up"])
+        return GIVENS
+
+    monkeypatch.setattr(sudoku, "generate_givens", force_meanwhile)
+    at(halifax(D2, 4))
+    await w.tick(h.bot)
+    assert not await SudokuDay.exists(day=D2)
+
+    await w.tick(h.bot)
+    assert levels == ["easy", "medium"]
+    assert (await SudokuDay.get(day=D2)).difficulty == "medium"
+
+
+async def test_forcing_stacks_and_stops_at_the_ends(_isolated_db):
+    await _seed(D1)
+    ctx = _void_ctx()
+    await w._manage_difficulty(ctx, ["up"])
+    await w._manage_difficulty(ctx, ["UP"])
+    await w._manage_difficulty(ctx, ["up"])
+    assert (await SudokuDay.get(day=D1)).next_difficulty == "hard"
+    await w._manage_difficulty(ctx, ["down"])
+    assert (await SudokuDay.get(day=D1)).next_difficulty == "medium"
+
+
+async def test_forcing_down_from_the_bottom_still_holds_it_there(_isolated_db, h, at, monkeypatch):
+    await _seed(D1)
+    await _solve(D1, "1", 60)  # fast enough to step up on its own
+    generate = AsyncMock(return_value=GIVENS)
+    monkeypatch.setattr(sudoku, "generate_givens", generate)
+    await w._manage_difficulty(_void_ctx(), ["down"])
+    at(halifax(D2, 4))
+    await w.tick(h.bot)
+    generate.assert_awaited_once_with("easy")
+
+
+async def test_difficulty_with_no_argument_reports_it(_isolated_db):
+    await _seed(D1, difficulty="medium")
+    ctx = _void_ctx()
+    await w._manage_difficulty(ctx, [])
+    assert "Current puzzle: medium" in _reply(ctx)
+    assert "set by today's solve times" in _reply(ctx)
+    await w._manage_difficulty(ctx, ["up"])
+    ctx = _void_ctx()
+    await w._manage_difficulty(ctx, [])
+    assert "forced to hard" in _reply(ctx)
+
+
+async def test_difficulty_refuses_anything_else(_isolated_db):
+    await _seed(D1)
+    ctx = _void_ctx()
+    await w._manage_difficulty(ctx, ["sideways"])
+    assert "Usage" in _reply(ctx)
+    assert (await SudokuDay.get(day=D1)).next_difficulty is None
+
+
+async def test_difficulty_with_no_puzzle_says_so(_isolated_db):
+    ctx = _void_ctx()
+    await w._manage_difficulty(ctx, ["up"])
+    assert "no puzzle" in _reply(ctx)
+
+
+async def test_the_first_puzzle_is_easy(_isolated_db, h, at, monkeypatch):
+    generate = AsyncMock(return_value=GIVENS)
+    monkeypatch.setattr(sudoku, "generate_givens", generate)
+    at(halifax(D1, 12))
+    await w.tick(h.bot)
+    generate.assert_awaited_once_with("easy")
+
+
+# --- ~manage_return 4 void ---------------------------------------------------
+
+
+NEW_GIVENS = "0" + GIVENS[1:]
+
+
+def _void_ctx():
+    ctx = MagicMock()
+    ctx.channel = MagicMock(spec=discord.DMChannel)
+    ctx.reply = AsyncMock()
+    return ctx
+
+
+def _reply(ctx) -> str:
+    return " ".join(call.args[0] for call in ctx.reply.await_args_list)
+
+
+def test_void_is_registered_for_staff():
+    assert MANAGE_REGISTRY[4]["void"].tier is Tier.STAFF
+
+
+async def test_void_swaps_the_newest_puzzle_and_wipes_only_its_results(_isolated_db, monkeypatch):
+    await _seed(D1)
+    await _seed(D2, difficulty="medium")
+    await _solve(D1, "1", 60)
+    await _solve(D2, "1", 60)
+    await _solve(D2, "2", 90)
+    generate = AsyncMock(return_value=NEW_GIVENS)
+    monkeypatch.setattr(sudoku, "generate_givens", generate)
+    ctx = _void_ctx()
+
+    await w._manage_void(ctx, [])
+
+    # The same level and the same date, which is what keeps the old expiry.
+    generate.assert_awaited_once_with("medium")
+    row = await SudokuDay.get(day=D2)
+    assert (row.givens, row.difficulty, row.rollup_done) == (NEW_GIVENS, "medium", False)
+    assert await SudokuResult.filter(day=D2).count() == 0
+    assert await SudokuResult.filter(day=D1).count() == 1
+    assert (await SudokuDay.get(day=D1)).givens == GIVENS
+    assert (await w.today())["givens"] == NEW_GIVENS
+    assert "wiped 2 result(s)" in _reply(ctx)
+
+
+async def test_void_lets_a_player_solve_the_new_puzzle_but_not_the_old(_isolated_db, h, monkeypatch):
+    new_givens = SOLVED[:40] + "0" + SOLVED[41:]
+    old_givens = "0" + SOLVED[1:]
+    await SudokuDay.create(day=D2, givens=old_givens, difficulty="easy")
+    monkeypatch.setattr(sudoku, "generate_givens", AsyncMock(return_value=new_givens))
+    monkeypatch.setattr(w, "_find_member", lambda bot, disc_uuid: _member(str(disc_uuid)))
+    await w._manage_void(_void_ctx(), [])
+
+    # A board of the old puzzle is the same solved grid here, so use a wrong one.
+    wrong = "6" + SOLVED[1:]
+    with pytest.raises(w.SubmitRejected):
+        await w.submit(h.bot, {"disc_uuid": "1", "day": D2.isoformat(), "grid": wrong, "fills": [1] * 81})
+    fills_for_new = [0 if g != "0" else 5 for g in new_givens]
+    result = await w.submit(
+        h.bot, {"disc_uuid": "1", "day": D2.isoformat(), "grid": SOLVED, "fills": fills_for_new}
+    )
+    assert (result["seconds"], result["rank"], result["duplicate"]) == (5, 1, False)
+
+
+async def test_a_voided_puzzle_keeps_its_expiry(_isolated_db, h, at, monkeypatch):
+    # The first puzzle is dated a day ahead; a void must not bring its end forward.
+    generate = AsyncMock(return_value=GIVENS)
+    monkeypatch.setattr(sudoku, "generate_givens", generate)
+    at(halifax(D1, 12))
+    await w.tick(h.bot)
+    assert [row.day for row in await SudokuDay.all()] == [D2]
+
+    generate.return_value = NEW_GIVENS
+    await w._manage_void(_void_ctx(), [])
+
+    # The rollover into its date finds it there; the one after that replaces it.
+    generate.reset_mock()
+    at(halifax(D2, 4))
+    await w.tick(h.bot)
+    generate.assert_not_awaited()
+    assert (await SudokuDay.get(day=D2)).givens == NEW_GIVENS
+    at(halifax(D3, 4))
+    await w.tick(h.bot)
+    generate.assert_awaited_once()
+    assert [row.day for row in await SudokuDay.all().order_by("day")] == [D2, D3]
+
+
+async def test_void_changes_nothing_when_generation_fails(_isolated_db, monkeypatch):
+    await _seed(D2)
+    await _solve(D2, "1", 60)
+    monkeypatch.setattr(sudoku, "generate_givens", AsyncMock(side_effect=sudoku.GenerationError("no jar")))
+    ctx = _void_ctx()
+
+    await w._manage_void(ctx, [])
+
+    assert (await SudokuDay.get(day=D2)).givens == GIVENS
+    assert await SudokuResult.filter(day=D2).count() == 1
+    assert "nothing changed" in _reply(ctx)
+
+
+async def test_void_leaves_a_day_that_stopped_being_the_newest(_isolated_db, monkeypatch):
+    await _seed(D1)
+    await _solve(D1, "1", 60)
+
+    async def rollover_meanwhile(_difficulty):
+        await _seed(D2)
+        return NEW_GIVENS
+
+    monkeypatch.setattr(sudoku, "generate_givens", rollover_meanwhile)
+    ctx = _void_ctx()
+
+    await w._manage_void(ctx, [])
+
+    assert (await SudokuDay.get(day=D1)).givens == GIVENS
+    assert await SudokuResult.filter(day=D1).count() == 1
+    assert (await SudokuDay.get(day=D2)).givens == GIVENS
+    assert "left alone" in _reply(ctx)
+
+
+async def test_void_refuses_a_puzzle_past_its_expiry(_isolated_db, at, monkeypatch):
+    await _seed(D1)
+    await _solve(D1, "1", 60)
+    generate = AsyncMock(return_value=NEW_GIVENS)
+    monkeypatch.setattr(sudoku, "generate_givens", generate)
+    at(halifax(D2, 4))
+    ctx = _void_ctx()
+
+    await w._manage_void(ctx, [])
+
+    generate.assert_not_awaited()
+    assert (await SudokuDay.get(day=D1)).givens == GIVENS
+    assert await SudokuResult.filter(day=D1).count() == 1
+    assert "already expired" in _reply(ctx)
+
+
+async def test_void_lets_todays_reminder_go_out_again(_isolated_db, at, monkeypatch):
+    await _seed(D2)
+    other_day = await SudokuNotification.create(disc_uuid="1", last_reminded_day=D1)
+    today = await SudokuNotification.create(disc_uuid="2", last_reminded_day=D2)
+    monkeypatch.setattr(sudoku, "generate_givens", AsyncMock(return_value=NEW_GIVENS))
+    at(halifax(D2, 12))
+
+    await w._manage_void(_void_ctx(), [])
+
+    await other_day.refresh_from_db()
+    await today.refresh_from_db()
+    assert other_day.last_reminded_day == D1
+    assert today.last_reminded_day is None
+
+
+async def test_a_submit_a_void_wiped_at_once_is_refused(_isolated_db, h, monkeypatch):
+    await SudokuDay.create(day=D2, givens="0" + SOLVED[1:], difficulty="easy")
+    monkeypatch.setattr(w, "_find_member", lambda bot, disc_uuid: _member(str(disc_uuid)))
+    monkeypatch.setattr(w, "_ranked", AsyncMock(return_value=[]))
+    with pytest.raises(w.SubmitRejected) as rejected:
+        await w.submit(h.bot, {"disc_uuid": "1", "day": D2.isoformat(), "grid": SOLVED, "fills": [5] + [0] * 80})
+    assert rejected.value.status == 410
+
+
+async def test_void_with_no_puzzle_says_so(_isolated_db, monkeypatch):
+    generate = AsyncMock()
+    monkeypatch.setattr(sudoku, "generate_givens", generate)
+    ctx = _void_ctx()
+
+    await w._manage_void(ctx, [])
+
+    generate.assert_not_awaited()
+    assert "no puzzle" in _reply(ctx)
 
 
 async def test_tick_before_the_rollover_belongs_to_the_previous_day(_isolated_db, h, at, monkeypatch):

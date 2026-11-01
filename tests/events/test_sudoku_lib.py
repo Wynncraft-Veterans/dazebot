@@ -109,13 +109,51 @@ def test_reminder_due_counts_real_hours_across_a_clock_change():
     assert sudoku.reminder_due(day, 6, datetime(2026, 11, 1, 2, tzinfo=timezone.utc))
 
 
-def test_pick_difficulty_is_stable_and_about_six_to_one():
-    day = date(2026, 11, 1)
-    assert sudoku.pick_difficulty(day) == sudoku.pick_difficulty(day)
-    days = [date.fromordinal(day.toordinal() + i) for i in range(7000)]
-    picks = [sudoku.pick_difficulty(d) for d in days]
-    assert set(picks) == {"easy", "medium"}
-    assert 800 < picks.count("medium") < 1200
+def test_pick_difficulty_starts_easy():
+    assert sudoku.pick_difficulty(None, []) == "easy"
+
+
+@pytest.mark.parametrize(
+    ("previous", "seconds", "expected"),
+    [
+        # A fast median steps up, stopping at the top.
+        ("easy", [200, 300, 359], "medium"),
+        ("medium", [359], "hard"),
+        ("hard", [60], "hard"),
+        # A slow median steps down, stopping at the bottom.
+        ("hard", [601, 900, 9000], "medium"),
+        ("medium", [601], "easy"),
+        ("easy", [5000], "easy"),
+        # Inside the 6 to 10 minute target holds, both edges included.
+        ("medium", [360], "medium"),
+        ("medium", [600], "medium"),
+        # Only ever one step, however far outside the target it was.
+        ("easy", [1], "medium"),
+        ("hard", [90000], "medium"),
+        # The median, so one very slow solve doesn't move it.
+        ("easy", [100, 200, 90000], "medium"),
+        # An even count averages the middle two: 360 holds, 359.5 doesn't.
+        ("easy", [300, 420], "easy"),
+        ("easy", [300, 419], "medium"),
+        # Nobody solved it, so no median: start over at easy, from any level.
+        ("hard", [], "easy"),
+        ("medium", [], "easy"),
+        ("easy", [], "easy"),
+    ],
+)
+def test_pick_difficulty_follows_the_last_days_median(previous, seconds, expected):
+    assert sudoku.pick_difficulty(previous, seconds) == expected
+
+
+def test_step_difficulty_stops_at_either_end():
+    assert sudoku.step_difficulty("easy", 1) == "medium"
+    assert sudoku.step_difficulty("hard", -1) == "medium"
+    assert sudoku.step_difficulty("hard", 1) == "hard"
+    assert sudoku.step_difficulty("easy", -1) == "easy"
+
+
+def test_every_difficulty_has_a_multiplier():
+    assert set(sudoku.SCORE_MULTIPLIERS) == set(sudoku.DIFFICULTIES)
 
 
 def test_format_time():

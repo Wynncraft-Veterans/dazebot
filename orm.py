@@ -1021,13 +1021,15 @@ class SudokuDay(Model):
     """One puzzle per puzzle day, which runs 04:00 to 04:00 Halifax.
 
     ``givens`` is 81 digits with 0 for a blank. The day takes submissions until
-    ``rollup_done``, set once its final post has gone out.
+    ``rollup_done``, set once its final post has gone out. ``next_difficulty`` is
+    the level the following puzzle was forced to, or None to go by solve times.
     """
 
     day = fields.DateField(pk=True)
     givens = fields.CharField(max_length=81)
     difficulty = fields.CharField(max_length=16)
     rollup_done = fields.BooleanField(default=False)
+    next_difficulty = fields.CharField(max_length=16, null=True)
 
     class Meta:
         table = "sudoku_days"

@@ -880,7 +880,7 @@ def create_app(bot: Bot) -> FastAPI:
         """Return the newest daily sudoku for temporary-server's poller.
 
         Response: ``{"day": "YYYY-MM-DD", "givens": "<81 digits, 0 = blank>",
-        "difficulty": "easy"|"medium"}``. ``503`` if no puzzle exists yet.
+        "difficulty": "easy"|"medium"|"hard"}``. ``503`` if no puzzle exists yet.
 
         Same auth + fail-closed pattern as the other ``/api/internal/*``
         endpoints (``DAZEBOT_INTROSPECT_SECRET``, verify network only).

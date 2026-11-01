@@ -49,6 +49,7 @@ Auto-discovery: `bot.py:_load_cogs` walks every `.py` file under `cogs/` (recurs
 | Cog | Owns |
 |---|---|
 | [`return_cmd.py`](../cogs/events/return_cmd.py) and [`returns/`](../cogs/events/returns/) | `/return <id>` dispatcher + per-week handlers. Each `week_N.py` decorates a function with `@register(N)` to register itself in `REGISTRY`. |
+| [`returns/week_4.py`](../cogs/events/returns/week_4.py) | The daily sudoku, a permanent module rather than a past event: no `/return 4`, just a tick and the `/api/internal/sudoku/*` routes. The tick runs HoDoKu at the 04:00 Halifax rollover ([`lib/sudoku.py`](../cogs/events/returns/lib/sudoku.py), `HODOKU_JAVA` + `HODOKU_JAR`, retries about every 10 minutes), edits the day's live post when the solved count changes, and from 05:00 sends the previous day's final post once the new puzzle exists, which closes that day. Cards are pure PIL ([`lib/sudoku_cards.py`](../cogs/events/returns/lib/sudoku_cards.py)). `SUDOKU_CHANNEL` is read each tick; 0 stops the posts and days close silently. Players submit through temporary-server, never directly. |
 | [`weekly_event.py`](../cogs/events/weekly_event.py) | `/score` group and `/count` (forum reaction tallies). |
 
 ## `cogs/integrations/` — outside-of-Discord glue

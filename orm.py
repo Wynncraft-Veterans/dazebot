@@ -1011,6 +1011,52 @@ class BucketPull(Model):
         table = "bucket_pulls"
 
 
+# --- Daily sudoku ----------------------------------------------------------
+# Owned by ``cogs/events/returns/week_4.py``. Permanent like ``Cult`` rather
+# than ad-hoc like the tables in ``orm_returns.py``: the file-level wipe of
+# returns.db would erase every streak.
+
+
+class SudokuDay(Model):
+    """One puzzle per puzzle day, which runs 04:00 to 04:00 Halifax.
+
+    ``givens`` is 81 digits with 0 for a blank. The day takes submissions until
+    ``rollup_done``, set once its final post has gone out. ``channel_id`` and
+    ``live_message_id`` point at the day's live post and are NULL until there
+    is one, or after it was deleted, which makes the next tick repost.
+    """
+
+    day = fields.DateField(pk=True)
+    givens = fields.CharField(max_length=81)
+    difficulty = fields.CharField(max_length=16)
+    channel_id: Optional[int] = fields.BigIntField(null=True)  # type: ignore
+    live_message_id: Optional[int] = fields.BigIntField(null=True)  # type: ignore
+    live_count = fields.IntField(default=0)
+    rollup_done = fields.BooleanField(default=False)
+
+    class Meta:
+        table = "sudoku_days"
+
+
+class SudokuResult(Model):
+    """One player's solve of one day. Created on submit, never updated.
+
+    ``seconds`` is ``max(fills)``. ``fills[i]`` is 0 on a given, otherwise the
+    whole seconds of active time when that cell was last set.
+    """
+
+    id = fields.IntField(pk=True)
+    day = fields.DateField()
+    disc_uuid = fields.CharField(max_length=255, index=True)
+    seconds = fields.IntField()
+    fills = fields.JSONField()
+    finished_at = fields.DatetimeField()
+
+    class Meta:
+        table = "sudoku_results"
+        unique_together = (("day", "disc_uuid"),)
+
+
 def _inspect_db_state(db_path: str) -> tuple[bool, set[str]]:
     """Return ``(file_exists, table_names)`` for the SQLite file at ``db_path``.
 

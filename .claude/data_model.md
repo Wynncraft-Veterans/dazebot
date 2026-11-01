@@ -47,7 +47,9 @@ existing pattern used by `IntercultMessage.sender_disc_uuid`,
 What stays in **dazebot.db**: everything else, including the Returners
 infrastructure that is NOT per-week ephemeral — `WeeklyEvent`, `Score`
 (scoring scaffold every return uses), `Cult` and friends (week 0 / cults
-are permanent), and `Apartment` (community feature, not week-scoped).
+are permanent), `SudokuDay` and `SudokuResult` (week 4 is permanent, and a
+wipe would erase the streaks), and `Apartment` (community feature, not
+week-scoped).
 
 Restoring from a known-safe dump: `vets-deploy/scripts/one-off/restore-dazebot-db.sh`
 for dazebot.db and `restore-returns-db.sh` for returns.db.
@@ -157,6 +159,13 @@ two-DB split" above. Defined in [orm_returns.py](../orm_returns.py); the
 | `CultMembership` | `cogs/events/returns/week_0.py` | Membership of a Discord user in a cult. |
 | `IntercultMessage` | `cogs/events/returns/lib/views/intercult_view.py` | Append-only log of cross-cult messages sent via the pinned intercult button. The 24h-per-cult cooldown is derived from the most recent row per `sender_cult_name`. Stores names (not FKs) so a future cult rename leaves history pointing at the name-at-time. |
 | `RecruitmentQuery` | `cogs/events/returns/lib/views/recruitment_view.py` | Append-only log of clicks on the pinned recruitment button (lists online players not in any cult). The 1h-per-cult cooldown is derived from the most recent row per `cult_name`. Same name-not-FK pattern as `IntercultMessage`. |
+
+## Daily sudoku
+
+| Table | Owner | Purpose |
+|---|---|---|
+| `SudokuDay` | `cogs/events/returns/week_4.py` | One puzzle per puzzle day, the very first dated a day ahead so it outlasts the next rollover, which runs 04:00 to 04:00 `America/Halifax`. `day` is the PK, `givens` is 81 digits with 0 for a blank. Takes submissions until `rollup_done`, set once the final post has gone out. `channel_id` + `live_message_id` point at the live post and are NULL until there is one, or after it was deleted; `live_count` is the solved count it last showed. |
+| `SudokuResult` | `cogs/events/returns/week_4.py` | One row per solve, created on submit only, no nullable columns. `unique_together (day, disc_uuid)` is what makes a repeat submission a duplicate rather than an overwrite. `seconds` is `max(fills)`; `fills` is a JSON list of 81 ints, 0 on a given, otherwise active seconds when that cell was last set. Rank and all-time score aren't stored: they are computed when needed, so changing the constants in `lib/sudoku.py` re-scores history. |
 
 ## Chore-Torn Palace (CTP)
 

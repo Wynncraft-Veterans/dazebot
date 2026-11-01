@@ -33,6 +33,7 @@ from lib.mc.wynn_api.errors import WynnApiError
 from lib.role_state import RoleState, ensure_linked_baseline, state_of
 from lib.staff import staff_actions
 from cogs.activity.activity import currently_online_returners_mc_ids
+from cogs.events.returns import week_4 as sudoku_week
 from cogs.rewards.ctp.lib import glints as glints_svc
 from cogs.rewards.donations.lib import svc as donations_svc
 from cogs.rewards.shopping.lib import svc as shopping_svc
@@ -871,5 +872,66 @@ def create_app(bot: Bot) -> FastAPI:
                 for mc, _total in ranked
             ]
         }
+
+    @app.get("/api/internal/sudoku/today")
+    async def sudoku_today(
+        x_introspect_secret: str | None = Header(default=None),
+    ):
+        """Return the newest daily sudoku for temporary-server's poller.
+
+        Response: ``{"day": "YYYY-MM-DD", "givens": "<81 digits, 0 = blank>",
+        "difficulty": "easy"|"medium"}``. ``503`` if no puzzle exists yet.
+
+        Same auth + fail-closed pattern as the other ``/api/internal/*``
+        endpoints (``DAZEBOT_INTROSPECT_SECRET``, verify network only).
+        """
+        expected = os.environ.get("DAZEBOT_INTROSPECT_SECRET")
+        if not expected:
+            logger.error(
+                "sudoku_today: DAZEBOT_INTROSPECT_SECRET not set; refusing"
+            )
+            raise HTTPException(status_code=503, detail="sudoku disabled")
+        if x_introspect_secret != expected:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+        puzzle = await sudoku_week.today()
+        if puzzle is None:
+            raise HTTPException(status_code=503, detail="no puzzle yet")
+        return puzzle
+
+    @app.post("/api/internal/sudoku/submit")
+    async def sudoku_submit(
+        body: dict = Body(...),
+        x_introspect_secret: str | None = Header(default=None),
+    ):
+        """Record one solved board, forwarded by ``temporary-server``, which
+        stamps ``disc_uuid`` from the session.
+
+        Body: ``{"disc_uuid": str, "day": "YYYY-MM-DD",
+        "grid": "<81 digits 1-9>", "fills": [81 ints]}``
+        Response: ``{"status": "ok", "seconds": int, "rank": int,
+        "streak": int, "duplicate": bool}``
+
+        ``400`` malformed or wrong board, ``403`` not a member of the server,
+        ``410`` that day is closed or unknown, ``503`` bot not ready. Same auth
+        pattern as above.
+        """
+        expected = os.environ.get("DAZEBOT_INTROSPECT_SECRET")
+        if not expected:
+            logger.error(
+                "sudoku_submit: DAZEBOT_INTROSPECT_SECRET not set; refusing"
+            )
+            raise HTTPException(status_code=503, detail="sudoku disabled")
+        if x_introspect_secret != expected:
+            raise HTTPException(status_code=401, detail="unauthorized")
+        # Uvicorn starts before the gateway is ready, and with no guilds cached
+        # every player would look like a non-member.
+        if not bot.is_ready():
+            raise HTTPException(status_code=503, detail="bot not ready")
+
+        try:
+            return await sudoku_week.submit(bot, body)
+        except sudoku_week.SubmitRejected as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.detail)
 
     return app

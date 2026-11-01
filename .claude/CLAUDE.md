@@ -53,6 +53,8 @@ dazebot/                 (repo root)
                         GET  /api/auth/{uuid}/{msg}        — picolimbo link-code probe
                         POST /api/auth/introspect          — vetsmod key introspection (X-Introspect-Secret gated)
                         POST /api/internal/rank-alert      — temp-server-forwarded guild rank-change alerts (BAN/KICK)
+                        GET  /api/internal/sudoku/today    — newest daily sudoku, polled by temp-server (X-Introspect-Secret gated)
+                        POST /api/internal/sudoku/submit   — temp-server-forwarded solved board (X-Introspect-Secret gated)
   cogs/
     activity.py        Periodic guild check + role enforcement
     admin.py           Owner/admin commands

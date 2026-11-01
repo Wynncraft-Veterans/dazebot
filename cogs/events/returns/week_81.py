@@ -47,7 +47,6 @@ from __future__ import annotations
 import functools
 import json
 import logging
-import os
 import random
 import re
 import time
@@ -57,7 +56,7 @@ from typing import Optional
 
 import discord
 from discord.ext import commands
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from tortoise.exceptions import OperationalError
 
 from cogs.events.returns import (
@@ -74,6 +73,7 @@ from cogs.events.returns._common import (
 from cogs.events.returns.lib import resolver as _resolver
 from config import CurrConfig
 from lib.auth import _resolve_member
+from lib.fonts import load_font as _load_font
 from lib.mc.wynn_api.guild import get_guild
 from orm import DiscordAccount, MinecraftAccount, Score, WeeklyEvent
 from orm_returns import (
@@ -281,21 +281,6 @@ _PLACEHOLDER_FG = (240, 240, 240)  # off-white
 _PLACEHOLDER_LABEL_SIZE = 72
 _PLACEHOLDER_CAPTION_SIZE = 28
 _PLACEHOLDER_MARGIN = 32  # px padding on each side
-
-# TrueType font search order. First hit wins. fonts-dejavu-core (installed
-# via the vets-deploy Dockerfile) provides the Linux path; Windows dev has
-# Arial. If none are found we fall back to Pillow's bundled default which
-# is legible in Pillow 10+ (the size argument routes through a scalable
-# vector font, not the tiny 8px bitmap of older releases).
-_FONT_PATHS = (
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-    "C:\\Windows\\Fonts\\arialbd.ttf",
-    "C:\\Windows\\Fonts\\arial.ttf",
-    "/System/Library/Fonts/Helvetica.ttc",
-)
 
 # Arbitrary anchor URL: 4 embeds in one message that share the same ``url``
 # collapse into a 2x2 gallery in the Discord client — that's how we get
@@ -552,34 +537,6 @@ def _detect_new_bingos(
 # ---------------------------------------------------------------------------
 # Caption + image stubs
 # ---------------------------------------------------------------------------
-
-
-_FONT_CACHE: dict[int, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
-
-
-def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """Try ``_FONT_PATHS`` in order; cache per size; fall back to Pillow's
-    bundled default (which in Pillow 10+ is a scalable TrueType that
-    accepts a ``size`` argument — legible, unlike the tiny bitmap of older
-    releases).
-    """
-    cached = _FONT_CACHE.get(size)
-    if cached is not None:
-        return cached
-    for path in _FONT_PATHS:
-        if os.path.exists(path):
-            try:
-                font = ImageFont.truetype(path, size)
-                _FONT_CACHE[size] = font
-                return font
-            except OSError:
-                continue
-    try:
-        font = ImageFont.load_default(size=size)
-    except TypeError:  # Pillow < 10 doesn't accept size on load_default
-        font = ImageFont.load_default()
-    _FONT_CACHE[size] = font
-    return font
 
 
 def _wrap_to_width(

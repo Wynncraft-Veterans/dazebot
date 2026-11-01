@@ -95,6 +95,10 @@ class Config:
     # and posts the link-complete/refused confirmation there too.
     LINK_FALLBACK_CHANNEL = 1313786489112494080
 
+    # Daily sudoku posts (cogs/events/returns/week_4.py). Read each tick, so
+    # /config can move it; 0 stops the posts while the puzzle keeps running.
+    SUDOKU_CHANNEL = 1313786489112494080
+
     # The original-tier vanity role (<1.0 / 2013). Users may NOT self-assign this via /vanity;
     # only staff /vanity force can grant it.
     ROLE_VANITY_ORIGINAL = 1318063966420729866
@@ -236,6 +240,7 @@ class DevConfig(Config):
     GUILD_DEAD_ALERT_CHANNEL = GUILD_FULL_ALERT_CHANNEL = 1407388410393399494  # general
     HIATUS_SPOTTED_ALERT_CHANNEL = 1407388410393399494  # general (never post into prod from dev)
     LINK_FALLBACK_CHANNEL = 1407388410393399494  # general
+    SUDOKU_CHANNEL = 1407388410393399494  # general (never post into prod from dev)
     JANITOR_ALERT_CHANNEL = 1407388410393399494  # general (never post into prod from dev)
     GUILD_GENERAL_CHANNEL = 1407388410393399494  # general (dev guild has no #guild-general)
     GUILD_FULL_ALERT_ROLE = 1409300773439012874  # @aaaaa

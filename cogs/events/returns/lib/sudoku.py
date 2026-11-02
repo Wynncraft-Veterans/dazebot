@@ -1,8 +1,9 @@
 """Pure daily-sudoku rules for Return 4, plus the HoDoKu subprocess.
 
 Nothing here touches Discord or the database. The rule check accepts any valid
-grid: uniqueness comes from HoDoKu and was checked once when it was chosen, so
-there is no solver at runtime.
+grid: uniqueness comes from HoDoKu and was checked once when it was chosen. The
+one solver here fills in HoDoKu's puzzles to add clues back, and clues taken
+from the solution keep it the only one.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import random
 import re
 import shutil
 import statistics
@@ -26,6 +28,9 @@ BATCH_HOURS = 2  # solves are posted together on even hours, so on the rollover 
 
 DIFFICULTIES = ("easy", "medium", "hard")  # easiest first; a day moves at most one step
 SCORE_MULTIPLIERS = {"easy": 1, "medium": 3, "hard": 5}
+# HoDoKu's puzzles are minimal, about 24 clues, which players found far too slow
+# even at easy. Clues are added back from the solution up to this many.
+CLUE_TARGETS = {"easy": 44}
 TARGET_MEDIAN_SECONDS = (6 * 60, 10 * 60)  # a median outside this moves the next day's level
 MAX_FILL_SECONDS = 7 * 24 * 60 * 60
 
@@ -95,6 +100,60 @@ def pick_difficulty(previous: Optional[str], seconds: Collection[int]) -> str:
     fast, slow = TARGET_MEDIAN_SECONDS
     median = statistics.median(seconds)
     return step_difficulty(previous, 1 if median < fast else -1 if median > slow else 0)
+
+
+def _peers(i: int) -> set[int]:
+    return {
+        j
+        for j in range(81)
+        if j != i and (j // 9 == i // 9 or j % 9 == i % 9 or (j // 27 == i // 27 and j % 9 // 3 == i % 9 // 3))
+    }
+
+
+_PEERS = [_peers(i) for i in range(81)]
+
+
+def solve(givens: str) -> Optional[str]:
+    """The solution, trying the blank with fewest digits open first; None if none.
+    Clues that already clash give None at once, rather than a search of every grid."""
+    grid = [int(c) for c in givens]
+    if any(grid[i] and grid[i] == grid[j] for i in range(81) for j in _PEERS[i]):
+        return None
+
+    def fill() -> bool:
+        best, best_open = -1, set()
+        for i in range(81):
+            if grid[i]:
+                continue
+            open_ = set(range(1, 10)) - {grid[j] for j in _PEERS[i]}
+            if best < 0 or len(open_) < len(best_open):
+                best, best_open = i, open_
+                if len(open_) <= 1:
+                    break
+        if best < 0:
+            return True
+        for digit in sorted(best_open):
+            grid[best] = digit
+            if fill():
+                return True
+        grid[best] = 0
+        return False
+
+    return "".join(map(str, grid)) if fill() else None
+
+
+def add_clues(givens: str, difficulty: str) -> str:
+    """Fill random blanks from the solution until ``givens`` has its level's
+    ``CLUE_TARGETS`` clues. Seeded by the puzzle, so the same puzzle always gets
+    the same clues. Unchanged for a level with no target."""
+    target = CLUE_TARGETS.get(difficulty)
+    solution = solve(givens) if target else None
+    if solution is None:
+        return givens
+    blanks = [i for i, c in enumerate(givens) if c == "0"]
+    random.Random(givens).shuffle(blanks)
+    shown = set(blanks[: max(0, target - (81 - len(blanks)))])
+    return "".join(solution[i] if i in shown else c for i, c in enumerate(givens))
 
 
 def format_time(seconds: int) -> str:
@@ -202,7 +261,8 @@ async def _first_puzzle(stdout: asyncio.StreamReader, difficulty: str) -> str:
 
 
 async def generate_givens(difficulty: str) -> str:
-    """Run HoDoKu until its first puzzle at ``difficulty``; returns the 81 digits."""
+    """Run HoDoKu until its first puzzle at ``difficulty``; returns the 81 digits,
+    with clues added back for the level by :func:`add_clues`."""
     java = os.environ.get("HODOKU_JAVA")
     jar = os.environ.get("HODOKU_JAR")
     if not java or not jar:
@@ -226,7 +286,7 @@ async def generate_givens(difficulty: str) -> str:
         # draining stdout meanwhile so it can't block on a full pipe.
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(proc.communicate(b"q\n"), STOP_TIMEOUT_SECONDS)
-        return givens
+        return add_clues(givens, difficulty)
     finally:
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):

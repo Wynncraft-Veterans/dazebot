@@ -156,6 +156,33 @@ def test_every_difficulty_has_a_multiplier():
     assert set(sudoku.SCORE_MULTIPLIERS) == set(sudoku.DIFFICULTIES)
 
 
+WIKI_PUZZLE = "530070000600195000098000060800060003400803001700020006060000280000419005000080079"
+NO_ANSWER = "55" + "0" * 79
+
+
+def test_solve_finds_the_solution_or_none():
+    assert sudoku.solve(WIKI_PUZZLE) == SOLVED
+    assert sudoku.solve(NO_ANSWER) is None
+
+
+def test_add_clues_fills_easy_up_to_its_target_from_the_solution():
+    boosted = sudoku.add_clues(WIKI_PUZZLE, "easy")
+    assert 81 - boosted.count("0") == sudoku.CLUE_TARGETS["easy"]
+    # Every original clue is kept, and every new one is the solution's.
+    assert all(c == "0" or b == c for b, c in zip(boosted, WIKI_PUZZLE))
+    assert all(b == "0" or b == s for b, s in zip(boosted, SOLVED))
+    assert sudoku.solve(boosted) == SOLVED
+    # The same puzzle always gets the same clues.
+    assert sudoku.add_clues(WIKI_PUZZLE, "easy") == boosted
+
+
+def test_add_clues_leaves_other_levels_full_puzzles_and_unsolvable_ones():
+    assert sudoku.add_clues(WIKI_PUZZLE, "medium") == WIKI_PUZZLE
+    assert sudoku.add_clues(WIKI_PUZZLE, "hard") == WIKI_PUZZLE
+    assert sudoku.add_clues(SOLVED, "easy") == SOLVED
+    assert sudoku.add_clues(NO_ANSWER, "easy") == NO_ANSWER
+
+
 def test_format_time():
     assert sudoku.format_time(5) == "0:05"
     assert sudoku.format_time(263) == "4:23"
@@ -350,7 +377,7 @@ def hodoku(tmp_path, monkeypatch):
 async def test_generate_reads_the_first_puzzle_among_noise_then_stops(hodoku):
     proc = FakeProc(["Hodoku - v2.6.0", "Starting...", EASY_LINE, "0" * 81 + " #Easy"])
     spawn = hodoku(proc)
-    assert await sudoku.generate_givens("easy") == PUZZLE
+    assert await sudoku.generate_givens("easy") == sudoku.add_clues(PUZZLE, "easy")  # easy gets its clues back
     assert proc.sent == b"q\n"
     assert not proc.killed
     args = spawn.await_args.args
@@ -392,7 +419,7 @@ async def test_generate_keeps_the_puzzle_if_stopping_hangs(hodoku, monkeypatch):
     monkeypatch.setattr(sudoku, "STOP_TIMEOUT_SECONDS", 0.01)
     proc = FakeProc([EASY_LINE], hang_on_stop=True)
     hodoku(proc)
-    assert await sudoku.generate_givens("easy") == PUZZLE
+    assert await sudoku.generate_givens("easy") == sudoku.add_clues(PUZZLE, "easy")  # easy gets its clues back
     assert proc.killed
 
 

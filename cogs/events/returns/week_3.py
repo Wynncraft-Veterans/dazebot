@@ -26,9 +26,14 @@ Hard rules:
   starts (``current_turn_number % 4 == 0``).
 * Eliminated cults (no tiles) have their turns skipped instantly. The
   skipped turns still count toward the loop.
-* Win: dominance (≥``DOMINANCE_TILE_THRESHOLD`` tiles at the end of
-  ``DOMINANCE_LOOP_STREAK`` consecutive loops) OR elimination (single
-  cult with any tiles).
+* Win: dominance (at the end of ``DOMINANCE_LOOP_STREAK`` consecutive
+  loops, hold at least the target *and* strictly more tiles than any
+  other cult) OR elimination (single cult with any tiles). The target
+  starts at ``DOMINANCE_TILE_THRESHOLD`` and, from the loop boundary at
+  ``DOMINANCE_DECAY_START_TURN``, drops by one tile every
+  ``DOMINANCE_DECAY_EVERY_LOOPS`` loops — see :func:`_dominance_threshold`.
+  The decay was added in Nov 2026 when the map had stalemated at five
+  months behind fortress-sized army stacks.
 
 State persistence lives in ``orm_returns.py`` (Return3*); the game can
 survive bot restarts because the tick loop reconstructs everything from
@@ -127,8 +132,13 @@ TURN_DURATION = timedelta(hours=24)
 DRAFTING_DURATION = timedelta(hours=6)
 REINFORCE_AMOUNT = 2
 LOOP_GROWTH = 1
-DOMINANCE_TILE_THRESHOLD = 16  # 64% of 25
+DOMINANCE_TILE_THRESHOLD = 16  # starting target: 64% of 25
 DOMINANCE_LOOP_STREAK = 2
+# Endgame: the first loop boundary judged at a lowered target (the end of
+# loop 44). Must be a multiple of 4 — boundaries are where
+# ``current_turn_number % 4 == 0``.
+DOMINANCE_DECAY_START_TURN = 176
+DOMINANCE_DECAY_EVERY_LOOPS = 2
 STARTING_CAPITAL_ARMIES = 3
 VOTE_TALLY_TOP_N = 5  # how many action lines to surface in the dashboard
 
@@ -147,6 +157,21 @@ _ANNOUNCEMENT_BODY = (
     "selected. Then the turn passes on, and you wait for the map to come "
     "back around. Hold the most ground — or wipe out the other cults — to "
     "win. Wen anticipates this will last for about 4 months, but who knows."
+)
+
+# Posted once by ``~manage_return 3 announceEndgame``. Built from the
+# tunables so it can't drift from the schedule ``_dominance_threshold`` runs.
+_ENDGAME_BODY = (
+    "**Return 3 — the endgame.**\n"
+    "The map has locked into a stalemate, so the win condition is "
+    f"loosening. From the end of loop {DOMINANCE_DECAY_START_TURN // 4}, the "
+    f"dominance target drops from {DOMINANCE_TILE_THRESHOLD} tiles to "
+    f"{DOMINANCE_TILE_THRESHOLD - 1}, then by one more tile every "
+    f"{DOMINANCE_DECAY_EVERY_LOOPS} loops. Your cult wins when, at the end of "
+    f"{DOMINANCE_LOOP_STREAK} loops in a row, it holds at least the target "
+    "**and** more tiles than any other cult. Your pinned dashboard always "
+    "shows the current target. Hold your ground — or take someone else's to "
+    "stop them."
 )
 
 
@@ -433,14 +458,48 @@ def _tile_counts(tiles: Iterable[Return3Tile]) -> Counter[str]:
     return c
 
 
+def _dominance_threshold(boundary_turn: int) -> int:
+    """Tiles a cult must hold to extend its dominance streak at the loop
+    boundary reached when ``current_turn_number`` becomes ``boundary_turn``.
+
+    ``DOMINANCE_TILE_THRESHOLD`` until ``DOMINANCE_DECAY_START_TURN``; from
+    there one tile lower, then one more every
+    ``DOMINANCE_DECAY_EVERY_LOOPS`` loops (176 → 15, 184 → 14, …).
+    """
+    if boundary_turn < DOMINANCE_DECAY_START_TURN:
+        return DOMINANCE_TILE_THRESHOLD
+    loops_in = (boundary_turn - DOMINANCE_DECAY_START_TURN) // 4
+    drop = loops_in // DOMINANCE_DECAY_EVERY_LOOPS + 1
+    return max(1, DOMINANCE_TILE_THRESHOLD - drop)
+
+
+def _next_boundary(turn_number: int) -> int:
+    """The loop boundary that ends the loop ``turn_number`` is in."""
+    return (turn_number // 4 + 1) * 4
+
+
+def _dominance_target_line(state: Return3GameState) -> str:
+    """Player-facing line: the target judged at the end of this loop."""
+    boundary = _next_boundary(state.current_turn_number)
+    line = (
+        f"Dominance target: **{_dominance_threshold(boundary)}** tiles at the "
+        f"end of this loop — hold it with the most tiles for "
+        f"{DOMINANCE_LOOP_STREAK} loops in a row to win."
+    )
+    if boundary >= DOMINANCE_DECAY_START_TURN:
+        line += f" Drops by 1 every {DOMINANCE_DECAY_EVERY_LOOPS} loops."
+    return line
+
+
 def _check_win(
     state: Return3GameState, tiles: list[Return3Tile]
 ) -> Optional[str]:
     """Returns the winning cult name, or None.
 
     Called *after* a loop boundary has just been crossed (i.e. the just-
-    completed turn was the last of a loop). The dominance streak field on
-    ``state`` is updated in place; the caller is responsible for saving.
+    completed turn was the last of a loop), so ``state.current_turn_number``
+    is the boundary. The dominance streak field on ``state`` is updated in
+    place; the caller is responsible for saving.
     """
     counts = _tile_counts(tiles)
     cults_with_tiles = [c for c, n in counts.items() if n > 0]
@@ -449,8 +508,12 @@ def _check_win(
 
     if not counts:
         return None
-    leader, leader_count = counts.most_common(1)[0]
-    if leader_count >= DOMINANCE_TILE_THRESHOLD:
+    ranked = counts.most_common(2)
+    leader, leader_count = ranked[0]
+    # A tie for the lead is no leader. Impossible at 16 of 25 tiles, but
+    # reachable once the decaying target falls to 12 or below.
+    strict = len(ranked) == 1 or ranked[1][1] < leader_count
+    if strict and leader_count >= _dominance_threshold(state.current_turn_number):
         if state.dominance_leader_cult == leader:
             state.dominance_streak_loops += 1
         else:
@@ -606,6 +669,7 @@ async def _render_dashboard_embed(
         if deadline is not None:
             ts = int(deadline.timestamp())
             header += f"\nTurn deadline: <t:{ts}:R>"
+        header += "\n" + _dominance_target_line(state)
         embed = discord.Embed(title=title, description=header, color=0x3498db)
 
     # Map grid + visible armies (shown in all phases for context).
@@ -1416,6 +1480,9 @@ async def handle(ctx: commands.Context) -> None:
         lines.append(f"  {CULT_EMOJI[c]} `{c}`: {counts.get(c, 0)} / {TILE_COUNT}")
     lines.append(f"  ⬜ neutral: {TILE_COUNT - sum(counts.values())}")
 
+    if state.phase == "active":
+        lines.append("\n" + _dominance_target_line(state))
+
     if state.dominance_leader_cult and state.dominance_streak_loops > 0:
         lines.append(
             f"\nDominance streak: `{state.dominance_leader_cult}` × "
@@ -1531,6 +1598,43 @@ async def _manage_start(ctx: commands.Context, args: list[str]) -> None:
 
 
 @register_manage(
+    WEEK, "announceEndgame", tier=Tier.OPERATOR,
+    help="Post the one-time endgame announcement (the dominance target "
+         "starts dropping) into all four cult threads. Active phase only.",
+)
+async def _manage_announce_endgame(ctx: commands.Context, args: list[str]) -> None:
+    persist = is_persist_context(ctx)
+    state = await _load_state()
+    if state is None or state.phase != "active":
+        await send_feedback(
+            ctx, "Return 3 isn't in the active phase — nothing to announce.",
+            persist=persist,
+        )
+        return
+
+    posted: list[str] = []
+    failed: list[str] = []
+    for cult in ALL_CULTS:
+        thread = await _resolve_thread(ctx.bot, CULT_THREADS[cult])
+        if thread is None:
+            failed.append(cult)
+            continue
+        try:
+            await thread.send(
+                _ENDGAME_BODY, allowed_mentions=discord.AllowedMentions.none(),
+            )
+            posted.append(cult)
+        except discord.HTTPException as e:
+            logger.warning("return_3 announceEndgame: post in %s failed: %s", cult, e)
+            failed.append(cult)
+
+    lines = [f"Endgame announced in: {', '.join(posted) or '(none)'}"]
+    if failed:
+        lines.append(f"⚠️ Failed in: {', '.join(failed)}")
+    await send_feedback(ctx, "\n".join(lines), persist=persist)
+
+
+@register_manage(
     WEEK, "status", tier=Tier.ADMIN,
     help="Admin omniscient view: phase, turn, tile counts, dominance "
          "streak, subscriber count, AND a fog-of-war-free copy of the "
@@ -1569,7 +1673,9 @@ async def _manage_status(ctx: commands.Context, args: list[str]) -> None:
         if deadline:
             lines.append(f"Turn deadline: <t:{int(deadline.timestamp())}:R>")
         lines.append(
-            f"Dominance: leader=`{state.dominance_leader_cult}` "
+            f"Dominance: target="
+            f"{_dominance_threshold(_next_boundary(state.current_turn_number))} "
+            f"leader=`{state.dominance_leader_cult}` "
             f"streak={state.dominance_streak_loops}/{DOMINANCE_LOOP_STREAK}"
         )
     else:
